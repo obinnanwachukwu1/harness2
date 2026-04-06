@@ -148,7 +148,7 @@ test('CodexModelClient performs tool round-trips and persists previous_response_
   assert.equal(notebook.getModelSession('session-test')?.previousResponseId, 'resp_2');
   assert.deepEqual(streamed, []);
   assert.equal(emitted[0]?.role, 'tool');
-  assert.match(emitted[0]?.text ?? '', /\[read\]/);
+  assert.match(emitted[0]?.text ?? '', /^@@tool\tread\tRead\(README\.md\)/);
   assert.equal(emitted[1]?.role, 'assistant');
   assert.equal(emitted[1]?.text, 'Done reading the file.');
 });
@@ -248,6 +248,260 @@ test('CodexModelClient surfaces streaming assistant deltas before completion', a
   assert.deepEqual(streamed, ['Hello', 'Hello world']);
   assert.equal(emitted[0]?.role, 'assistant');
   assert.equal(emitted[0]?.text, 'Hello world');
+});
+
+test('CodexModelClient injects a harness hint after extended inline probing', async (t) => {
+  const tempDir = await createTempDir('h2-model-hint-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-test', tempDir);
+
+  const now = 1_700_000_000_000;
+  notebook.upsertOpenAICodexAuth({
+    provider: 'openai-codex',
+    type: 'oauth',
+    accessToken: createUnsignedJwt({
+      exp: Math.floor((now + 3600_000) / 1000)
+    }),
+    refreshToken: 'refresh-token',
+    idToken: createUnsignedJwt({
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: 'acct_123'
+      }
+    }),
+    accountId: 'acct_123',
+    expiresAt: now + 3600_000,
+    createdAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString()
+  });
+
+  const requests: Array<Record<string, unknown>> = [];
+  let responseCount = 0;
+  const auth = new OpenAICodexAuth(notebook, { now: () => now });
+  const client = new CodexModelClient(notebook, auth, {
+    fetchImpl: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      requests.push(body);
+      responseCount += 1;
+
+      if (responseCount === 1) {
+        return new Response(
+          `data: ${JSON.stringify({
+            type: 'response.completed',
+            response: {
+              id: 'resp_1',
+              output: Array.from({ length: 6 }, (_, index) => ({
+                type: 'function_call',
+                call_id: `call_${index + 1}`,
+                name: 'read',
+                arguments: JSON.stringify({ path: `file-${index + 1}.txt` })
+              }))
+            }
+          })}\n\n`,
+          {
+            headers: { 'content-type': 'text/event-stream' }
+          }
+        );
+      }
+
+      return new Response(
+        `data: ${JSON.stringify({
+          type: 'response.completed',
+          response: {
+            id: 'resp_2',
+            output: [
+              {
+                type: 'message',
+                content: [{ type: 'output_text', text: 'Done.' }]
+              }
+            ]
+          }
+        })}\n\n`,
+        {
+          headers: { 'content-type': 'text/event-stream' }
+        }
+      );
+    }
+  });
+
+  const tools: AgentTools = {
+    bash: async () => '',
+    read: async (filePath) => `read ${filePath}`,
+    write: async () => '',
+    edit: async () => '',
+    glob: async () => [],
+    grep: async () => '',
+    spawnExperiment: async () => {
+      throw new Error('not used');
+    },
+    readExperiment: async () => {
+      throw new Error('not used');
+    },
+    authLogin: async () => '',
+    authStatus: async () => '',
+    authLogout: async () => '',
+    getModelSettings: async () => '',
+    setModel: async () => '',
+    setReasoningEffort: async () => ''
+  };
+
+  await client.runTurn(
+    'session-test',
+    'Investigate whether an isolated side task can install a dependency safely.',
+    tools,
+    async () => {},
+    async () => {}
+  );
+
+  assert.equal(requests.length, 2);
+  const secondInput = requests[1]?.input as Array<Record<string, unknown>>;
+  assert.equal(secondInput[0]?.role, 'system');
+  assert.match(String(secondInput[0]?.content ?? ''), /Harness hint:/);
+});
+
+test('CodexModelClient injects a post-spawn wait hint after repeated probing', async (t) => {
+  const tempDir = await createTempDir('h2-model-post-spawn-hint-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-test', tempDir);
+
+  const now = 1_700_000_000_000;
+  notebook.upsertOpenAICodexAuth({
+    provider: 'openai-codex',
+    type: 'oauth',
+    accessToken: createUnsignedJwt({
+      exp: Math.floor((now + 3600_000) / 1000)
+    }),
+    refreshToken: 'refresh-token',
+    idToken: createUnsignedJwt({
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: 'acct_123'
+      }
+    }),
+    accountId: 'acct_123',
+    expiresAt: now + 3600_000,
+    createdAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString()
+  });
+
+  const requests: Array<Record<string, unknown>> = [];
+  let responseCount = 0;
+  const auth = new OpenAICodexAuth(notebook, { now: () => now });
+  const client = new CodexModelClient(notebook, auth, {
+    fetchImpl: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      requests.push(body);
+      responseCount += 1;
+
+      if (responseCount === 1) {
+        return new Response(
+          `data: ${JSON.stringify({
+            type: 'response.completed',
+            response: {
+              id: 'resp_1',
+              output: [
+                {
+                  type: 'function_call',
+                  call_id: 'call_spawn',
+                  name: 'spawn_experiment',
+                  arguments: JSON.stringify({ hypothesis: 'test it' })
+                }
+              ]
+            }
+          })}\n\n`,
+          { headers: { 'content-type': 'text/event-stream' } }
+        );
+      }
+
+      if (responseCount === 2) {
+        return new Response(
+          `data: ${JSON.stringify({
+            type: 'response.completed',
+            response: {
+              id: 'resp_2',
+              output: [
+                {
+                  type: 'function_call',
+                  call_id: 'call_read_1',
+                  name: 'read',
+                  arguments: JSON.stringify({ path: 'a.ts' })
+                },
+                {
+                  type: 'function_call',
+                  call_id: 'call_read_2',
+                  name: 'grep',
+                  arguments: JSON.stringify({ pattern: 'foo' })
+                },
+                {
+                  type: 'function_call',
+                  call_id: 'call_read_3',
+                  name: 'bash',
+                  arguments: JSON.stringify({ command: 'pwd' })
+                }
+              ]
+            }
+          })}\n\n`,
+          { headers: { 'content-type': 'text/event-stream' } }
+        );
+      }
+
+      return new Response(
+        `data: ${JSON.stringify({
+          type: 'response.completed',
+          response: {
+            id: 'resp_3',
+            output: [
+              {
+                type: 'message',
+                content: [{ type: 'output_text', text: 'Done.' }]
+              }
+            ]
+          }
+        })}\n\n`,
+        { headers: { 'content-type': 'text/event-stream' } }
+      );
+    }
+  });
+
+  const tools: AgentTools = {
+    bash: async () => 'pwd',
+    read: async () => 'read result',
+    write: async () => '',
+    edit: async () => '',
+    glob: async () => [],
+    grep: async () => 'grep result',
+    spawnExperiment: async () =>
+      JSON.stringify({
+        id: 'exp-123',
+        status: 'running'
+      }),
+    readExperiment: async () => {
+      throw new Error('not used');
+    },
+    authLogin: async () => '',
+    authStatus: async () => '',
+    authLogout: async () => '',
+    getModelSettings: async () => '',
+    setModel: async () => '',
+    setReasoningEffort: async () => ''
+  };
+
+  await client.runTurn(
+    'session-test',
+    'Investigate whether multiple side tasks can run safely.',
+    tools,
+    async () => {},
+    async () => {}
+  );
+
+  assert.equal(requests.length, 3);
+  const thirdInput = requests[2]?.input as Array<Record<string, unknown>>;
+  assert.equal(thirdInput[0]?.role, 'system');
+  assert.match(String(thirdInput[0]?.content ?? ''), /You already have a live experiment/);
 });
 
 test('CodexModelClient surfaces streaming content-part events before completion', async (t) => {
@@ -778,4 +1032,100 @@ test('CodexModelClient turns tool-call failures into tool outputs so the loop ca
   assert.match(emitted[0]?.text ?? '', /Only 5 experiments can run at a time/);
   assert.equal(emitted[1]?.role, 'assistant');
   assert.match(emitted[1]?.text ?? '', /concurrency limit was reached/);
+});
+
+test('CodexModelClient retries transient 500 responses before succeeding', async (t) => {
+  const tempDir = await createTempDir('h2-model-retry-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-test', tempDir);
+
+  const now = 1_700_000_000_000;
+  notebook.upsertOpenAICodexAuth({
+    provider: 'openai-codex',
+    type: 'oauth',
+    accessToken: createUnsignedJwt({
+      exp: Math.floor((now + 3600_000) / 1000)
+    }),
+    refreshToken: 'refresh-token',
+    idToken: createUnsignedJwt({
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: 'acct_123'
+      }
+    }),
+    accountId: 'acct_123',
+    expiresAt: now + 3600_000,
+    createdAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString()
+  });
+
+  let attempts = 0;
+  const auth = new OpenAICodexAuth(notebook, { now: () => now });
+  const client = new CodexModelClient(notebook, auth, {
+    fetchImpl: async () => {
+      attempts += 1;
+      if (attempts < 3) {
+        return new Response('temporary server error', {
+          status: 500,
+          statusText: 'Internal Server Error',
+          headers: { 'content-type': 'text/plain' }
+        });
+      }
+
+      return new Response(
+        `data: ${JSON.stringify({
+          type: 'response.completed',
+          response: {
+            id: 'resp_1',
+            output: [
+              {
+                type: 'message',
+                content: [{ type: 'output_text', text: 'Recovered after retry.' }]
+              }
+            ]
+          }
+        })}\n\n`,
+        {
+          headers: { 'content-type': 'text/event-stream' }
+        }
+      );
+    }
+  });
+
+  const emitted: Array<{ role: TranscriptRole; text: string }> = [];
+  const tools: AgentTools = {
+    bash: async () => '',
+    read: async () => '',
+    write: async () => '',
+    edit: async () => '',
+    glob: async () => [],
+    grep: async () => '',
+    spawnExperiment: async () => {
+      throw new Error('not used');
+    },
+    readExperiment: async () => {
+      throw new Error('not used');
+    },
+    authLogin: async () => '',
+    authStatus: async () => '',
+    authLogout: async () => '',
+    getModelSettings: async () => '',
+    setModel: async () => '',
+    setReasoningEffort: async () => ''
+  };
+
+  await client.runTurn(
+    'session-test',
+    'hello',
+    tools,
+    async (role, text) => {
+      emitted.push({ role, text });
+    }
+  );
+
+  assert.equal(attempts, 3);
+  assert.equal(emitted[0]?.role, 'assistant');
+  assert.equal(emitted[0]?.text, 'Recovered after retry.');
 });

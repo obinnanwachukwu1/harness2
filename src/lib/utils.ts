@@ -1,5 +1,7 @@
 import { randomUUID } from 'node:crypto';
 
+export const DEFAULT_EXPERIMENT_BUDGET_TOKENS = 50_000;
+
 export function nowIso(): string {
   return new Date().toISOString();
 }

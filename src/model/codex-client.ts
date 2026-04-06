@@ -1,7 +1,8 @@
 import { randomUUID } from 'node:crypto';
 
 import { OPENAI_CODEX_ORIGINATOR, OpenAICodexAuth } from '../auth/openai-codex.js';
-import { clampText, estimateTokens, nowIso } from '../lib/utils.js';
+import { ExperimentBudgetExceededError } from '../experiments/experiment-manager.js';
+import { clampText, DEFAULT_EXPERIMENT_BUDGET_TOKENS, estimateTokens, nowIso } from '../lib/utils.js';
 import { EXPERIMENT_SUBAGENT_PROMPT, MAIN_AGENT_PROMPT } from './codex-prompt.js';
 import { Notebook } from '../storage/notebook.js';
 import type {
@@ -16,8 +17,8 @@ const DEFAULT_MODEL = process.env.H2_CODEX_MODEL ?? 'gpt-5.4';
 const DEFAULT_REASONING_EFFORT = normalizeReasoningEffort(process.env.H2_REASONING_EFFORT) ?? 'medium';
 const DEFAULT_ENDPOINT =
   process.env.H2_CODEX_BASE_URL ?? 'https://chatgpt.com/backend-api/codex/responses';
-const DEFAULT_MAX_MODEL_STEPS = 24;
 const MAX_MODEL_STEPS = normalizeMaxModelSteps(process.env.H2_MAX_MODEL_STEPS);
+const MAX_TRANSIENT_MODEL_RETRIES = 2;
 
 interface CodexModelClientOptions {
   fetchImpl?: typeof fetch;
@@ -106,13 +107,33 @@ export class CodexModelClient {
       requestItems = this.notebook.buildModelRequestHistory(sessionId);
     }
 
-    for (let step = 0; step < MAX_MODEL_STEPS; step += 1) {
+    for (let step = 0; ; step += 1) {
+      if (MAX_MODEL_STEPS !== null && step >= MAX_MODEL_STEPS) {
+        await emit(
+          'assistant',
+          `Stopped after ${MAX_MODEL_STEPS} model/tool steps. Increase H2_MAX_MODEL_STEPS if this turn needs more tool work.`
+        );
+        return;
+      }
+
+      const hints = [
+        shouldInjectExperimentHint(inputText, requestItems, toolDefinitions)
+          ? buildExperimentHint()
+          : null,
+        shouldInjectPostSpawnWaitHint(requestItems) ? buildPostSpawnWaitHint() : null
+      ].filter((value): value is string => Boolean(value));
       const response = await this.createResponse({
         accessToken,
         accountId: authRecord.accountId,
         sessionId,
         settings,
-        input: requestItems.map(toResponseInputItem),
+        input: [
+          ...hints.map((hint) => ({
+            role: 'system' as const,
+            content: hint
+          })),
+          ...requestItems.map(toResponseInputItem)
+        ],
         onAssistantStream,
         toolDefinitions,
         instructions
@@ -173,6 +194,7 @@ export class CodexModelClient {
           'tool',
           formatToolOutput(
             call.name,
+            call.rawArguments,
             result.failed ? `${result.output}\nTool execution failed.` : result.output
           )
         );
@@ -180,11 +202,6 @@ export class CodexModelClient {
 
       requestItems = this.notebook.buildModelRequestHistory(sessionId);
     }
-
-    await emit(
-      'assistant',
-      `Stopped after ${MAX_MODEL_STEPS} model/tool steps. Increase H2_MAX_MODEL_STEPS if this turn needs more tool work.`
-    );
   }
 
   getSettings(sessionId: string): ModelSessionRecord {
@@ -272,7 +289,7 @@ export class CodexModelClient {
       };
     }
 
-    const response = await this.fetchImpl(this.endpoint, {
+    const response = await this.fetchWithRetries(this.endpoint, {
       method: 'POST',
       headers,
       body: JSON.stringify(body)
@@ -297,6 +314,28 @@ export class CodexModelClient {
 
   private persistSession(record: ModelSessionRecord): void {
     this.notebook.upsertModelSession(record);
+  }
+
+  private async fetchWithRetries(input: RequestInfo | URL, init: RequestInit): Promise<Response> {
+    let attempt = 0;
+    let lastResponse: Response | null = null;
+
+    while (attempt <= MAX_TRANSIENT_MODEL_RETRIES) {
+      const response = await this.fetchImpl(input, init);
+      if (response.status !== 500) {
+        return response;
+      }
+
+      lastResponse = response;
+      if (attempt === MAX_TRANSIENT_MODEL_RETRIES) {
+        return response;
+      }
+
+      attempt += 1;
+      await delay(250 * attempt);
+    }
+
+    return lastResponse ?? this.fetchImpl(input, init);
   }
 
   private persistHistoryItem(sessionId: string, item: ModelHistoryItem): void {
@@ -353,11 +392,24 @@ async function executeToolCall(call: ToolCall, tools: AgentTools): Promise<strin
       const experiment = await tools.spawnExperiment({
         hypothesis: readStringArg(args, 'hypothesis'),
         context: readOptionalStringArg(args, 'context'),
-        budgetTokens: readOptionalNumberArg(args, 'budgetTokens') ?? 1200,
+        budgetTokens:
+          readOptionalNumberArg(args, 'budgetTokens') ?? DEFAULT_EXPERIMENT_BUDGET_TOKENS,
         preserve: readOptionalBooleanArg(args, 'preserve') ?? false
       });
       return JSON.stringify(experiment, null, 2);
     }
+    case 'extend_experiment_budget':
+      if (!tools.extendExperimentBudget) {
+        throw new Error('extend_experiment_budget is not available in this session.');
+      }
+      return JSON.stringify(
+        await tools.extendExperimentBudget(
+          readStringArg(args, 'experimentId'),
+          readOptionalNumberArg(args, 'additionalTokens') ?? 0
+        ),
+        null,
+        2
+      );
     case 'read_experiment':
       return JSON.stringify(
         await tools.readExperiment(readStringArg(args, 'experimentId')),
@@ -371,7 +423,7 @@ async function executeToolCall(call: ToolCall, tools: AgentTools): Promise<strin
       return JSON.stringify(
         await tools.waitExperiment(
           readStringArg(args, 'experimentId'),
-          readOptionalNumberArg(args, 'timeoutMs')
+          normalizeExperimentWaitTimeout(readOptionalNumberArg(args, 'timeoutMs'))
         ),
         null,
         2
@@ -421,6 +473,9 @@ async function executeToolCall(call: ToolCall, tools: AgentTools): Promise<strin
             | 'inconclusive',
           summary: readStringArg(args, 'summary'),
           discovered: readOptionalStringArrayArg(args, 'discovered') ?? [],
+          artifacts: readOptionalStringArrayArg(args, 'artifacts') ?? [],
+          constraints: readOptionalStringArrayArg(args, 'constraints') ?? [],
+          confidenceNote: readOptionalStringArg(args, 'confidenceNote'),
           promote: readOptionalBooleanArg(args, 'promote') ?? false
         }),
         null,
@@ -441,6 +496,10 @@ async function executeToolCallSafely(
       failed: false
     };
   } catch (error) {
+    if (error instanceof ExperimentBudgetExceededError) {
+      throw error;
+    }
+
     const message = error instanceof Error ? error.message : String(error);
     return {
       output: JSON.stringify(
@@ -563,9 +622,54 @@ function extractToolCalls(response: ResponsePayload): ToolCall[] {
   return calls;
 }
 
-function formatToolOutput(name: string, output: string): string {
+function formatToolOutput(name: string, rawArguments: string, output: string): string {
   // TODO: spill oversized tool results to disk and replace them with a short inline pointer.
-  return `[${name}]\n${clampText(output, 2400)}`;
+  return `@@tool\t${name}\t${formatToolHeader(name, rawArguments)}\n${clampText(output, 2400)}`;
+}
+
+function formatToolHeader(name: string, rawArguments: string): string {
+  const args = parseArguments(rawArguments);
+
+  switch (name) {
+    case 'bash':
+      return `Bash(${compactTextForHeader(readStringArg(args, 'command'), 72)})`;
+    case 'read':
+      return `Read(${readStringArg(args, 'path')})`;
+    case 'write':
+      return `Write(${readStringArg(args, 'path')})`;
+    case 'edit':
+      return `Edit(${readStringArg(args, 'path')})`;
+    case 'glob':
+      return `Glob(${readStringArg(args, 'pattern')})`;
+    case 'grep': {
+      const target = readOptionalStringArg(args, 'target');
+      return target
+        ? `Grep(${readStringArg(args, 'pattern')} in ${target})`
+        : `Grep(${readStringArg(args, 'pattern')})`;
+    }
+    case 'spawn_experiment':
+      return `experiment spawn(${compactTextForHeader(readStringArg(args, 'hypothesis'), 64)})`;
+    case 'read_experiment':
+      return `experiment read(${readStringArg(args, 'experimentId')})`;
+    case 'wait_experiment':
+      return `experiment wait(${readStringArg(args, 'experimentId')})`;
+    case 'search_experiments': {
+      const query = readOptionalStringArg(args, 'query');
+      return query ? `experiment search(${compactTextForHeader(query, 56)})` : 'experiment search()';
+    }
+    case 'extend_experiment_budget':
+      return `experiment budget(${readStringArg(args, 'experimentId')})`;
+    case 'resolve_experiment':
+      return `experiment resolve(${readStringArg(args, 'experimentId')})`;
+    case 'compact':
+      return `Compact(${compactTextForHeader(readStringArg(args, 'goal'), 56)})`;
+    default:
+      return name;
+  }
+}
+
+function compactTextForHeader(text: string, limit: number): string {
+  return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
 }
 
 function estimateHistoryItemTokens(item: ModelHistoryItem): number {
@@ -618,14 +722,14 @@ function normalizeReasoningEffort(value: string | undefined): 'low' | 'medium' |
   return null;
 }
 
-function normalizeMaxModelSteps(value: string | undefined): number {
+function normalizeMaxModelSteps(value: string | undefined): number | null {
   if (!value) {
-    return DEFAULT_MAX_MODEL_STEPS;
+    return null;
   }
 
   const parsed = Number.parseInt(value, 10);
   if (Number.isNaN(parsed) || parsed < 1) {
-    return DEFAULT_MAX_MODEL_STEPS;
+    return null;
   }
 
   return parsed;
@@ -805,11 +909,124 @@ function parseSseEvent(chunk: string): Record<string, unknown> | null {
   }
 }
 
+function delay(ms: number): Promise<void> {
+  return new Promise((resolve) => {
+    setTimeout(resolve, ms);
+  });
+}
+
+function shouldInjectExperimentHint(
+  inputText: string,
+  requestItems: ModelHistoryItem[],
+  toolDefinitions: readonly ToolDefinition[]
+): boolean {
+  if (!toolDefinitions.some((tool) => tool.name === 'spawn_experiment')) {
+    return false;
+  }
+
+  const currentTurnItems = getCurrentTurnItems(requestItems);
+  const functionCalls = currentTurnItems.filter(
+    (item): item is Extract<ModelHistoryItem, { type: 'function_call' }> => item.type === 'function_call'
+  );
+  const inlineProbeCount = functionCalls.filter((item) =>
+    ['bash', 'read', 'glob', 'grep'].includes(item.name)
+  ).length;
+
+  if (inlineProbeCount < 4) {
+    return false;
+  }
+
+  if (functionCalls.some((item) => item.name === 'spawn_experiment')) {
+    return false;
+  }
+
+  if (functionCalls.some((item) => ['write', 'edit'].includes(item.name))) {
+    return false;
+  }
+
+  const text = inputText.toLowerCase();
+  const experimentFriendly =
+    /(isolat|compat|version|integrat|runtime|concurr|worktree|dependency|install|behavior|safely|evidence|uncertainty|side task|background task)/i.test(
+      text
+    );
+  const externalObserver =
+    /(crash|restart|startup|rehydrat|reconcile|ownership|recover after process death|main process dies)/i.test(
+      text
+    );
+
+  return experimentFriendly && !externalObserver;
+}
+
+function shouldInjectPostSpawnWaitHint(requestItems: ModelHistoryItem[]): boolean {
+  const currentTurnItems = getCurrentTurnItems(requestItems);
+  const functionCalls = currentTurnItems.filter(
+    (item): item is Extract<ModelHistoryItem, { type: 'function_call' }> => item.type === 'function_call'
+  );
+  const lastSpawnIndex = functionCalls.map((item) => item.name).lastIndexOf('spawn_experiment');
+  if (lastSpawnIndex === -1) {
+    return false;
+  }
+
+  const afterSpawn = functionCalls.slice(lastSpawnIndex + 1);
+  if (afterSpawn.some((item) => item.name === 'wait_experiment')) {
+    return false;
+  }
+
+  const repeatedInlineProbing = afterSpawn.filter((item) =>
+    ['bash', 'read', 'glob', 'grep'].includes(item.name)
+  ).length;
+
+  return repeatedInlineProbing >= 3;
+}
+
+function getCurrentTurnItems(requestItems: ModelHistoryItem[]): ModelHistoryItem[] {
+  for (let index = requestItems.length - 1; index >= 0; index -= 1) {
+    const item = requestItems[index];
+    if (item?.type === 'message' && item.role === 'user') {
+      return requestItems.slice(index + 1);
+    }
+  }
+
+  return requestItems;
+}
+
+function buildExperimentHint(): string {
+  return [
+    'Harness hint:',
+    'You have spent several inline tool calls gathering evidence without yet running an experiment.',
+    'If you already have enough context to state one concrete falsifiable experiment, stop gathering background and run it now.',
+    "If the open question is inside the isolated worktree/subagent boundary, prefer one narrow spawn_experiment over continued bash/read/grep probing.",
+    'If the question requires an external observer outside the side-task lifecycle, continue with direct probing instead.'
+  ].join(' ');
+}
+
+function buildPostSpawnWaitHint(): string {
+  return [
+    'Harness hint:',
+    'You already have a live experiment on this hypothesis.',
+    'Prefer wait_experiment or one small external-observer corroboration check over continued background reading or probing about the same question.',
+    'Use read_experiment only if you need the full durable record rather than a lightweight live status check.'
+  ].join(' ');
+}
+
+function normalizeExperimentWaitTimeout(timeoutMs: number | undefined): number {
+  if (timeoutMs === undefined) {
+    return 5_000;
+  }
+
+  if (!Number.isFinite(timeoutMs)) {
+    return 5_000;
+  }
+
+  return Math.max(3_000, Math.floor(timeoutMs));
+}
+
 export const MAIN_TOOL_DEFINITIONS = [
   {
     type: 'function',
     name: 'bash',
-    description: 'Run a shell command in the current workspace.',
+    description:
+      'Run a shell command in the current workspace. Prefer this for direct repo inspection, tiny inline probes, or questions that require an external observer outside the experiment lifecycle, such as crash/restart or startup reconciliation behavior.',
     parameters: {
       type: 'object',
       properties: {
@@ -822,7 +1039,8 @@ export const MAIN_TOOL_DEFINITIONS = [
   {
     type: 'function',
     name: 'read',
-    description: 'Read a file from the workspace.',
+    description:
+      'Read a specific file from the workspace. Prefer targeted files that are likely to answer the question directly; avoid broad file dumping when a smaller read would do.',
     parameters: {
       type: 'object',
       properties: {
@@ -864,7 +1082,8 @@ export const MAIN_TOOL_DEFINITIONS = [
   {
     type: 'function',
     name: 'glob',
-    description: 'Find files using a glob pattern.',
+    description:
+      'Find files using a glob pattern. Keep patterns narrow and purposeful; avoid broad scans of generated output, dependency directories, or node_modules unless they are directly relevant.',
     parameters: {
       type: 'object',
       properties: {
@@ -877,7 +1096,8 @@ export const MAIN_TOOL_DEFINITIONS = [
   {
     type: 'function',
     name: 'grep',
-    description: 'Search files for a text pattern.',
+    description:
+      'Search files for a text pattern. Prefer targeted paths or symbols over repo-wide fishing, and avoid searching dependency trees unless the question specifically depends on them.',
     parameters: {
       type: 'object',
       properties: {
@@ -891,7 +1111,8 @@ export const MAIN_TOOL_DEFINITIONS = [
   {
     type: 'function',
     name: 'spawn_experiment',
-    description: 'Run a scoped experiment in a separate git worktree.',
+    description:
+      'Run a scoped experiment in a separate git worktree. Use this when the uncertainty is load-bearing and can be directly observed by a bounded subagent operating inside an isolated worktree. After a brief orientation pass, if you can state one concrete falsifiable experiment, prefer running it over continued background gathering. Do not use this for questions that require an external observer outside the side-task lifecycle. If you do not have a strong reason to choose a smaller number, use a 50000 token budget.',
     parameters: {
       type: 'object',
       properties: {
@@ -906,8 +1127,23 @@ export const MAIN_TOOL_DEFINITIONS = [
   },
   {
     type: 'function',
+    name: 'extend_experiment_budget',
+    description: 'Add more estimated tokens to a paused or running experiment budget.',
+    parameters: {
+      type: 'object',
+      properties: {
+        experimentId: { type: 'string' },
+        additionalTokens: { type: 'number' }
+      },
+      required: ['experimentId', 'additionalTokens'],
+      additionalProperties: false
+    }
+  },
+  {
+    type: 'function',
     name: 'read_experiment',
-    description: 'Read the status and observations for a previously spawned experiment.',
+    description:
+      'Read the full durable record for a previously spawned experiment, including observations and final details. Prefer wait_experiment for routine live checks while an experiment is still running.',
     parameters: {
       type: 'object',
       properties: {
@@ -920,7 +1156,8 @@ export const MAIN_TOOL_DEFINITIONS = [
   {
     type: 'function',
     name: 'wait_experiment',
-    description: 'Wait for a running experiment to resolve, up to a bounded timeout in milliseconds.',
+    description:
+      'Wait for a running experiment to resolve, up to a bounded timeout in milliseconds. This is the default follow-up after spawning when the experiment is the main evidence source. If timeoutMs is omitted, a longer default wait is used; very short waits are rounded up.',
     parameters: {
       type: 'object',
       properties: {
@@ -958,6 +1195,39 @@ export const MAIN_TOOL_DEFINITIONS = [
       required: ['goal', 'completed', 'next'],
       additionalProperties: false
     }
+  },
+  {
+    type: 'function',
+    name: 'resolve_experiment',
+    description:
+      'Resolve an experiment with a final verdict, summary, and any important findings, artifacts, constraints, or confidence notes.',
+    parameters: {
+      type: 'object',
+      properties: {
+        experimentId: { type: 'string' },
+        verdict: {
+          type: 'string',
+          enum: ['validated', 'invalidated', 'inconclusive']
+        },
+        summary: { type: 'string' },
+        discovered: {
+          type: 'array',
+          items: { type: 'string' }
+        },
+        artifacts: {
+          type: 'array',
+          items: { type: 'string' }
+        },
+        constraints: {
+          type: 'array',
+          items: { type: 'string' }
+        },
+        confidenceNote: { type: 'string' },
+        promote: { type: 'boolean' }
+      },
+      required: ['experimentId', 'verdict', 'summary'],
+      additionalProperties: false
+    }
   }
 ] as const;
 
@@ -989,11 +1259,12 @@ export const EXPERIMENT_TOOL_DEFINITIONS = [
       additionalProperties: false
     }
   },
-  MAIN_TOOL_DEFINITIONS[7],
+  MAIN_TOOL_DEFINITIONS[8],
   {
     type: 'function',
     name: 'resolve_experiment',
-    description: 'Resolve the current experiment with a verdict and summary.',
+    description:
+      'Resolve the current experiment with a verdict, summary, and any important findings, artifacts, constraints, or confidence notes.',
     parameters: {
       type: 'object',
       properties: {
@@ -1007,6 +1278,15 @@ export const EXPERIMENT_TOOL_DEFINITIONS = [
           type: 'array',
           items: { type: 'string' }
         },
+        artifacts: {
+          type: 'array',
+          items: { type: 'string' }
+        },
+        constraints: {
+          type: 'array',
+          items: { type: 'string' }
+        },
+        confidenceNote: { type: 'string' },
         promote: { type: 'boolean' }
       },
       required: ['experimentId', 'verdict', 'summary'],
