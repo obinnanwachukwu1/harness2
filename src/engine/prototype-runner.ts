@@ -9,8 +9,15 @@ const HELP_TEXT = [
   '/edit <path> :: <find> => <replace>',
   '/glob <pattern>',
   '/grep <pattern> [path]',
-  '/spawn --hypothesis "..." --cmd "..." [--budget 1200] [--context "..."] [--preserve]',
+  '/spawn --hypothesis "..." [--budget 1200] [--context "..."] [--preserve]',
   '/experiment <experimentId>',
+  '/experiments [query]',
+  '/auth login',
+  '/auth status',
+  '/auth logout',
+  '/model',
+  '/model <name>',
+  '/reasoning <off|low|medium|high>',
   '/quit'
 ].join('\n');
 
@@ -23,10 +30,7 @@ export class PrototypeRunner {
     }
 
     if (!trimmed.startsWith('/')) {
-      await context.emit(
-        'assistant',
-        'Prototype runner has no model backend yet. Use /help to drive the tool surface.'
-      );
+      await context.runModel(trimmed);
       return;
     }
 
@@ -132,12 +136,11 @@ export class PrototypeRunner {
       case 'spawn': {
         const flags = parseFlags(rawArgs);
         const hypothesis = flags.get('hypothesis');
-        const experimentCommand = flags.get('cmd');
 
-        if (!hypothesis || !experimentCommand) {
+        if (!hypothesis) {
           await context.emit(
             'assistant',
-            'Usage: /spawn --hypothesis "..." --cmd "..." [--budget 1200] [--context "..."] [--preserve]'
+            'Usage: /spawn --hypothesis "..." [--budget 1200] [--context "..."] [--preserve]'
           );
           return;
         }
@@ -151,9 +154,8 @@ export class PrototypeRunner {
 
         const experiment = await context.tools.spawnExperiment({
           hypothesis,
-          command: experimentCommand,
           context: flags.get('context'),
-          budget,
+          budgetTokens: budget,
           preserve: flags.has('preserve')
         });
 
@@ -173,6 +175,75 @@ export class PrototypeRunner {
 
         const details = await context.tools.readExperiment(experimentId);
         await context.emit('assistant', formatExperiment(details));
+        return;
+      }
+
+      case 'experiments': {
+        if (!context.tools.searchExperiments) {
+          await context.emit('assistant', 'Experiment search is not available.');
+          return;
+        }
+
+        const query = rawArgs.join(' ').trim();
+        const matches = await context.tools.searchExperiments(query || undefined);
+        if (matches.length === 0) {
+          await context.emit('assistant', query ? `No experiments matched "${query}".` : 'No experiments found.');
+          return;
+        }
+
+        const lines = matches.slice(0, 10).map((experiment) => {
+          const summary = experiment.summary || experiment.hypothesis;
+          return `${experiment.experimentId}  ${experiment.status}  ${summary}`;
+        });
+        await context.emit('assistant', lines.join('\n'));
+        return;
+      }
+
+      case 'auth': {
+        const subcommand = rawArgs[0];
+        if (subcommand === 'login') {
+          await context.emit('assistant', 'Starting OpenAI Codex OAuth in your browser.');
+          const output = await context.tools.authLogin();
+          await context.emit('assistant', output);
+          return;
+        }
+
+        if (subcommand === 'status') {
+          const output = await context.tools.authStatus();
+          await context.emit('assistant', output);
+          return;
+        }
+
+        if (subcommand === 'logout') {
+          const output = await context.tools.authLogout();
+          await context.emit('assistant', output);
+          return;
+        }
+
+        await context.emit('assistant', 'Usage: /auth <login|status|logout>');
+        return;
+      }
+
+      case 'model': {
+        const modelName = rawArgs[0];
+        const output = modelName
+          ? await context.tools.setModel(modelName)
+          : await context.tools.getModelSettings();
+        await context.emit('assistant', output);
+        return;
+      }
+
+      case 'reasoning': {
+        const effort = rawArgs[0];
+        if (!effort || !['off', 'low', 'medium', 'high'].includes(effort)) {
+          await context.emit('assistant', 'Usage: /reasoning <off|low|medium|high>');
+          return;
+        }
+
+        const output = await context.tools.setReasoningEffort(
+          effort as 'off' | 'low' | 'medium' | 'high'
+        );
+        await context.emit('assistant', output);
         return;
       }
 
@@ -231,19 +302,30 @@ function formatExperiment(details: ExperimentDetails): string {
     `Experiment ${details.id}`,
     `status: ${details.status}`,
     `hypothesis: ${details.hypothesis}`,
-    `command: ${details.command}`,
     `base: ${details.baseCommitSha}`,
     `worktree: ${details.worktreePath}`,
-    `budget: ${details.tokensUsed}/${details.budget} estimated tokens`
+    `budget: ${details.tokensUsed}/${details.budget} estimated tokens`,
+    `budget_breakdown: context ${details.contextTokensUsed}, tool_output ${details.toolOutputTokensUsed}, observations ${details.observationTokensUsed}`
   ];
+
+  if (details.promote) {
+    header.push('promote: true');
+  }
 
   if (details.finalSummary) {
     header.push(`summary: ${details.finalSummary}`);
   }
 
+  if (details.discovered.length > 0) {
+    header.push(`discovered: ${details.discovered.join(' | ')}`);
+  }
+
   const observations = details.observations
     .slice(-10)
-    .map((entry) => `[${entry.createdAt}] ${entry.message}`)
+    .map((entry) => {
+      const tags = entry.tags.length > 0 ? ` ${entry.tags.map((tag) => `#${tag}`).join(' ')}` : '';
+      return `[${entry.createdAt}]${tags}\n${entry.message}`;
+    })
     .join('\n\n');
 
   return observations ? `${header.join('\n')}\n\n${observations}` : header.join('\n');

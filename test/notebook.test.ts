@@ -17,13 +17,29 @@ test('Notebook persists transcript and experiment details', async (t) => {
   const session = notebook.createSession('session-test', tempDir);
   notebook.appendTranscript(session.id, 'user', 'hello');
   notebook.appendTranscript(session.id, 'assistant', 'world');
+  notebook.appendModelHistoryItem(session.id, {
+    type: 'message',
+    role: 'user',
+    content: 'hello'
+  });
+  notebook.appendModelHistoryItem(session.id, {
+    type: 'function_call',
+    call_id: 'call_1',
+    name: 'read',
+    arguments: '{"path":"README.md"}'
+  });
+  notebook.appendModelHistoryItem(session.id, {
+    type: 'function_call_output',
+    call_id: 'call_1',
+    output: 'README content'
+  });
 
   const timestamp = nowIso();
   const experiment: ExperimentRecord = {
     id: 'exp-test',
     sessionId: session.id,
     hypothesis: 'writing observations is durable',
-    command: 'node --version',
+    command: 'subagent',
     context: 'test context',
     baseCommitSha: 'abc123',
     branchName: 'h2-exp-test',
@@ -31,24 +47,273 @@ test('Notebook persists transcript and experiment details', async (t) => {
     status: 'validated',
     budget: 1200,
     tokensUsed: 42,
+    contextTokensUsed: 10,
+    toolOutputTokensUsed: 20,
+    observationTokensUsed: 12,
     preserve: false,
     createdAt: timestamp,
     updatedAt: timestamp,
     resolvedAt: timestamp,
     finalVerdict: 'validated',
-    finalSummary: 'looks good'
+    finalSummary: 'looks good',
+    discovered: ['readme note'],
+    promote: true
   };
 
   notebook.upsertExperiment(experiment);
-  notebook.appendObservation(experiment.id, 'first observation');
+  notebook.appendObservation(experiment.id, 'first observation', ['discovery']);
 
   const snapshot = notebook.getSnapshot(session.id, false, 'idle');
   assert.equal(snapshot.transcript.length, 2);
   assert.equal(snapshot.experiments.length, 1);
   assert.equal(snapshot.experiments[0]?.id, experiment.id);
+  assert.equal(notebook.listModelHistory(session.id).length, 3);
+  assert.deepEqual(notebook.listModelHistory(session.id)[1], {
+    type: 'function_call',
+    call_id: 'call_1',
+    name: 'read',
+    arguments: '{"path":"README.md"}'
+  });
 
   const details = notebook.getExperimentDetails(experiment.id);
   assert.ok(details);
   assert.equal(details?.observations.length, 1);
   assert.equal(details?.observations[0]?.message, 'first observation');
+  assert.deepEqual(details?.observations[0]?.tags, ['discovery']);
+  assert.deepEqual(details?.discovered, ['readme note']);
+  assert.equal(details?.promote, true);
+
+  notebook.upsertOpenAICodexAuth({
+    provider: 'openai-codex',
+    type: 'oauth',
+    accessToken: 'access',
+    refreshToken: 'refresh',
+    idToken: 'id',
+    accountId: 'acct',
+    expiresAt: 123,
+    createdAt: timestamp,
+    updatedAt: timestamp
+  });
+
+  assert.equal(notebook.getOpenAICodexAuth()?.accountId, 'acct');
+  assert.equal(notebook.deleteOpenAICodexAuth(), true);
+  assert.equal(notebook.getOpenAICodexAuth(), null);
+
+  notebook.upsertModelSession({
+    sessionId: session.id,
+    provider: 'openai-codex',
+    model: 'gpt-5-codex',
+    reasoningEffort: 'medium',
+    previousResponseId: 'resp_123',
+    updatedAt: timestamp
+  });
+
+  assert.equal(notebook.getModelSession(session.id)?.previousResponseId, 'resp_123');
+  assert.equal(notebook.getModelSession(session.id)?.reasoningEffort, 'medium');
+  assert.equal(notebook.searchExperimentDetails(session.id, 'observation').length, 1);
+  assert.deepEqual(notebook.searchExperimentSummaries(session.id, 'readme'), [
+    {
+      experimentId: 'exp-test',
+      hypothesis: 'writing observations is durable',
+      status: 'validated',
+      summary: 'looks good',
+      discovered: ['readme note']
+    }
+  ]);
+});
+
+test('Notebook searchExperimentSummaries finds durable experiment summaries without logs', async (t) => {
+  const tempDir = await createTempDir('h2-notebook-search-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+
+  const session = notebook.createSession('session-search', tempDir);
+  const timestamp = nowIso();
+
+  notebook.upsertExperiment({
+    id: 'exp-alpha',
+    sessionId: session.id,
+    hypothesis: 'check oauth callback behavior',
+    command: 'subagent',
+    context: '',
+    baseCommitSha: 'abc123',
+    branchName: 'h2-exp-alpha',
+    worktreePath: path.join(tempDir, 'alpha'),
+    status: 'validated',
+    budget: 100,
+    tokensUsed: 25,
+    contextTokensUsed: 5,
+    toolOutputTokensUsed: 10,
+    observationTokensUsed: 10,
+    preserve: false,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    resolvedAt: timestamp,
+    finalVerdict: 'validated',
+    finalSummary: 'OAuth callback reached localhost',
+    discovered: ['callback server binds on localhost'],
+    promote: false
+  });
+  notebook.appendObservation('exp-alpha', 'Observed callback roundtrip in browser flow.', ['discovery']);
+
+  notebook.upsertExperiment({
+    id: 'exp-beta',
+    sessionId: session.id,
+    hypothesis: 'measure token budgeting',
+    command: 'subagent',
+    context: '',
+    baseCommitSha: 'def456',
+    branchName: 'h2-exp-beta',
+    worktreePath: path.join(tempDir, 'beta'),
+    status: 'inconclusive',
+    budget: 100,
+    tokensUsed: 110,
+    contextTokensUsed: 20,
+    toolOutputTokensUsed: 60,
+    observationTokensUsed: 30,
+    preserve: false,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    resolvedAt: timestamp,
+    finalVerdict: 'inconclusive',
+    finalSummary: 'Budget exhausted early',
+    discovered: ['token estimator overshoots on large diffs'],
+    promote: false
+  });
+  notebook.appendObservation('exp-beta', 'Blocked on large diff output.', ['blocker']);
+
+  assert.deepEqual(
+    notebook.searchExperimentSummaries(session.id, 'oauth'),
+    [
+      {
+        experimentId: 'exp-alpha',
+        hypothesis: 'check oauth callback behavior',
+        status: 'validated',
+        summary: 'OAuth callback reached localhost',
+        discovered: ['callback server binds on localhost']
+      }
+    ]
+  );
+  assert.deepEqual(
+    notebook.searchExperimentSummaries(session.id, 'large diff'),
+    [
+      {
+        experimentId: 'exp-beta',
+        hypothesis: 'measure token budgeting',
+        status: 'inconclusive',
+        summary: 'Budget exhausted early',
+        discovered: ['token estimator overshoots on large diffs']
+      }
+    ]
+  );
+  assert.equal(
+    JSON.stringify(notebook.searchExperimentSummaries(session.id, 'large diff')).includes('Blocked on large diff output.'),
+    false
+  );
+  assert.deepEqual(notebook.searchExperimentSummaries(session.id, 'does-not-exist'), []);
+});
+
+test('Notebook persists checkpoints and rebuilds compacted request history from latest checkpoint', async (t) => {
+  const tempDir = await createTempDir('h2-notebook-compact-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+
+  const session = notebook.createSession('session-compact', tempDir);
+  notebook.appendModelHistoryItem(session.id, {
+    type: 'message',
+    role: 'user',
+    content: 'first'
+  });
+  notebook.appendModelHistoryItem(session.id, {
+    type: 'message',
+    role: 'assistant',
+    content: 'second'
+  });
+  notebook.appendModelHistoryItem(session.id, {
+    type: 'message',
+    role: 'user',
+    content: 'tail-one'
+  });
+  notebook.appendModelHistoryItem(session.id, {
+    type: 'message',
+    role: 'assistant',
+    content: 'tail-two'
+  });
+
+  const firstCheckpoint = notebook.createSessionCheckpoint({
+    sessionId: session.id,
+    goal: 'ship compaction',
+    completed: 'persist checkpoint',
+    next: 'rebuild next request',
+    openRisks: 'tail length too short',
+    gitLog: 'abc123 first commit',
+    gitStatus: ' M src/storage/notebook.ts',
+    gitDiffStat: ' src/storage/notebook.ts | 10 +++++-----',
+    lastTestStatus: 'npm test | exit 0 | ok',
+    activeExperimentSummaries: [
+      {
+        experimentId: 'exp-running',
+        hypothesis: 'verify compaction replay',
+        status: 'running',
+        summary: '',
+        discovered: []
+      }
+    ],
+    checkpointBlock: 'Harness checkpoint v1',
+    tailStartHistoryId: 3
+  });
+
+  assert.equal(firstCheckpoint.goal, 'ship compaction');
+  assert.match(firstCheckpoint.gitLog, /abc123/);
+  assert.equal(firstCheckpoint.activeExperimentSummaries.length, 1);
+
+  assert.deepEqual(notebook.buildModelRequestHistory(session.id), [
+    {
+      type: 'message',
+      role: 'system',
+      content: 'Harness checkpoint v1'
+    },
+    {
+      type: 'message',
+      role: 'user',
+      content: 'tail-one'
+    },
+    {
+      type: 'message',
+      role: 'assistant',
+      content: 'tail-two'
+    }
+  ]);
+
+  const secondCheckpoint = notebook.createSessionCheckpoint({
+    sessionId: session.id,
+    goal: 'ship compaction',
+    completed: 'persist newer checkpoint',
+    next: 'trim replay further',
+    gitLog: 'def456 second commit',
+    gitStatus: '(clean)',
+    gitDiffStat: '(clean)',
+    activeExperimentSummaries: [],
+    checkpointBlock: 'Harness checkpoint v2',
+    tailStartHistoryId: 4
+  });
+
+  assert.ok(secondCheckpoint.id > firstCheckpoint.id);
+  assert.equal(notebook.getLatestSessionCheckpoint(session.id)?.checkpointBlock, 'Harness checkpoint v2');
+  assert.deepEqual(notebook.buildModelRequestHistory(session.id), [
+    {
+      type: 'message',
+      role: 'system',
+      content: 'Harness checkpoint v2'
+    },
+    {
+      type: 'message',
+      role: 'assistant',
+      content: 'tail-two'
+    }
+  ]);
 });

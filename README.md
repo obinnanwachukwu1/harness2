@@ -6,6 +6,7 @@
 - a scoped experiment runs in an isolated `git worktree`
 - experiment state is persisted in SQLite
 - an Ink terminal UI renders the transcript, experiments, status bar, and composer
+- normal user text can now route to a Codex model over OAuth and call the local tool surface
 
 This is intentionally v0.1. There is no model backend yet, no plugins, and no parallel experiments.
 
@@ -25,6 +26,10 @@ Useful commands:
 
 ```bash
 npm run dev -- doctor
+npm run dev -- auth login
+npm run dev -- auth status
+npm run dev -- auth access
+npm run dev -- auth logout
 npm run dev -- resume <sessionId>
 ```
 
@@ -49,8 +54,30 @@ Inside the terminal UI, use slash commands:
 /grep HeadlessEngine src
 /spawn --hypothesis "node is available in isolation" --cmd "node --version"
 /experiment exp-12345678
+/auth login
+/auth status
+/auth logout
 /quit
 ```
+
+Any non-slash input is sent to the Codex model when OAuth is configured. The model can use the built-in local tools (`bash`, `read`, `write`, `edit`, `glob`, `grep`, `spawn_experiment`, `read_experiment`) through the headless engine.
+
+## OpenAI Codex OAuth
+
+The prototype now includes a direct OpenAI Codex OAuth flow for local testing.
+
+- `h2 auth login` starts a browser-based PKCE flow against `https://auth.openai.com`
+- tokens are stored in `.h2/notebook.sqlite`
+- `h2 auth access` prints a refreshed bearer token to stdout for manual API testing
+- `/auth login`, `/auth status`, and `/auth logout` are also available inside the Ink UI
+- once logged in, plain text in the interactive app is sent to the Codex backend using the stored OAuth token
+
+Notes:
+
+- the callback server listens on `127.0.0.1:1455` by default
+- if the browser does not open, the CLI prints the authorization URL
+- token refresh happens automatically when expiry is within five minutes
+- the interactive UI does not print the raw bearer token into the transcript
 
 ## Layout
 

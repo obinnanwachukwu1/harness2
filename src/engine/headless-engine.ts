@@ -4,15 +4,23 @@ import { EventEmitter } from 'node:events';
 
 import { execa, execaCommand } from 'execa';
 
+import { OpenAICodexAuth } from '../auth/openai-codex.js';
 import { ExperimentManager } from '../experiments/experiment-manager.js';
-import { clampText, createSessionId } from '../lib/utils.js';
+import { clampText, createSessionId, lines } from '../lib/utils.js';
+import { CodexModelClient, EXPERIMENT_TOOL_DEFINITIONS } from '../model/codex-client.js';
+import { EXPERIMENT_SUBAGENT_PROMPT } from '../model/codex-prompt.js';
 import { Notebook } from '../storage/notebook.js';
 import type {
   AgentRunner,
   AgentTools,
   EngineSnapshot,
   ExperimentDetails,
+  ExperimentObservationTag,
   ExperimentRecord,
+  ExperimentResolution,
+  ExperimentSearchResult,
+  ExperimentWaitResult,
+  ModelHistoryItem,
   SpawnExperimentInput,
   TranscriptRole
 } from '../types.js';
@@ -27,6 +35,7 @@ export class HeadlessEngine {
   static async open(options: OpenEngineOptions): Promise<HeadlessEngine> {
     const sessionId = options.sessionId ?? createSessionId();
     const stateDir = path.join(options.cwd, '.h2');
+    const experimentStateDir = path.join(options.cwd, '.harness2');
     const dbPath = path.join(stateDir, 'notebook.sqlite');
     const notebook = new Notebook(dbPath);
 
@@ -44,6 +53,7 @@ export class HeadlessEngine {
       cwd: options.cwd,
       sessionId,
       stateDir,
+      experimentStateDir,
       notebook,
       runner: new PrototypeRunner()
     });
@@ -51,26 +61,35 @@ export class HeadlessEngine {
 
   private readonly events = new EventEmitter();
   private readonly experimentManager: ExperimentManager;
+  private readonly auth: OpenAICodexAuth;
+  private readonly model: CodexModelClient;
   private readonly tools: AgentTools;
   private processingTurn = false;
   private statusText = 'idle';
+  private liveAssistantText: string | null = null;
   private turnQueue: Promise<void> = Promise.resolve();
+  private lastTestStatus: string | null = null;
 
   private constructor(
     private readonly options: {
       cwd: string;
       sessionId: string;
       stateDir: string;
+      experimentStateDir: string;
       notebook: Notebook;
       runner: AgentRunner;
     }
   ) {
     this.experimentManager = new ExperimentManager({
       cwd: options.cwd,
-      stateDir: options.stateDir,
+      stateDir: options.experimentStateDir,
       notebook: options.notebook,
-      onChange: () => this.emitChange()
+      onChange: () => this.emitChange(),
+      onResolved: (resolution) => this.handleExperimentResolved(resolution),
+      startSubagent: (experiment) => this.runExperimentSubagent(experiment)
     });
+    this.auth = new OpenAICodexAuth(options.notebook);
+    this.model = new CodexModelClient(options.notebook, this.auth);
 
     this.tools = {
       bash: (command) => this.runBash(command),
@@ -80,15 +99,29 @@ export class HeadlessEngine {
       glob: (pattern) => this.runGlob(pattern),
       grep: (pattern, target) => this.runGrep(pattern, target),
       spawnExperiment: (input) => this.spawnExperiment(input),
-      readExperiment: (experimentId) => this.readExperiment(experimentId)
+      readExperiment: (experimentId) => this.readExperiment(experimentId),
+      waitExperiment: (experimentId, timeoutMs) => this.waitExperiment(experimentId, timeoutMs),
+      searchExperiments: (query) => this.searchExperiments(query),
+      compact: (goal, completed, next, openRisks) =>
+        this.runCompact(goal, completed, next, openRisks),
+      authLogin: () => this.runAuthLogin(),
+      authStatus: () => this.runAuthStatus(),
+      authLogout: () => this.runAuthLogout(),
+      getModelSettings: () => this.runGetModelSettings(),
+      setModel: (model) => this.runSetModel(model),
+      setReasoningEffort: (effort) => this.runSetReasoningEffort(effort)
     };
   }
 
   get snapshot(): EngineSnapshot {
+    const contextWindow = this.model.getContextWindowUsage(this.options.sessionId);
     return this.options.notebook.getSnapshot(
       this.options.sessionId,
       this.processingTurn,
-      this.statusText
+      this.statusText,
+      contextWindow.usedTokens,
+      contextWindow.totalTokens,
+      this.liveAssistantText
     );
   }
 
@@ -108,22 +141,56 @@ export class HeadlessEngine {
 
       this.processingTurn = true;
       this.statusText = 'running turn';
+      this.liveAssistantText = null;
       this.appendTranscript('user', trimmed);
+      this.appendModelHistory({
+        type: 'message',
+        role: 'user',
+        content: trimmed
+      });
 
       try {
         await this.options.runner.runTurn(trimmed, {
           tools: this.tools,
           emit: async (role, text) => {
+            if (role === 'assistant') {
+              this.liveAssistantText = null;
+            }
             this.appendTranscript(role, text);
+            this.appendLocalReplayOutput(role, text);
+          },
+          runModel: async (input) => {
+            await this.model.runTurn(
+              this.options.sessionId,
+              input,
+              this.tools,
+              async (role, text) => {
+                if (role === 'assistant') {
+                  this.liveAssistantText = null;
+                }
+                this.appendTranscript(role, text);
+              },
+              async (text) => {
+                this.liveAssistantText = text;
+                this.emitChange();
+              }
+            );
           }
         });
         this.statusText = 'idle';
       } catch (error) {
         const message = error instanceof Error ? error.message : String(error);
-        this.appendTranscript('assistant', `Error: ${message}`);
+        const errorText = `Error: ${message}`;
+        this.appendTranscript('assistant', errorText);
+        this.appendModelHistory({
+          type: 'message',
+          role: 'assistant',
+          content: errorText
+        });
         this.statusText = 'error';
       } finally {
         this.processingTurn = false;
+        this.liveAssistantText = null;
         this.emitChange();
       }
     });
@@ -142,35 +209,91 @@ export class HeadlessEngine {
     this.emitChange();
   }
 
+  private appendModelHistory(item: ModelHistoryItem): void {
+    this.options.notebook.appendModelHistoryItem(this.options.sessionId, item);
+  }
+
+  private appendLocalReplayOutput(role: TranscriptRole, text: string): void {
+    if (role === 'assistant' || role === 'system') {
+      this.appendModelHistory({
+        type: 'message',
+        role,
+        content: text
+      });
+      return;
+    }
+
+    if (role === 'tool') {
+      this.appendModelHistory({
+        type: 'message',
+        role: 'assistant',
+        content: `Tool output:\n${text}`
+      });
+    }
+  }
+
   private emitChange(): void {
     this.events.emit('change');
   }
 
   private async runBash(command: string): Promise<string> {
+    return this.runBashAtRoot(this.options.cwd, command);
+  }
+
+  private async runRead(filePath: string): Promise<string> {
+    return this.runReadAtRoot(this.options.cwd, filePath);
+  }
+
+  private async runWrite(filePath: string, content: string): Promise<string> {
+    return this.runWriteAtRoot(this.options.cwd, filePath, content);
+  }
+
+  private async runEdit(filePath: string, findText: string, replaceText: string): Promise<string> {
+    return this.runEditAtRoot(this.options.cwd, filePath, findText, replaceText);
+  }
+
+  private async runGlob(patternText: string): Promise<string[]> {
+    return this.runGlobAtRoot(this.options.cwd, patternText);
+  }
+
+  private async runGrep(patternText: string, target = '.'): Promise<string> {
+    return this.runGrepAtRoot(this.options.cwd, patternText, target);
+  }
+
+  private async runBashAtRoot(root: string, command: string): Promise<string> {
     const result = await execaCommand(command, {
-      cwd: this.options.cwd,
+      cwd: root,
       shell: true,
       reject: false
     });
 
-    return formatCommandResult(command, result.exitCode ?? 1, result.stdout, result.stderr);
+    const output = formatCommandResult(command, result.exitCode ?? 1, result.stdout, result.stderr);
+    if (root === this.options.cwd) {
+      this.updateLastTestStatus(command, result.exitCode ?? 1, result.stdout, result.stderr);
+    }
+    return output;
   }
 
-  private async runRead(filePath: string): Promise<string> {
-    const resolvedPath = this.resolveWorkspacePath(filePath);
+  private async runReadAtRoot(root: string, filePath: string): Promise<string> {
+    const resolvedPath = this.resolveRootedPath(root, filePath);
     const content = await readFile(resolvedPath, 'utf8');
-    return `${relativeToWorkspace(this.options.cwd, resolvedPath)}\n\n${clampText(content, 12000)}`;
+    return `${relativeToWorkspace(root, resolvedPath)}\n\n${clampText(content, 12000)}`;
   }
 
-  private async runWrite(filePath: string, content: string): Promise<string> {
-    const resolvedPath = this.resolveWorkspacePath(filePath);
+  private async runWriteAtRoot(root: string, filePath: string, content: string): Promise<string> {
+    const resolvedPath = this.resolveRootedPath(root, filePath);
     await mkdir(path.dirname(resolvedPath), { recursive: true });
     await writeFile(resolvedPath, content, 'utf8');
-    return `Wrote ${content.length} chars to ${relativeToWorkspace(this.options.cwd, resolvedPath)}.`;
+    return `Wrote ${content.length} chars to ${relativeToWorkspace(root, resolvedPath)}.`;
   }
 
-  private async runEdit(filePath: string, findText: string, replaceText: string): Promise<string> {
-    const resolvedPath = this.resolveWorkspacePath(filePath);
+  private async runEditAtRoot(
+    root: string,
+    filePath: string,
+    findText: string,
+    replaceText: string
+  ): Promise<string> {
+    const resolvedPath = this.resolveRootedPath(root, filePath);
     const current = await readFile(resolvedPath, 'utf8');
 
     if (!current.includes(findText)) {
@@ -179,27 +302,27 @@ export class HeadlessEngine {
 
     const next = current.replace(findText, replaceText);
     await writeFile(resolvedPath, next, 'utf8');
-    return `Edited ${relativeToWorkspace(this.options.cwd, resolvedPath)}.`;
+    return `Edited ${relativeToWorkspace(root, resolvedPath)}.`;
   }
 
-  private async runGlob(patternText: string): Promise<string[]> {
+  private async runGlobAtRoot(root: string, patternText: string): Promise<string[]> {
     const matches: string[] = [];
-    for await (const entry of glob(patternText, { cwd: this.options.cwd })) {
+    for await (const entry of glob(patternText, { cwd: root })) {
       matches.push(entry);
     }
 
     return matches
-      .filter((entry) => !entry.startsWith('.git/') && !entry.startsWith('.h2/'))
+      .filter((entry) => !entry.startsWith('.git/') && !entry.startsWith('.h2/') && !entry.startsWith('.harness2/'))
       .sort();
   }
 
-  private async runGrep(patternText: string, target = '.'): Promise<string> {
+  private async runGrepAtRoot(root: string, patternText: string, target = '.'): Promise<string> {
     try {
       const result = await execa(
         'rg',
-        ['-n', '--hidden', '--glob', '!.git', '--glob', '!.h2', patternText, target],
+        ['-n', '--hidden', '--glob', '!.git', '--glob', '!.h2', '--glob', '!.harness2', patternText, target],
         {
-          cwd: this.options.cwd,
+          cwd: root,
           reject: false
         }
       );
@@ -216,7 +339,7 @@ export class HeadlessEngine {
       );
     } catch (error) {
       const result = await execa('grep', ['-R', '-n', patternText, target], {
-        cwd: this.options.cwd,
+        cwd: root,
         reject: false
       });
 
@@ -242,15 +365,314 @@ export class HeadlessEngine {
     return this.experimentManager.read(experimentId);
   }
 
-  private resolveWorkspacePath(filePath: string): string {
-    const resolvedPath = path.resolve(this.options.cwd, filePath);
-    const workspaceRoot = `${this.options.cwd}${path.sep}`;
+  private async waitExperiment(
+    experimentId: string,
+    timeoutMs?: number
+  ): Promise<ExperimentWaitResult> {
+    return this.experimentManager.waitForResolution(experimentId, timeoutMs);
+  }
 
-    if (resolvedPath !== this.options.cwd && !resolvedPath.startsWith(workspaceRoot)) {
+  private async searchExperiments(query?: string): Promise<ExperimentSearchResult[]> {
+    return this.experimentManager.search(this.options.sessionId, query);
+  }
+
+  private async runAuthLogin(): Promise<string> {
+    const record = await this.auth.authorize();
+    return [
+      'OpenAI Codex OAuth configured.',
+      `account: ${record.accountId || '(unknown)'}`,
+      `expires: ${new Date(record.expiresAt).toISOString()}`
+    ].join('\n');
+  }
+
+  private async runAuthStatus(): Promise<string> {
+    return this.auth.formatStatus();
+  }
+
+  private async runAuthLogout(): Promise<string> {
+    return this.auth.logout()
+      ? 'OpenAI Codex OAuth credentials removed.'
+      : 'No OpenAI Codex OAuth credentials were stored.';
+  }
+
+  private async runGetModelSettings(): Promise<string> {
+    const settings = this.model.getSettings(this.options.sessionId);
+    return [
+      `model: ${settings.model}`,
+      `reasoning: ${settings.reasoningEffort ?? 'off'}`
+    ].join('\n');
+  }
+
+  private async runSetModel(model: string): Promise<string> {
+    const settings = this.model.setModel(this.options.sessionId, model);
+    return [
+      `model: ${settings.model}`,
+      `reasoning: ${settings.reasoningEffort ?? 'off'}`
+    ].join('\n');
+  }
+
+  private async runSetReasoningEffort(
+    effort: 'low' | 'medium' | 'high' | 'off'
+  ): Promise<string> {
+    const settings = this.model.setReasoningEffort(this.options.sessionId, effort);
+    return [
+      `model: ${settings.model}`,
+      `reasoning: ${settings.reasoningEffort ?? 'off'}`
+    ].join('\n');
+  }
+
+  private async runExperimentSubagent(experiment: ExperimentRecord): Promise<void> {
+    const experimentSessionId = this.experimentManager.getExperimentSessionId(experiment.id);
+    const prompt = [
+      `Run a scoped experiment in the isolated worktree at ${experiment.worktreePath}.`,
+      `Hypothesis: ${experiment.hypothesis}`,
+      `Budget: ${experiment.budget} estimated tokens`,
+      experiment.context ? `Context: ${experiment.context}` : '',
+      `Use log_observation for notable findings and resolve_experiment exactly once when you are done.`,
+      `Do not try to spawn another experiment.`
+    ]
+      .filter(Boolean)
+      .join('\n');
+
+    const tools: AgentTools = {
+      bash: async (command) => {
+        const output = await this.runBashAtRoot(experiment.worktreePath, command);
+        await this.experimentManager.recordToolUsage(experiment.id, output);
+        return output;
+      },
+      read: async (filePath) => {
+        const output = await this.runReadAtRoot(experiment.worktreePath, filePath);
+        await this.experimentManager.recordToolUsage(experiment.id, output);
+        return output;
+      },
+      write: async (filePath, content) => {
+        const output = await this.runWriteAtRoot(experiment.worktreePath, filePath, content);
+        await this.experimentManager.recordToolUsage(experiment.id, output);
+        return output;
+      },
+      edit: async (filePath, findText, replaceText) => {
+        const output = await this.runEditAtRoot(
+          experiment.worktreePath,
+          filePath,
+          findText,
+          replaceText
+        );
+        await this.experimentManager.recordToolUsage(experiment.id, output);
+        return output;
+      },
+      glob: async (pattern) => {
+        const output = await this.runGlobAtRoot(experiment.worktreePath, pattern);
+        await this.experimentManager.recordToolUsage(experiment.id, JSON.stringify(output));
+        return output;
+      },
+      grep: async (pattern, target) => {
+        const output = await this.runGrepAtRoot(experiment.worktreePath, pattern, target);
+        await this.experimentManager.recordToolUsage(experiment.id, output);
+        return output;
+      },
+      spawnExperiment: async () => {
+        throw new Error('Nested experiments are not allowed.');
+      },
+      readExperiment: async (experimentId) => this.experimentManager.read(experimentId),
+      waitExperiment: async () => {
+        throw new Error('wait_experiment is not available in experiment subagents.');
+      },
+      searchExperiments: async (query) => this.experimentManager.search(this.options.sessionId, query),
+      logObservation: async (experimentId, message, tags) =>
+        this.experimentManager.logObservation(experimentId, message, tags),
+      resolveExperiment: async (input) => this.experimentManager.resolve(input),
+      authLogin: async () => {
+        throw new Error('Auth tools are not available in experiment subagents.');
+      },
+      authStatus: async () => {
+        throw new Error('Auth tools are not available in experiment subagents.');
+      },
+      authLogout: async () => {
+        throw new Error('Auth tools are not available in experiment subagents.');
+      },
+      getModelSettings: async () => {
+        throw new Error('Model settings are not available in experiment subagents.');
+      },
+      setModel: async () => {
+        throw new Error('Model switching is not available in experiment subagents.');
+      },
+      setReasoningEffort: async () => {
+        throw new Error('Reasoning controls are not available in experiment subagents.');
+      },
+      compact: async () => {
+        throw new Error('compact is not available in experiment subagents.');
+      }
+    };
+
+    await this.model.runTurn(
+      experimentSessionId,
+      prompt,
+      tools,
+      async () => undefined,
+      undefined,
+      EXPERIMENT_TOOL_DEFINITIONS,
+      EXPERIMENT_SUBAGENT_PROMPT
+    );
+  }
+
+  private handleExperimentResolved(resolution: ExperimentResolution): void {
+    const lines = [
+      `Experiment resolved`,
+      `id: ${resolution.id}`,
+      `verdict: ${resolution.verdict}`,
+      `summary: ${resolution.summary}`,
+      `budget: ${resolution.tokensUsed}/${resolution.budget} estimated tokens`,
+      `budget_breakdown: context ${resolution.contextTokensUsed}, tool_output ${resolution.toolOutputTokensUsed}, observations ${resolution.observationTokensUsed}`,
+      resolution.discovered.length > 0
+        ? `discovered: ${resolution.discovered.join(' | ')}`
+        : null,
+      resolution.promote
+        ? `promote: inspect ${resolution.worktreePath} on branch ${resolution.branchName}`
+        : `cleanup: ${resolution.preserved ? 'preserved' : 'removed'}`
+    ].filter((line): line is string => Boolean(line));
+
+    const message = lines.join('\n');
+    this.appendTranscript('assistant', message);
+    this.appendModelHistory({
+      type: 'message',
+      role: 'assistant',
+      content: message
+    });
+  }
+
+  private resolveRootedPath(root: string, filePath: string): string {
+    const resolvedPath = path.resolve(root, filePath);
+    const workspaceRoot = `${root}${path.sep}`;
+
+    if (resolvedPath !== root && !resolvedPath.startsWith(workspaceRoot)) {
       throw new Error(`Path escapes workspace: ${filePath}`);
     }
 
     return resolvedPath;
+  }
+
+  private async runCompact(
+    goal: string,
+    completed: string,
+    next: string,
+    openRisks?: string
+  ): Promise<{ ok: true; checkpointId: number }> {
+    const [gitLog, gitStatus, gitDiffStat] = await Promise.all([
+      this.readGitSnapshot(['log', '--oneline', '-5']),
+      this.readGitSnapshot(['status', '--short']),
+      this.readGitSnapshot(['diff', '--stat'])
+    ]);
+
+    const activeExperimentSummaries = this.options.notebook
+      .searchExperimentSummaries(this.options.sessionId)
+      .filter((experiment) => experiment.status === 'running');
+
+    const tailStartHistoryId = this.options.notebook.getTailStartHistoryId(this.options.sessionId, 12);
+    const checkpointBlock = this.buildCheckpointBlock({
+      goal,
+      completed,
+      next,
+      openRisks,
+      gitLog,
+      gitStatus,
+      gitDiffStat,
+      lastTestStatus: this.lastTestStatus,
+      activeExperimentSummaries
+    });
+
+    const checkpoint = this.options.notebook.createSessionCheckpoint({
+      sessionId: this.options.sessionId,
+      goal,
+      completed,
+      next,
+      openRisks,
+      gitLog,
+      gitStatus,
+      gitDiffStat,
+      lastTestStatus: this.lastTestStatus,
+      activeExperimentSummaries,
+      checkpointBlock,
+      tailStartHistoryId
+    });
+
+    this.emitChange();
+    return { ok: true, checkpointId: checkpoint.id };
+  }
+
+  private updateLastTestStatus(
+    command: string,
+    exitCode: number,
+    stdout: string,
+    stderr: string
+  ): void {
+    if (!looksLikeTestCommand(command)) {
+      return;
+    }
+
+    const headline =
+      lines(stdout).find((line) => line.trim().length > 0) ??
+      lines(stderr).find((line) => line.trim().length > 0) ??
+      '(no output)';
+    this.lastTestStatus = `${command} | exit ${exitCode} | ${clampText(headline, 200)}`;
+  }
+
+  private async readGitSnapshot(args: string[]): Promise<string> {
+    const result = await execa('git', args, {
+      cwd: this.options.cwd,
+      reject: false
+    });
+
+    if (result.exitCode === 0) {
+      return result.stdout.trim() || '(clean)';
+    }
+
+    const errorText = result.stderr.trim() || result.stdout.trim() || '(unavailable)';
+    return `git ${args.join(' ')} failed: ${clampText(errorText, 500)}`;
+  }
+
+  private buildCheckpointBlock(input: {
+    goal: string;
+    completed: string;
+    next: string;
+    openRisks?: string;
+    gitLog: string;
+    gitStatus: string;
+    gitDiffStat: string;
+    lastTestStatus: string | null;
+    activeExperimentSummaries: ExperimentSearchResult[];
+  }): string {
+    const experimentLines =
+      input.activeExperimentSummaries.length > 0
+        ? input.activeExperimentSummaries.map(
+            (experiment) =>
+              `- ${experiment.experimentId} | ${experiment.status} | ${experiment.hypothesis}`
+          )
+        : ['- none'];
+
+    return [
+      'Harness checkpoint',
+      '',
+      'Model-supplied checkpoint:',
+      `goal: ${input.goal}`,
+      `completed: ${input.completed}`,
+      `next: ${input.next}`,
+      input.openRisks ? `open_risks: ${input.openRisks}` : 'open_risks: none',
+      '',
+      'Harness state:',
+      'recent_commits:',
+      input.gitLog,
+      '',
+      'working_tree:',
+      input.gitStatus,
+      '',
+      'diff_stat:',
+      input.gitDiffStat,
+      '',
+      `last_test_status: ${input.lastTestStatus ?? 'unknown'}`,
+      '',
+      'active_experiments:',
+      ...experimentLines
+    ].join('\n');
   }
 }
 
@@ -279,4 +701,8 @@ function formatCommandResult(
 
 function relativeToWorkspace(cwd: string, filePath: string): string {
   return path.relative(cwd, filePath) || '.';
+}
+
+function looksLikeTestCommand(command: string): boolean {
+  return /\b(test|vitest|jest|mocha|ava|tap|pytest|rspec|ctest)\b/.test(command);
 }
