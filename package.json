@@ -1,0 +1,26 @@
+{
+  "name": "harness2",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "bin": {
+    "h2": "./dist/cli.js"
+  },
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsx src/cli.ts",
+    "test": "node --no-warnings --import tsx --test",
+    "typecheck": "tsc -p tsconfig.json --noEmit"
+  },
+  "dependencies": {
+    "execa": "^9.6.0",
+    "ink": "^5.2.1",
+    "react": "^18.3.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.15.0",
+    "@types/react": "^18.3.10",
+    "tsx": "^4.19.4",
+    "typescript": "^5.8.3"
+  }
+}
