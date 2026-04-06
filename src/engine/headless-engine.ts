@@ -6,7 +6,7 @@ import { execa, execaCommand } from 'execa';
 
 import { OpenAICodexAuth } from '../auth/openai-codex.js';
 import { ExperimentManager } from '../experiments/experiment-manager.js';
-import { clampText, createSessionId, lines } from '../lib/utils.js';
+import { clampText, createSessionId, lines, nowIso } from '../lib/utils.js';
 import { CodexModelClient, EXPERIMENT_TOOL_DEFINITIONS } from '../model/codex-client.js';
 import { EXPERIMENT_SUBAGENT_PROMPT } from '../model/codex-prompt.js';
 import { Notebook } from '../storage/notebook.js';
@@ -14,8 +14,12 @@ import type {
   AgentRunner,
   AgentTools,
   EngineSnapshot,
+  ExperimentAdoptionPreview,
+  ExperimentAdoptionResult,
+  ExperimentBudgetNotification,
   ExperimentDetails,
   ExperimentObservationTag,
+  ExperimentQualityNotification,
   ExperimentRecord,
   ExperimentResolution,
   ExperimentSearchResult,
@@ -85,6 +89,8 @@ export class HeadlessEngine {
       stateDir: options.experimentStateDir,
       notebook: options.notebook,
       onChange: () => this.emitChange(),
+      onBudgetExceeded: (notification) => this.handleExperimentBudgetExceeded(notification),
+      onQualitySignal: (notification) => this.handleExperimentQualitySignal(notification),
       onResolved: (resolution) => this.handleExperimentResolved(resolution),
       startSubagent: (experiment) => this.runExperimentSubagent(experiment)
     });
@@ -99,9 +105,14 @@ export class HeadlessEngine {
       glob: (pattern) => this.runGlob(pattern),
       grep: (pattern, target) => this.runGrep(pattern, target),
       spawnExperiment: (input) => this.spawnExperiment(input),
+      extendExperimentBudget: (experimentId, additionalTokens) =>
+        this.extendExperimentBudget(experimentId, additionalTokens),
       readExperiment: (experimentId) => this.readExperiment(experimentId),
       waitExperiment: (experimentId, timeoutMs) => this.waitExperiment(experimentId, timeoutMs),
       searchExperiments: (query) => this.searchExperiments(query),
+      adoptExperiment: (experimentId, adoptionOptions) =>
+        this.adoptExperiment(experimentId, adoptionOptions),
+      resolveExperiment: async (input) => this.experimentManager.resolve(input),
       compact: (goal, completed, next, openRisks) =>
         this.runCompact(goal, completed, next, openRisks),
       authLogin: () => this.runAuthLogin(),
@@ -132,7 +143,13 @@ export class HeadlessEngine {
     };
   }
 
-  submit(input: string): Promise<void> {
+  submit(
+    input: string,
+    options: {
+      onTranscriptEntry?: (role: TranscriptRole, text: string) => Promise<void> | void;
+      onAssistantStream?: (text: string) => Promise<void> | void;
+    } = {}
+  ): Promise<void> {
     const work = this.turnQueue.then(async () => {
       const trimmed = input.trim();
       if (!trimmed) {
@@ -158,6 +175,7 @@ export class HeadlessEngine {
             }
             this.appendTranscript(role, text);
             this.appendLocalReplayOutput(role, text);
+            await options.onTranscriptEntry?.(role, text);
           },
           runModel: async (input) => {
             await this.model.runTurn(
@@ -169,10 +187,12 @@ export class HeadlessEngine {
                   this.liveAssistantText = null;
                 }
                 this.appendTranscript(role, text);
+                await options.onTranscriptEntry?.(role, text);
               },
               async (text) => {
                 this.liveAssistantText = text;
                 this.emitChange();
+                await options.onAssistantStream?.(text);
               }
             );
           }
@@ -187,6 +207,7 @@ export class HeadlessEngine {
           role: 'assistant',
           content: errorText
         });
+        await options.onTranscriptEntry?.('assistant', errorText);
         this.statusText = 'error';
       } finally {
         this.processingTurn = false;
@@ -361,6 +382,13 @@ export class HeadlessEngine {
     });
   }
 
+  private async extendExperimentBudget(
+    experimentId: string,
+    additionalTokens: number
+  ): Promise<ExperimentRecord> {
+    return this.experimentManager.extendBudget(experimentId, additionalTokens);
+  }
+
   private async readExperiment(experimentId: string): Promise<ExperimentDetails> {
     return this.experimentManager.read(experimentId);
   }
@@ -374,6 +402,117 @@ export class HeadlessEngine {
 
   private async searchExperiments(query?: string): Promise<ExperimentSearchResult[]> {
     return this.experimentManager.search(this.options.sessionId, query);
+  }
+
+  private async adoptExperiment(
+    experimentId: string,
+    options: { apply?: boolean } = {}
+  ): Promise<ExperimentAdoptionPreview | ExperimentAdoptionResult> {
+    const experiment = await this.experimentManager.read(experimentId);
+    if (!experiment.promote) {
+      throw new Error(`Experiment ${experimentId} is not marked for adoption.`);
+    }
+
+    const worktreePath = experiment.worktreePath;
+    const worktreeStatus = await execa('git', ['status', '--short'], {
+      cwd: worktreePath,
+      reject: false
+    });
+    if (worktreeStatus.exitCode !== 0) {
+      throw new Error(`Experiment worktree is unavailable: ${clampText(worktreeStatus.stderr || worktreeStatus.stdout, 300)}`);
+    }
+
+    const changedTracked = await this.readLines(worktreePath, [
+      'git',
+      'diff',
+      '--name-only',
+      experiment.baseCommitSha
+    ]);
+    const untrackedFiles = await this.readLines(worktreePath, [
+      'git',
+      'ls-files',
+      '--others',
+      '--exclude-standard'
+    ]);
+    const changedFiles = Array.from(new Set([...changedTracked, ...untrackedFiles])).sort();
+    const diffStatSections: string[] = [];
+    const trackedDiffStat = await this.readCommandOutput(worktreePath, [
+      'git',
+      'diff',
+      '--stat',
+      experiment.baseCommitSha
+    ]);
+    if (trackedDiffStat.trim()) {
+      diffStatSections.push(trackedDiffStat.trim());
+    }
+    if (untrackedFiles.length > 0) {
+      diffStatSections.push(`untracked:\n${untrackedFiles.join('\n')}`);
+    }
+
+    const patchDir = path.join(this.options.stateDir, 'adoptions');
+    await mkdir(patchDir, { recursive: true });
+    const patchPath = path.join(patchDir, `${experiment.id}.patch`);
+    const rollbackBranchName = `h2-adopt-backup-${experiment.id.slice(4, 12)}-${Date.now().toString(36)}`;
+    const patch = await this.buildExperimentPatch(experiment.baseCommitSha, worktreePath, untrackedFiles);
+    await writeFile(patchPath, patch, 'utf8');
+
+    const check = await execa('git', ['apply', '--check', '--3way', patchPath], {
+      cwd: this.options.cwd,
+      reject: false
+    });
+    const applyable = check.exitCode === 0;
+
+    const preview: ExperimentAdoptionPreview = {
+      experimentId: experiment.id,
+      branchName: experiment.branchName,
+      baseCommitSha: experiment.baseCommitSha,
+      worktreePath,
+      patchPath,
+      rollbackBranchName,
+      applyable,
+      changedFiles,
+      untrackedFiles,
+      diffStat: diffStatSections.join('\n\n') || '(no diff)'
+    };
+
+    if (!options.apply) {
+      return preview;
+    }
+
+    const rootStatus = await execa('git', ['status', '--short'], {
+      cwd: this.options.cwd,
+      reject: false
+    });
+    const blockingStatus = lines(rootStatus.stdout ?? '').filter(
+      (line) =>
+        line.trim().length > 0 &&
+        !line.includes('.h2/') &&
+        !line.includes('.harness2/')
+    );
+    if (blockingStatus.length > 0) {
+      throw new Error('Main workspace is dirty. Adoption requires a clean working tree.');
+    }
+
+    const rollback = await execa('git', ['branch', rollbackBranchName, 'HEAD'], {
+      cwd: this.options.cwd,
+      reject: false
+    });
+    if (rollback.exitCode !== 0) {
+      throw new Error(`Failed to create rollback branch: ${clampText(rollback.stderr || rollback.stdout, 300)}`);
+    }
+
+    const apply = await execa('git', ['apply', '--3way', '--index', patchPath], {
+      cwd: this.options.cwd,
+      reject: false
+    });
+    if (apply.exitCode !== 0) {
+      throw new Error(`Failed to apply experiment patch: ${clampText(apply.stderr || apply.stdout, 400)}`);
+    }
+
+    return {
+      ...preview,
+      appliedAt: nowIso()
+    };
   }
 
   private async runAuthLogin(): Promise<string> {
@@ -478,6 +617,9 @@ export class HeadlessEngine {
         throw new Error('wait_experiment is not available in experiment subagents.');
       },
       searchExperiments: async (query) => this.experimentManager.search(this.options.sessionId, query),
+      adoptExperiment: async () => {
+        throw new Error('adopt_experiment is not available in experiment subagents.');
+      },
       logObservation: async (experimentId, message, tags) =>
         this.experimentManager.logObservation(experimentId, message, tags),
       resolveExperiment: async (input) => this.experimentManager.resolve(input),
@@ -526,12 +668,58 @@ export class HeadlessEngine {
       resolution.discovered.length > 0
         ? `discovered: ${resolution.discovered.join(' | ')}`
         : null,
+      resolution.artifacts.length > 0
+        ? `artifacts: ${resolution.artifacts.join(' | ')}`
+        : null,
+      resolution.constraints.length > 0
+        ? `constraints: ${resolution.constraints.join(' | ')}`
+        : null,
+      resolution.confidenceNote
+        ? `confidence: ${resolution.confidenceNote}`
+        : null,
       resolution.promote
         ? `promote: inspect ${resolution.worktreePath} on branch ${resolution.branchName}`
         : `cleanup: ${resolution.preserved ? 'preserved' : 'removed'}`
     ].filter((line): line is string => Boolean(line));
 
     const message = lines.join('\n');
+    this.appendTranscript('assistant', message);
+    this.appendModelHistory({
+      type: 'message',
+      role: 'assistant',
+      content: message
+    });
+  }
+
+  private handleExperimentQualitySignal(notification: ExperimentQualityNotification): void {
+    const message = [
+      'Experiment low-signal warning',
+      `id: ${notification.id}`,
+      `hypothesis: ${notification.hypothesis}`,
+      `message: ${notification.message}`,
+      `budget: ${notification.tokensUsed}/${notification.budget} estimated tokens`,
+      `tool_output: ${notification.toolOutputTokensUsed}`
+    ].join('\n');
+
+    this.appendTranscript('assistant', message);
+    this.appendModelHistory({
+      type: 'message',
+      role: 'assistant',
+      content: message
+    });
+  }
+
+  private handleExperimentBudgetExceeded(notification: ExperimentBudgetNotification): void {
+    const message = [
+      'Experiment budget exhausted',
+      `id: ${notification.id}`,
+      `hypothesis: ${notification.hypothesis}`,
+      `message: ${notification.message}`,
+      `budget: ${notification.tokensUsed}/${notification.budget} estimated tokens`,
+      `budget_breakdown: context ${notification.contextTokensUsed}, tool_output ${notification.toolOutputTokensUsed}, observations ${notification.observationTokensUsed}`,
+      `next: extend budget to continue, or leave unresolved and treat as inconclusive`
+    ].join('\n');
+
     this.appendTranscript('assistant', message);
     this.appendModelHistory({
       type: 'message',
@@ -673,6 +861,59 @@ export class HeadlessEngine {
       'active_experiments:',
       ...experimentLines
     ].join('\n');
+  }
+
+  private async readLines(cwd: string, command: string[]): Promise<string[]> {
+    const result = await execa(command[0]!, command.slice(1), {
+      cwd,
+      reject: false
+    });
+    if (result.exitCode !== 0) {
+      return [];
+    }
+
+    return lines(result.stdout)
+      .map((line) => line.trim())
+      .filter(Boolean);
+  }
+
+  private async readCommandOutput(cwd: string, command: string[]): Promise<string> {
+    const result = await execa(command[0]!, command.slice(1), {
+      cwd,
+      reject: false
+    });
+    return result.exitCode === 0 ? result.stdout : '';
+  }
+
+  private async buildExperimentPatch(
+    baseCommitSha: string,
+    worktreePath: string,
+    untrackedFiles: string[]
+  ): Promise<string> {
+    const trackedDiff = await this.readCommandOutput(worktreePath, [
+      'git',
+      'diff',
+      '--binary',
+      baseCommitSha
+    ]);
+
+    const untrackedDiffs: string[] = [];
+    for (const relativePath of untrackedFiles) {
+      const diff = await execa(
+        'git',
+        ['diff', '--binary', '--no-index', '--', '/dev/null', relativePath],
+        {
+          cwd: worktreePath,
+          reject: false
+        }
+      );
+      if (diff.stdout.trim()) {
+        untrackedDiffs.push(diff.stdout.trimEnd());
+      }
+    }
+
+    const patch = [trackedDiff.trimEnd(), ...untrackedDiffs].filter(Boolean).join('\n\n');
+    return patch ? `${patch}\n` : '';
   }
 }
 

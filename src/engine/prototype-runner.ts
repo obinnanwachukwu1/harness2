@@ -1,4 +1,10 @@
-import type { AgentRunContext, ExperimentDetails } from '../types.js';
+import { DEFAULT_EXPERIMENT_BUDGET_TOKENS } from '../lib/utils.js';
+import type {
+  AgentRunContext,
+  ExperimentAdoptionPreview,
+  ExperimentAdoptionResult,
+  ExperimentDetails
+} from '../types.js';
 
 const HELP_TEXT = [
   'Commands:',
@@ -9,8 +15,10 @@ const HELP_TEXT = [
   '/edit <path> :: <find> => <replace>',
   '/glob <pattern>',
   '/grep <pattern> [path]',
-  '/spawn --hypothesis "..." [--budget 1200] [--context "..."] [--preserve]',
+  `/spawn --hypothesis "..." [--budget ${DEFAULT_EXPERIMENT_BUDGET_TOKENS}] [--context "..."] [--preserve]`,
   '/experiment <experimentId>',
+  '/adopt <experimentId> [--apply]',
+  '/experiment-budget <experimentId> <additionalTokens>',
   '/experiments [query]',
   '/auth login',
   '/auth status',
@@ -140,13 +148,15 @@ export class PrototypeRunner {
         if (!hypothesis) {
           await context.emit(
             'assistant',
-            'Usage: /spawn --hypothesis "..." [--budget 1200] [--context "..."] [--preserve]'
+            `Usage: /spawn --hypothesis "..." [--budget ${DEFAULT_EXPERIMENT_BUDGET_TOKENS}] [--context "..."] [--preserve]`
           );
           return;
         }
 
         const budgetValue = flags.get('budget');
-        const budget = budgetValue ? Number.parseInt(budgetValue, 10) : 1200;
+        const budget = budgetValue
+          ? Number.parseInt(budgetValue, 10)
+          : DEFAULT_EXPERIMENT_BUDGET_TOKENS;
         if (Number.isNaN(budget) || budget < 1) {
           await context.emit('assistant', 'Budget must be a positive integer.');
           return;
@@ -175,6 +185,55 @@ export class PrototypeRunner {
 
         const details = await context.tools.readExperiment(experimentId);
         await context.emit('assistant', formatExperiment(details));
+        return;
+      }
+
+      case 'adopt': {
+        const experimentId = rawArgs.find((token) => !token.startsWith('--'));
+        if (!experimentId) {
+          await context.emit('assistant', 'Usage: /adopt <experimentId> [--apply]');
+          return;
+        }
+
+        if (!context.tools.adoptExperiment) {
+          await context.emit('assistant', 'Experiment adoption is not available.');
+          return;
+        }
+
+        const result = await context.tools.adoptExperiment(experimentId, {
+          apply: rawArgs.includes('--apply')
+        });
+        await context.emit('assistant', formatAdoption(result));
+        return;
+      }
+
+      case 'experiment-budget': {
+        const experimentId = rawArgs[0];
+        const additionalValue = rawArgs[1];
+        if (!experimentId || !additionalValue) {
+          await context.emit('assistant', 'Usage: /experiment-budget <experimentId> <additionalTokens>');
+          return;
+        }
+
+        if (!context.tools.extendExperimentBudget) {
+          await context.emit('assistant', 'Experiment budget extension is not available.');
+          return;
+        }
+
+        const additionalTokens = Number.parseInt(additionalValue, 10);
+        if (Number.isNaN(additionalTokens) || additionalTokens < 1) {
+          await context.emit('assistant', 'additionalTokens must be a positive integer.');
+          return;
+        }
+
+        const experiment = await context.tools.extendExperimentBudget(
+          experimentId,
+          additionalTokens
+        );
+        await context.emit(
+          'assistant',
+          `Extended ${experiment.id} by ${additionalTokens} estimated tokens. New budget: ${experiment.budget}.`
+        );
         return;
       }
 
@@ -320,6 +379,22 @@ function formatExperiment(details: ExperimentDetails): string {
     header.push(`discovered: ${details.discovered.join(' | ')}`);
   }
 
+  if (details.artifacts.length > 0) {
+    header.push(`artifacts: ${details.artifacts.join(' | ')}`);
+  }
+
+  if (details.constraints.length > 0) {
+    header.push(`constraints: ${details.constraints.join(' | ')}`);
+  }
+
+  if (details.confidenceNote) {
+    header.push(`confidence: ${details.confidenceNote}`);
+  }
+
+  if (details.lowSignalWarningEmitted) {
+    header.push('quality: low-signal warning emitted');
+  }
+
   const observations = details.observations
     .slice(-10)
     .map((entry) => {
@@ -329,4 +404,34 @@ function formatExperiment(details: ExperimentDetails): string {
     .join('\n\n');
 
   return observations ? `${header.join('\n')}\n\n${observations}` : header.join('\n');
+}
+
+function formatAdoption(result: ExperimentAdoptionPreview | ExperimentAdoptionResult): string {
+  const applied = 'appliedAt' in result;
+  const lines = [
+    applied ? 'Experiment adoption applied' : 'Experiment adoption preview',
+    `id: ${result.experimentId}`,
+    `branch: ${result.branchName}`,
+    `base: ${result.baseCommitSha}`,
+    `worktree: ${result.worktreePath}`,
+    `patch: ${result.patchPath}`,
+    `rollback: ${result.rollbackBranchName}`,
+    `applyable: ${result.applyable ? 'yes' : 'no'}`,
+    result.changedFiles.length > 0
+      ? `changed_files: ${result.changedFiles.join(' | ')}`
+      : 'changed_files: none',
+    result.untrackedFiles.length > 0
+      ? `untracked_files: ${result.untrackedFiles.join(' | ')}`
+      : null,
+    'diff_stat:',
+    result.diffStat
+  ].filter((line): line is string => Boolean(line));
+
+  if (!applied) {
+    lines.push('', `Run /adopt ${result.experimentId} --apply to apply this patch.`);
+  } else {
+    lines.push('', `Applied at: ${result.appliedAt}`);
+  }
+
+  return lines.join('\n');
 }

@@ -2,6 +2,7 @@ export type TranscriptRole = 'user' | 'assistant' | 'tool' | 'system';
 
 export type ExperimentStatus =
   | 'running'
+  | 'budget_exhausted'
   | 'validated'
   | 'invalidated'
   | 'inconclusive';
@@ -68,6 +69,10 @@ export interface ExperimentRecord {
   finalVerdict: ExperimentStatus | null;
   finalSummary: string | null;
   discovered: string[];
+  artifacts: string[];
+  constraints: string[];
+  confidenceNote: string | null;
+  lowSignalWarningEmitted: boolean;
   promote: boolean;
 }
 
@@ -84,6 +89,9 @@ export interface ExperimentResolution {
   verdict: ExperimentStatus;
   summary: string;
   discovered: string[];
+  artifacts: string[];
+  constraints: string[];
+  confidenceNote: string | null;
   promote: boolean;
   preserved: boolean;
   worktreePath: string;
@@ -120,6 +128,46 @@ export interface ExperimentWaitResult {
   budget: number;
   lastObservationAt: string | null;
   lastObservationSnippet: string | null;
+  lowSignalWarningEmitted: boolean;
+}
+
+export interface ExperimentAdoptionPreview {
+  experimentId: string;
+  branchName: string;
+  baseCommitSha: string;
+  worktreePath: string;
+  patchPath: string;
+  rollbackBranchName: string;
+  applyable: boolean;
+  changedFiles: string[];
+  untrackedFiles: string[];
+  diffStat: string;
+}
+
+export interface ExperimentAdoptionResult extends ExperimentAdoptionPreview {
+  appliedAt: string;
+}
+
+export interface ExperimentBudgetNotification {
+  id: string;
+  hypothesis: string;
+  budget: number;
+  tokensUsed: number;
+  contextTokensUsed: number;
+  toolOutputTokensUsed: number;
+  observationTokensUsed: number;
+  worktreePath: string;
+  branchName: string;
+  message: string;
+}
+
+export interface ExperimentQualityNotification {
+  id: string;
+  hypothesis: string;
+  tokensUsed: number;
+  toolOutputTokensUsed: number;
+  budget: number;
+  message: string;
 }
 
 export interface SessionCheckpointRecord {
@@ -206,6 +254,10 @@ export interface AgentTools {
   glob(pattern: string): Promise<string[]>;
   grep(pattern: string, target?: string): Promise<string>;
   spawnExperiment(input: Omit<SpawnExperimentInput, 'sessionId'>): Promise<ExperimentRecord>;
+  extendExperimentBudget?(
+    experimentId: string,
+    additionalTokens: number
+  ): Promise<ExperimentRecord>;
   readExperiment(experimentId: string): Promise<ExperimentDetails>;
   waitExperiment?(experimentId: string, timeoutMs?: number): Promise<{
     timedOut: boolean;
@@ -221,8 +273,13 @@ export interface AgentTools {
     budget: number;
     lastObservationAt: string | null;
     lastObservationSnippet: string | null;
+    lowSignalWarningEmitted: boolean;
   }>;
   searchExperiments?(query?: string): Promise<ExperimentSearchResult[]>;
+  adoptExperiment?(
+    experimentId: string,
+    options?: { apply?: boolean }
+  ): Promise<ExperimentAdoptionPreview | ExperimentAdoptionResult>;
   compact?(
     goal: string,
     completed: string,
@@ -239,6 +296,9 @@ export interface AgentTools {
     verdict: ExperimentStatus;
     summary: string;
     discovered: string[];
+    artifacts?: string[];
+    constraints?: string[];
+    confidenceNote?: string;
     promote: boolean;
   }): Promise<ExperimentResolution>;
   authLogin(): Promise<string>;

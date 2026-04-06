@@ -57,6 +57,10 @@ test('Notebook persists transcript and experiment details', async (t) => {
     finalVerdict: 'validated',
     finalSummary: 'looks good',
     discovered: ['readme note'],
+    artifacts: ['notes.txt'],
+    constraints: ['local-only'],
+    confidenceNote: 'Validated by durable record.',
+    lowSignalWarningEmitted: false,
     promote: true
   };
 
@@ -154,6 +158,10 @@ test('Notebook searchExperimentSummaries finds durable experiment summaries with
     finalVerdict: 'validated',
     finalSummary: 'OAuth callback reached localhost',
     discovered: ['callback server binds on localhost'],
+    artifacts: ['localhost callback'],
+    constraints: ['browser required'],
+    confidenceNote: 'Observed directly in test flow.',
+    lowSignalWarningEmitted: false,
     promote: false
   });
   notebook.appendObservation('exp-alpha', 'Observed callback roundtrip in browser flow.', ['discovery']);
@@ -180,6 +188,10 @@ test('Notebook searchExperimentSummaries finds durable experiment summaries with
     finalVerdict: 'inconclusive',
     finalSummary: 'Budget exhausted early',
     discovered: ['token estimator overshoots on large diffs'],
+    artifacts: [],
+    constraints: ['budget too small'],
+    confidenceNote: 'Result is partial.',
+    lowSignalWarningEmitted: true,
     promote: false
   });
   notebook.appendObservation('exp-beta', 'Blocked on large diff output.', ['blocker']);

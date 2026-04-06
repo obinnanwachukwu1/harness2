@@ -56,6 +56,10 @@ interface ExperimentRow {
   final_verdict: ExperimentRecord['finalVerdict'];
   final_summary: string | null;
   discovered_json: string | null;
+  artifacts_json: string | null;
+  constraints_json: string | null;
+  confidence_note: string | null;
+  low_signal_warning_emitted: number;
   promote: number;
 }
 
@@ -133,6 +137,7 @@ export class Notebook {
   private init(): void {
     this.db.exec(`
       PRAGMA journal_mode = WAL;
+      PRAGMA busy_timeout = 5000;
       PRAGMA foreign_keys = ON;
 
       CREATE TABLE IF NOT EXISTS sessions (
@@ -175,6 +180,10 @@ export class Notebook {
         final_verdict TEXT,
         final_summary TEXT,
         discovered_json TEXT,
+        artifacts_json TEXT,
+        constraints_json TEXT,
+        confidence_note TEXT,
+        low_signal_warning_emitted INTEGER NOT NULL DEFAULT 0,
         promote INTEGER NOT NULL DEFAULT 0
       );
 
@@ -263,6 +272,24 @@ export class Notebook {
 
     if (!experimentColumns.some((column) => column.name === 'discovered_json')) {
       this.db.exec(`ALTER TABLE experiments ADD COLUMN discovered_json TEXT`);
+    }
+
+    if (!experimentColumns.some((column) => column.name === 'artifacts_json')) {
+      this.db.exec(`ALTER TABLE experiments ADD COLUMN artifacts_json TEXT`);
+    }
+
+    if (!experimentColumns.some((column) => column.name === 'constraints_json')) {
+      this.db.exec(`ALTER TABLE experiments ADD COLUMN constraints_json TEXT`);
+    }
+
+    if (!experimentColumns.some((column) => column.name === 'confidence_note')) {
+      this.db.exec(`ALTER TABLE experiments ADD COLUMN confidence_note TEXT`);
+    }
+
+    if (!experimentColumns.some((column) => column.name === 'low_signal_warning_emitted')) {
+      this.db.exec(
+        `ALTER TABLE experiments ADD COLUMN low_signal_warning_emitted INTEGER NOT NULL DEFAULT 0`
+      );
     }
 
     if (!experimentColumns.some((column) => column.name === 'promote')) {
@@ -391,9 +418,13 @@ export class Notebook {
             final_verdict,
             final_summary,
             discovered_json,
+            artifacts_json,
+            constraints_json,
+            confidence_note,
+            low_signal_warning_emitted,
             promote
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             session_id = excluded.session_id,
             hypothesis = excluded.hypothesis,
@@ -415,6 +446,10 @@ export class Notebook {
             final_verdict = excluded.final_verdict,
             final_summary = excluded.final_summary,
             discovered_json = excluded.discovered_json,
+            artifacts_json = excluded.artifacts_json,
+            constraints_json = excluded.constraints_json,
+            confidence_note = excluded.confidence_note,
+            low_signal_warning_emitted = excluded.low_signal_warning_emitted,
             promote = excluded.promote
         `
       )
@@ -440,6 +475,10 @@ export class Notebook {
         experiment.finalVerdict,
         experiment.finalSummary,
         JSON.stringify(experiment.discovered),
+        JSON.stringify(experiment.artifacts),
+        JSON.stringify(experiment.constraints),
+        experiment.confidenceNote,
+        experiment.lowSignalWarningEmitted ? 1 : 0,
         experiment.promote ? 1 : 0
       );
 
@@ -472,6 +511,10 @@ export class Notebook {
             final_verdict,
             final_summary,
             discovered_json,
+            artifacts_json,
+            constraints_json,
+            confidence_note,
+            low_signal_warning_emitted,
             promote
           FROM experiments
           WHERE id = ?
@@ -508,6 +551,10 @@ export class Notebook {
             final_verdict,
             final_summary,
             discovered_json,
+            artifacts_json,
+            constraints_json,
+            confidence_note,
+            low_signal_warning_emitted,
             promote
           FROM experiments
           WHERE session_id = ?
@@ -598,6 +645,10 @@ export class Notebook {
             e.final_verdict,
             e.final_summary,
             e.discovered_json,
+            e.artifacts_json,
+            e.constraints_json,
+            e.confidence_note,
+            e.low_signal_warning_emitted,
             e.promote
           FROM experiments e
           LEFT JOIN experiment_observations o
@@ -652,6 +703,10 @@ export class Notebook {
             e.final_verdict,
             e.final_summary,
             e.discovered_json,
+            e.artifacts_json,
+            e.constraints_json,
+            e.confidence_note,
+            e.low_signal_warning_emitted,
             e.promote
           FROM experiments e
           LEFT JOIN experiment_observations o
@@ -1139,6 +1194,10 @@ function mapExperiment(row: ExperimentRow): ExperimentRecord {
     finalVerdict: row.final_verdict,
     finalSummary: row.final_summary,
     discovered: parseJsonArray(row.discovered_json),
+    artifacts: parseJsonArray(row.artifacts_json),
+    constraints: parseJsonArray(row.constraints_json),
+    confidenceNote: row.confidence_note,
+    lowSignalWarningEmitted: Boolean(row.low_signal_warning_emitted),
     promote: Boolean(row.promote)
   };
 }

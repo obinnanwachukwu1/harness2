@@ -6,8 +6,10 @@ import { execa } from 'execa';
 import { clampText, createExperimentId, estimateTokens, lines, nowIso } from '../lib/utils.js';
 import { Notebook } from '../storage/notebook.js';
 import type {
+  ExperimentBudgetNotification,
   ExperimentDetails,
   ExperimentObservationTag,
+  ExperimentQualityNotification,
   ExperimentRecord,
   ExperimentResolution,
   ExperimentSearchResult,
@@ -20,11 +22,21 @@ interface ExperimentManagerOptions {
   stateDir: string;
   notebook: Notebook;
   onChange(): void;
+  onBudgetExceeded(notification: ExperimentBudgetNotification): void;
+  onQualitySignal(notification: ExperimentQualityNotification): void;
   onResolved(resolution: ExperimentResolution): void;
   startSubagent(experiment: ExperimentRecord): Promise<void>;
 }
 
 const MAX_RUNNING_EXPERIMENTS = 5;
+const LOW_SIGNAL_TOOL_OUTPUT_THRESHOLD = 1_200;
+
+export class ExperimentBudgetExceededError extends Error {
+  constructor(experimentId: string) {
+    super(`Experiment ${experimentId} exhausted its budget.`);
+    this.name = 'ExperimentBudgetExceededError';
+  }
+}
 
 export class ExperimentManager {
   private readonly running = new Map<string, Promise<void>>();
@@ -75,6 +87,10 @@ export class ExperimentManager {
       finalVerdict: null,
       finalSummary: null,
       discovered: [],
+      artifacts: [],
+      constraints: [],
+      confidenceNote: null,
+      lowSignalWarningEmitted: false,
       promote: false
     };
 
@@ -90,13 +106,7 @@ export class ExperimentManager {
       await this.appendObservation(record, `Context: ${record.context}`, ['discovery']);
     }
 
-    const task = this.execute(record).finally(() => {
-      this.running.delete(record.id);
-      this.activeRecords.delete(record.id);
-      this.options.onChange();
-    });
-
-    this.running.set(record.id, task);
+    this.startTask(record);
     this.options.onChange();
     return record;
   }
@@ -147,11 +157,51 @@ export class ExperimentManager {
     return this.read(experimentId);
   }
 
+  async extendBudget(experimentId: string, additionalTokens: number): Promise<ExperimentRecord> {
+    if (!Number.isFinite(additionalTokens) || additionalTokens < 1) {
+      throw new Error('additionalTokens must be a positive integer.');
+    }
+
+    const record = this.getMutableRecord(experimentId);
+    if (
+      record.status !== 'budget_exhausted' &&
+      record.status !== 'running'
+    ) {
+      throw new Error(`Experiment ${record.id} is already resolved.`);
+    }
+
+    record.budget += Math.floor(additionalTokens);
+    record.updatedAt = nowIso();
+    this.options.notebook.upsertExperiment(record);
+    await this.appendObservation(
+      record,
+      `Budget extended by ${Math.floor(additionalTokens)} estimated tokens to ${record.budget}.`,
+      ['discovery'],
+      { countBudget: false }
+    );
+
+    if (record.status === 'budget_exhausted') {
+      record.status = 'running';
+      record.updatedAt = nowIso();
+      this.options.notebook.upsertExperiment(record);
+      if (!this.running.has(record.id)) {
+        this.activeRecords.set(record.id, record);
+        this.startTask(record);
+      }
+    }
+
+    this.options.onChange();
+    return record;
+  }
+
   async resolve(input: {
     experimentId: string;
     verdict: ExperimentRecord['status'];
     summary: string;
     discovered: string[];
+    artifacts?: string[];
+    constraints?: string[];
+    confidenceNote?: string;
     promote: boolean;
   }): Promise<ExperimentResolution> {
     const record = this.getMutableRecord(input.experimentId);
@@ -166,6 +216,11 @@ export class ExperimentManager {
     record.finalVerdict = input.verdict;
     record.finalSummary = clampText(input.summary, 4000);
     record.discovered = input.discovered.map((item) => clampText(item, 500));
+    record.artifacts = (input.artifacts ?? []).map((item) => clampText(item, 500));
+    record.constraints = (input.constraints ?? []).map((item) => clampText(item, 500));
+    record.confidenceNote = input.confidenceNote
+      ? clampText(input.confidenceNote, 1000)
+      : null;
     record.promote = input.promote;
     record.preserve = preserved;
     record.updatedAt = resolvedAt;
@@ -194,6 +249,7 @@ export class ExperimentManager {
     this.assertRunning(record);
     this.consumeTokens(record, text, 'tool_output');
     this.options.notebook.upsertExperiment(record);
+    await this.maybeWarnLowSignal(record);
     await this.autoResolveBudgetIfNeeded(record);
     this.options.onChange();
   }
@@ -221,6 +277,10 @@ export class ExperimentManager {
         });
       }
     } catch (error) {
+      if (error instanceof ExperimentBudgetExceededError) {
+        return;
+      }
+
       const message = error instanceof Error ? error.message : String(error);
       if (record.status === 'running') {
         await this.appendObservation(
@@ -317,19 +377,60 @@ export class ExperimentManager {
       return;
     }
 
-    this.options.notebook.appendObservation(
-      record.id,
-      `Budget exhausted after ${record.tokensUsed}/${record.budget} estimated tokens.`,
-      ['blocker', 'conclusion']
+    record.status = 'budget_exhausted';
+    record.updatedAt = nowIso();
+    const message = `Budget exhausted after ${record.tokensUsed}/${record.budget} estimated tokens. Extend the budget to continue, or leave it unresolved and treat it as inconclusive.`;
+    this.options.notebook.upsertExperiment(record);
+    this.options.notebook.appendObservation(record.id, message, ['blocker', 'conclusion']);
+    this.options.onBudgetExceeded({
+      id: record.id,
+      hypothesis: record.hypothesis,
+      budget: record.budget,
+      tokensUsed: record.tokensUsed,
+      contextTokensUsed: record.contextTokensUsed,
+      toolOutputTokensUsed: record.toolOutputTokensUsed,
+      observationTokensUsed: record.observationTokensUsed,
+      worktreePath: record.worktreePath,
+      branchName: record.branchName,
+      message
+    });
+    this.options.onChange();
+    throw new ExperimentBudgetExceededError(record.id);
+  }
+
+  private async maybeWarnLowSignal(record: ExperimentRecord): Promise<void> {
+    if (record.lowSignalWarningEmitted) {
+      return;
+    }
+
+    if (record.toolOutputTokensUsed < LOW_SIGNAL_TOOL_OUTPUT_THRESHOLD) {
+      return;
+    }
+
+    const details = this.read(record.id);
+    const meaningfulObservations = details.observations.filter(
+      (observation) => !isBootstrapObservation(observation.message)
     );
 
-    await this.resolve({
-      experimentId: record.id,
-      verdict: 'inconclusive',
-      summary: `Budget exhausted after ${record.tokensUsed}/${record.budget} estimated tokens.`,
-      discovered: record.discovered,
-      promote: false
+    if (meaningfulObservations.length > 0) {
+      return;
+    }
+
+    const message =
+      'Low-signal warning: this experiment has spent substantial tool-output budget without logging any non-bootstrap findings yet. Add a concrete observation, narrow the hypothesis, or stop if the probe is not producing evidence.';
+    record.lowSignalWarningEmitted = true;
+    record.updatedAt = nowIso();
+    this.options.notebook.upsertExperiment(record);
+    this.options.notebook.appendObservation(record.id, message, ['blocker', 'question']);
+    this.options.onQualitySignal({
+      id: record.id,
+      hypothesis: record.hypothesis,
+      tokensUsed: record.tokensUsed,
+      toolOutputTokensUsed: record.toolOutputTokensUsed,
+      budget: record.budget,
+      message
     });
+    this.options.onChange();
   }
 
   private getMutableRecord(experimentId: string): ExperimentRecord {
@@ -358,6 +459,9 @@ export class ExperimentManager {
       verdict: record.finalVerdict ?? record.status,
       summary: record.finalSummary ?? '',
       discovered: record.discovered,
+      artifacts: record.artifacts,
+      constraints: record.constraints,
+      confidenceNote: record.confidenceNote,
       promote: record.promote,
       preserved: record.preserve,
       worktreePath: record.worktreePath,
@@ -390,7 +494,8 @@ export class ExperimentManager {
       lastObservationAt: lastObservation?.createdAt ?? null,
       lastObservationSnippet: lastObservation
         ? clampText(lastObservation.message, 240)
-        : null
+        : null,
+      lowSignalWarningEmitted: experiment.lowSignalWarningEmitted
     };
   }
 
@@ -400,10 +505,28 @@ export class ExperimentManager {
     });
     return lines(result.stdout)[0] ?? '';
   }
+
+  private startTask(record: ExperimentRecord): void {
+    const task = this.execute(record).finally(() => {
+      this.running.delete(record.id);
+      this.activeRecords.delete(record.id);
+      this.options.onChange();
+    });
+
+    this.running.set(record.id, task);
+  }
 }
 
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function isBootstrapObservation(message: string): boolean {
+  return (
+    message.startsWith('Spawned isolated worktree at ') ||
+    message.startsWith('Hypothesis: ') ||
+    message.startsWith('Context: ')
+  );
 }

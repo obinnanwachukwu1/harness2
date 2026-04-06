@@ -30,6 +30,8 @@ npm run dev -- auth login
 npm run dev -- auth status
 npm run dev -- auth access
 npm run dev -- auth logout
+npm run dev -- -p "inspect the repo"
+npm run dev -- resume <sessionId> -p "continue from here"
 npm run dev -- resume <sessionId>
 ```
 
@@ -52,15 +54,61 @@ Inside the terminal UI, use slash commands:
 /edit scratch.txt :: hello => hello world
 /glob "src/**/*.ts"
 /grep HeadlessEngine src
-/spawn --hypothesis "node is available in isolation" --cmd "node --version"
+/spawn --hypothesis "node is available in isolation"
 /experiment exp-12345678
+/adopt exp-12345678
 /auth login
 /auth status
 /auth logout
 /quit
 ```
 
-Any non-slash input is sent to the Codex model when OAuth is configured. The model can use the built-in local tools (`bash`, `read`, `write`, `edit`, `glob`, `grep`, `spawn_experiment`, `read_experiment`) through the headless engine.
+Any non-slash input is sent to the Codex model when OAuth is configured. The model can use the built-in local tools (`bash`, `read`, `write`, `edit`, `glob`, `grep`, `spawn_experiment`, `read_experiment`, `wait_experiment`, `search_experiments`, `compact`) through the headless engine.
+
+## Prompt Mode
+
+For a noninteractive one-shot mode with streamed output, use:
+
+```bash
+npm run dev -- -p "what does this project do?"
+npm run dev -- resume <sessionId> -p "continue the previous investigation"
+```
+
+This runs a single turn through the normal engine path and prints streamed assistant text and tool outputs directly to stdout.
+
+## Eval Prompts
+
+Keep these prompts stable when checking mechanism choice regressions.
+
+Inside the experiment boundary: should usually spawn at least one real experiment.
+
+```text
+I want to know whether a temporary dependency install done inside an isolated side-task workspace can stay fully confined there.
+
+Do not edit code.
+
+Investigate whether this harness can verify that behavior reliably, what the main uncertainty is, and what evidence most reduces uncertainty before implementation.
+```
+
+Outside the experiment boundary: should usually stay with direct reading or inline probes.
+
+```text
+I want to know how this harness should recover if the main process crashes while a side task is still running.
+
+Do not edit code.
+
+Investigate whether the current architecture can recover that state cleanly, what the riskiest assumptions are, and what evidence most reduces uncertainty before implementation.
+```
+
+Ambiguous boundary: should at least produce grounded evidence, and often one narrow experiment is reasonable.
+
+```text
+I’m considering allowing multiple side tasks to run at once in this harness.
+
+Do not edit code.
+
+Investigate whether the current system can support that safely, the main constraints, the smallest viable path, and what evidence most reduces uncertainty before implementation.
+```
 
 ## OpenAI Codex OAuth
 
@@ -95,7 +143,8 @@ test/
 ## Notes
 
 - State lives under `.h2/notebook.sqlite`.
-- Experiment worktrees live under `.h2/worktrees/<experimentId>`.
+- Experiment worktrees live under `.harness2/worktrees/<experimentId>`.
+- Adoption previews and patches live under `.h2/adoptions/<experimentId>.patch`.
 - Resolved experiments remove their worktree unless `--preserve` is set.
 - Token usage is currently a simple estimated counter based on emitted observation text.
 - Model integration, cancellation, and richer editing commands are left as TODOs for later versions.
