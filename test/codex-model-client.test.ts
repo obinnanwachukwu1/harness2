@@ -1129,3 +1129,343 @@ test('CodexModelClient retries transient 500 responses before succeeding', async
   assert.equal(emitted[0]?.role, 'assistant');
   assert.equal(emitted[0]?.text, 'Recovered after retry.');
 });
+
+test('CodexModelClient preserves streamed visible text when completed payload omits output_text', async (t) => {
+  const tempDir = await createTempDir('h2-model-visible-text-fallback-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-test', tempDir);
+
+  const now = 1_700_000_000_000;
+  notebook.upsertOpenAICodexAuth({
+    provider: 'openai-codex',
+    type: 'oauth',
+    accessToken: createUnsignedJwt({
+      exp: Math.floor((now + 3600_000) / 1000)
+    }),
+    refreshToken: 'refresh-token',
+    idToken: createUnsignedJwt({
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: 'acct_123'
+      }
+    }),
+    accountId: 'acct_123',
+    expiresAt: now + 3600_000,
+    createdAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString()
+  });
+
+  const auth = new OpenAICodexAuth(notebook, { now: () => now });
+  const client = new CodexModelClient(notebook, auth, {
+    fetchImpl: async () =>
+      new Response(
+        [
+          `data: ${JSON.stringify({ type: 'response.text.delta', delta: 'Hello' })}`,
+          '',
+          '',
+          `data: ${JSON.stringify({ type: 'response.text.delta', delta: ' world' })}`,
+          '',
+          '',
+          `data: ${JSON.stringify({
+            type: 'response.completed',
+            response: {
+              id: 'resp_text_only',
+              output: [
+                {
+                  type: 'message',
+                  content: [{ type: 'text', text: { value: 'Hello world' } }]
+                }
+              ]
+            }
+          })}`,
+          '',
+          ''
+        ].join('\n'),
+        {
+          headers: { 'content-type': 'text/event-stream' }
+        }
+      )
+  });
+
+  const emitted: Array<{ role: TranscriptRole; text: string }> = [];
+  const streamed: string[] = [];
+  const tools: AgentTools = {
+    bash: async () => '',
+    read: async () => '',
+    write: async () => '',
+    edit: async () => '',
+    glob: async () => [],
+    grep: async () => '',
+    spawnExperiment: async () => {
+      throw new Error('not used');
+    },
+    readExperiment: async () => {
+      throw new Error('not used');
+    },
+    authLogin: async () => '',
+    authStatus: async () => '',
+    authLogout: async () => '',
+    getModelSettings: async () => '',
+    setModel: async () => '',
+    setReasoningEffort: async () => ''
+  };
+
+  await client.runTurn(
+    'session-test',
+    'say hello',
+    tools,
+    async (role, text) => {
+      emitted.push({ role, text });
+    },
+    async (text) => {
+      streamed.push(text);
+    }
+  );
+
+  assert.deepEqual(streamed, ['Hello', 'Hello world']);
+  assert.equal(emitted[0]?.role, 'assistant');
+  assert.equal(emitted[0]?.text, 'Hello world');
+});
+
+test('CodexModelClient reconstructs streamed tool calls when completed payload omits output items', async (t) => {
+  const tempDir = await createTempDir('h2-model-stream-tools-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-test', tempDir);
+
+  const now = 1_700_000_000_000;
+  notebook.upsertOpenAICodexAuth({
+    provider: 'openai-codex',
+    type: 'oauth',
+    accessToken: createUnsignedJwt({
+      exp: Math.floor((now + 3600_000) / 1000)
+    }),
+    refreshToken: 'refresh-token',
+    idToken: createUnsignedJwt({
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: 'acct_123'
+      }
+    }),
+    accountId: 'acct_123',
+    expiresAt: now + 3600_000,
+    createdAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString()
+  });
+
+  let responseCount = 0;
+  const auth = new OpenAICodexAuth(notebook, { now: () => now });
+  const client = new CodexModelClient(notebook, auth, {
+    fetchImpl: async () => {
+      responseCount += 1;
+      if (responseCount === 1) {
+        return new Response(
+          `data: ${JSON.stringify({
+            type: 'response.output_item.added',
+            item: {
+              id: 'fc_1',
+              type: 'function_call',
+              call_id: 'call_1',
+              name: 'read',
+              arguments: '',
+              status: 'in_progress'
+            }
+          })}\n\n` +
+            `data: ${JSON.stringify({
+              type: 'response.function_call_arguments.done',
+              item_id: 'fc_1',
+              output_index: 0,
+              arguments: '{"path":"README.md"}'
+            })}\n\n` +
+            `data: ${JSON.stringify({
+              type: 'response.output_item.done',
+              item: {
+                id: 'fc_1',
+                type: 'function_call',
+                call_id: 'call_1',
+                name: 'read',
+                arguments: '{"path":"README.md"}',
+                status: 'completed'
+              }
+            })}\n\n` +
+            `data: ${JSON.stringify({
+              type: 'response.completed',
+              response: {
+                id: 'resp_1',
+                output: []
+              }
+            })}\n\n`,
+          {
+            headers: { 'content-type': 'text/event-stream' }
+          }
+        );
+      }
+
+      return new Response(
+        `data: ${JSON.stringify({
+          type: 'response.completed',
+          response: {
+            id: 'resp_2',
+            output: [
+              {
+                type: 'message',
+                content: [{ type: 'output_text', text: 'Done.' }]
+              }
+            ]
+          }
+        })}\n\n`,
+        {
+          headers: { 'content-type': 'text/event-stream' }
+        }
+      );
+    }
+  });
+
+  const emitted: Array<{ role: TranscriptRole; text: string }> = [];
+  const tools: AgentTools = {
+    bash: async () => '',
+    read: async (filePath) => `read ${filePath}`,
+    write: async () => '',
+    edit: async () => '',
+    glob: async () => [],
+    grep: async () => '',
+    spawnExperiment: async () => {
+      throw new Error('not used');
+    },
+    readExperiment: async () => {
+      throw new Error('not used');
+    },
+    authLogin: async () => '',
+    authStatus: async () => '',
+    authLogout: async () => '',
+    getModelSettings: async () => '',
+    setModel: async () => '',
+    setReasoningEffort: async () => ''
+  };
+
+  await client.runTurn(
+    'session-test',
+    'Read the readme',
+    tools,
+    async (role, text) => {
+      emitted.push({ role, text });
+    }
+  );
+
+  assert.equal(emitted[0]?.role, 'tool');
+  assert.match(emitted[0]?.text ?? '', /^@@tool\tread\tRead\(README\.md\)/);
+  assert.equal(emitted[1]?.role, 'assistant');
+  assert.equal(emitted[1]?.text, 'Done.');
+});
+
+test('CodexModelClient formats ranged read tool headers', async (t) => {
+  const tempDir = await createTempDir('h2-model-read-range-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-test', tempDir);
+
+  const now = 1_700_000_000_000;
+  notebook.upsertOpenAICodexAuth({
+    provider: 'openai-codex',
+    type: 'oauth',
+    accessToken: createUnsignedJwt({
+      exp: Math.floor((now + 3600_000) / 1000)
+    }),
+    refreshToken: 'refresh-token',
+    idToken: createUnsignedJwt({
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: 'acct_123'
+      }
+    }),
+    accountId: 'acct_123',
+    expiresAt: now + 3600_000,
+    createdAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString()
+  });
+
+  let responseCount = 0;
+  const auth = new OpenAICodexAuth(notebook, { now: () => now });
+  const client = new CodexModelClient(notebook, auth, {
+    fetchImpl: async () => {
+      responseCount += 1;
+      if (responseCount === 1) {
+        return new Response(
+          `data: ${JSON.stringify({
+            type: 'response.completed',
+            response: {
+              id: 'resp_1',
+              output: [
+                {
+                  type: 'function_call',
+                  call_id: 'call_1',
+                  name: 'read',
+                  arguments: JSON.stringify({ path: 'README.md', startLine: 10, endLine: 20 })
+                }
+              ]
+            }
+          })}\n\n`,
+          {
+            headers: { 'content-type': 'text/event-stream' }
+          }
+        );
+      }
+
+      return new Response(
+        `data: ${JSON.stringify({
+          type: 'response.completed',
+          response: {
+            id: 'resp_2',
+            output: [
+              {
+                type: 'message',
+                content: [{ type: 'output_text', text: 'Done.' }]
+              }
+            ]
+          }
+        })}\n\n`,
+        {
+          headers: { 'content-type': 'text/event-stream' }
+        }
+      );
+    }
+  });
+
+  const emitted: Array<{ role: TranscriptRole; text: string }> = [];
+  const tools: AgentTools = {
+    bash: async () => '',
+    read: async (filePath, startLine, endLine) => `read ${filePath} ${startLine}-${endLine}`,
+    write: async () => '',
+    edit: async () => '',
+    glob: async () => [],
+    grep: async () => '',
+    spawnExperiment: async () => {
+      throw new Error('not used');
+    },
+    readExperiment: async () => {
+      throw new Error('not used');
+    },
+    authLogin: async () => '',
+    authStatus: async () => '',
+    authLogout: async () => '',
+    getModelSettings: async () => '',
+    setModel: async () => '',
+    setReasoningEffort: async () => ''
+  };
+
+  await client.runTurn(
+    'session-test',
+    'Read a slice',
+    tools,
+    async (role, text) => {
+      emitted.push({ role, text });
+    }
+  );
+
+  assert.equal(emitted[0]?.role, 'tool');
+  assert.match(emitted[0]?.text ?? '', /^@@tool\tread\tRead\(README\.md:10-20\)/);
+});

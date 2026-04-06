@@ -141,7 +141,8 @@ Tool usage guidance:
   - Do not substitute broad shell fishing for a scoped experiment when the uncertainty is inside the experiment mechanism's observable boundary.
 - read
   - Use for targeted file reads that are likely to answer the question directly.
-  - Prefer a few high-signal files over dumping many large files.
+  - By default, read returns only the first 100 lines. Use line ranges when you need a different slice.
+  - Prefer a few high-signal files or ranges over dumping many large files.
 - write
   - Use to create or fully replace a file when the implementation path is already clear.
   - Do not use it for speculative churn.
@@ -278,6 +279,7 @@ Tool usage guidance:
   - Prefer commands that directly answer the hypothesis.
 - read
   - Use for focused file inspection relevant to the current hypothesis.
+  - Read defaults to the first 100 lines; request specific line ranges when the hypothesis depends on a narrower slice.
 - write
   - Use to create minimal experiment artifacts needed to answer the question.
 - edit

@@ -35,6 +35,28 @@ test('HeadlessEngine routes slash commands through the prototype runner', async 
   assert.equal(engine.snapshot.experiments[0]?.finalVerdict, 'inconclusive');
 });
 
+test('HeadlessEngine read defaults to 100 lines and supports explicit line ranges', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const largeFile = Array.from({ length: 150 }, (_, index) => `line ${index + 1}`).join('\n');
+  await writeFile(path.join(repoDir, 'slice.txt'), largeFile, 'utf8');
+
+  await engine.submit('/read slice.txt');
+  await engine.submit('/read slice.txt 120 125');
+
+  const transcript = engine.snapshot.transcript.map((entry) => entry.text).join('\n\n');
+  assert.match(transcript, /slice\.txt \(lines 1-100 of 150\)/);
+  assert.match(transcript, /1: line 1/);
+  assert.doesNotMatch(transcript, /101: line 101/);
+  assert.match(transcript, /slice\.txt \(lines 120-125 of 150\)/);
+  assert.match(transcript, /120: line 120/);
+  assert.match(transcript, /125: line 125/);
+});
+
 test('HeadlessEngine compact persists harness checkpoint with git state and active experiments', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));

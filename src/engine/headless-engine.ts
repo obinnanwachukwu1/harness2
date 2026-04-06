@@ -99,7 +99,7 @@ export class HeadlessEngine {
 
     this.tools = {
       bash: (command) => this.runBash(command),
-      read: (filePath) => this.runRead(filePath),
+      read: (filePath, startLine, endLine) => this.runRead(filePath, startLine, endLine),
       write: (filePath, content) => this.runWrite(filePath, content),
       edit: (filePath, findText, replaceText) => this.runEdit(filePath, findText, replaceText),
       glob: (pattern) => this.runGlob(pattern),
@@ -261,8 +261,8 @@ export class HeadlessEngine {
     return this.runBashAtRoot(this.options.cwd, command);
   }
 
-  private async runRead(filePath: string): Promise<string> {
-    return this.runReadAtRoot(this.options.cwd, filePath);
+  private async runRead(filePath: string, startLine?: number, endLine?: number): Promise<string> {
+    return this.runReadAtRoot(this.options.cwd, filePath, startLine, endLine);
   }
 
   private async runWrite(filePath: string, content: string): Promise<string> {
@@ -295,10 +295,25 @@ export class HeadlessEngine {
     return output;
   }
 
-  private async runReadAtRoot(root: string, filePath: string): Promise<string> {
+  private async runReadAtRoot(
+    root: string,
+    filePath: string,
+    startLine?: number,
+    endLine?: number
+  ): Promise<string> {
     const resolvedPath = this.resolveRootedPath(root, filePath);
     const content = await readFile(resolvedPath, 'utf8');
-    return `${relativeToWorkspace(root, resolvedPath)}\n\n${clampText(content, 12000)}`;
+    const allLines = content.split(/\r?\n/);
+    const totalLines = allLines.length;
+    const normalizedStart = normalizeReadStartLine(startLine);
+    const normalizedEnd = normalizeReadEndLine(normalizedStart, endLine, totalLines);
+    const slice = allLines.slice(normalizedStart - 1, normalizedEnd);
+    const numberedSlice = slice.map((line, index) => `${normalizedStart + index}: ${line}`);
+    return [
+      `${relativeToWorkspace(root, resolvedPath)} (lines ${normalizedStart}-${normalizedEnd} of ${totalLines})`,
+      '',
+      clampText(numberedSlice.join('\n'), 12000)
+    ].join('\n');
   }
 
   private async runWriteAtRoot(root: string, filePath: string, content: string): Promise<string> {
@@ -579,8 +594,13 @@ export class HeadlessEngine {
         await this.experimentManager.recordToolUsage(experiment.id, output);
         return output;
       },
-      read: async (filePath) => {
-        const output = await this.runReadAtRoot(experiment.worktreePath, filePath);
+      read: async (filePath, startLine, endLine) => {
+        const output = await this.runReadAtRoot(
+          experiment.worktreePath,
+          filePath,
+          startLine,
+          endLine
+        );
         await this.experimentManager.recordToolUsage(experiment.id, output);
         return output;
       },
@@ -942,6 +962,23 @@ function formatCommandResult(
 
 function relativeToWorkspace(cwd: string, filePath: string): string {
   return path.relative(cwd, filePath) || '.';
+}
+
+function normalizeReadStartLine(startLine?: number): number {
+  if (!Number.isFinite(startLine) || !startLine) {
+    return 1;
+  }
+
+  return Math.max(1, Math.floor(startLine));
+}
+
+function normalizeReadEndLine(startLine: number, endLine: number | undefined, totalLines: number): number {
+  const maxLine = Math.max(1, totalLines);
+  if (!Number.isFinite(endLine) || !endLine) {
+    return Math.min(maxLine, startLine + 99);
+  }
+
+  return Math.min(maxLine, Math.max(startLine, Math.floor(endLine)));
 }
 
 function looksLikeTestCommand(command: string): boolean {

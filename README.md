@@ -50,6 +50,7 @@ Inside the terminal UI, use slash commands:
 /help
 /bash git status --short
 /read package.json
+/read package.json 120 180
 /write scratch.txt :: hello
 /edit scratch.txt :: hello => hello world
 /glob "src/**/*.ts"
@@ -75,6 +76,14 @@ npm run dev -- resume <sessionId> -p "continue the previous investigation"
 ```
 
 This runs a single turn through the normal engine path and prints streamed assistant text and tool outputs directly to stdout.
+
+To debug raw model response shapes:
+
+```bash
+H2_DEBUG_RESPONSES=1 npm run dev -- -p "inspect the repo"
+```
+
+This writes JSONL debug records to `.h2/debug/responses.jsonl`. Override the path with `H2_DEBUG_RESPONSES_FILE=/absolute/path.jsonl` if needed.
 
 ## Eval Prompts
 

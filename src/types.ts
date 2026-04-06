@@ -248,7 +248,7 @@ export interface SpawnExperimentInput {
 
 export interface AgentTools {
   bash(command: string): Promise<string>;
-  read(filePath: string): Promise<string>;
+  read(filePath: string, startLine?: number, endLine?: number): Promise<string>;
   write(filePath: string, content: string): Promise<string>;
   edit(filePath: string, findText: string, replaceText: string): Promise<string>;
   glob(pattern: string): Promise<string[]>;

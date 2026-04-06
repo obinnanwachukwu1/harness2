@@ -1,4 +1,6 @@
+import { appendFile, mkdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
+import path from 'node:path';
 
 import { OPENAI_CODEX_ORIGINATOR, OpenAICodexAuth } from '../auth/openai-codex.js';
 import { ExperimentBudgetExceededError } from '../experiments/experiment-manager.js';
@@ -19,6 +21,10 @@ const DEFAULT_ENDPOINT =
   process.env.H2_CODEX_BASE_URL ?? 'https://chatgpt.com/backend-api/codex/responses';
 const MAX_MODEL_STEPS = normalizeMaxModelSteps(process.env.H2_MAX_MODEL_STEPS);
 const MAX_TRANSIENT_MODEL_RETRIES = 2;
+const DEBUG_RESPONSES_ENABLED = process.env.H2_DEBUG_RESPONSES === '1';
+const DEBUG_RESPONSES_FILE =
+  process.env.H2_DEBUG_RESPONSES_FILE ??
+  path.join(process.cwd(), '.h2', 'debug', 'responses.jsonl');
 
 interface CodexModelClientOptions {
   fetchImpl?: typeof fetch;
@@ -32,7 +38,7 @@ interface ResponseItem {
   call_id?: string;
   name?: string;
   arguments?: string;
-  content?: Array<{ type?: string; text?: string }>;
+  content?: Array<{ type?: string; text?: string | { value?: string } }>;
 }
 
 interface ResponsePayload {
@@ -163,6 +169,11 @@ export class CodexModelClient {
 
       if (toolCalls.length === 0) {
         if (!assistantText) {
+          await debugResponseShape(sessionId, 'no_visible_text_fallback', {
+            responseId: response.id ?? null,
+            outputTypes: (response.output ?? []).map((item) => item.type ?? '(missing)'),
+            response
+          });
           const fallback = 'The model returned no visible text.';
           this.persistHistoryItem(sessionId, {
             type: 'message',
@@ -273,21 +284,28 @@ export class CodexModelClient {
       headers['chatgpt-account-id'] = input.accountId;
     }
 
-      const body: Record<string, unknown> = {
-        model: input.settings.model,
-        instructions: input.instructions,
-        input: input.input,
-        tools: input.toolDefinitions,
-        tool_choice: 'auto',
-        store: false,
-        stream: true
-      };
+    const body: Record<string, unknown> = {
+      model: input.settings.model,
+      instructions: input.instructions,
+      input: input.input,
+      tools: input.toolDefinitions,
+      tool_choice: 'auto',
+      store: false,
+      stream: true
+    };
 
     if (input.settings.reasoningEffort) {
       body.reasoning = {
         effort: input.settings.reasoningEffort
       };
     }
+
+    await debugResponseShape(input.sessionId, 'request', {
+      endpoint: this.endpoint,
+      model: body.model,
+      reasoning: body.reasoning ?? null,
+      input: body.input
+    });
 
     const response = await this.fetchWithRetries(this.endpoint, {
       method: 'POST',
@@ -306,10 +324,12 @@ export class CodexModelClient {
 
     const contentType = response.headers.get('content-type') ?? '';
     if (contentType.includes('application/json')) {
-      return (await response.json()) as ResponsePayload;
+      const payload = (await response.json()) as ResponsePayload;
+      await debugResponseShape(input.sessionId, 'json_response', payload);
+      return payload;
     }
 
-    return readStreamingResponse(response, input.onAssistantStream);
+    return readStreamingResponse(response, input.sessionId, input.onAssistantStream);
   }
 
   private persistSession(record: ModelSessionRecord): void {
@@ -375,7 +395,11 @@ async function executeToolCall(call: ToolCall, tools: AgentTools): Promise<strin
     case 'bash':
       return tools.bash(readStringArg(args, 'command'));
     case 'read':
-      return tools.read(readStringArg(args, 'path'));
+      return tools.read(
+        readStringArg(args, 'path'),
+        readOptionalNumberArg(args, 'startLine'),
+        readOptionalNumberArg(args, 'endLine')
+      );
     case 'write':
       return tools.write(readStringArg(args, 'path'), readStringArg(args, 'content'));
     case 'edit':
@@ -575,8 +599,9 @@ function extractAssistantText(response: ResponsePayload): string {
       continue;
     }
     for (const content of item.content ?? []) {
-      if (content.type === 'output_text' && typeof content.text === 'string') {
-        pieces.push(content.text);
+      const text = extractContentPartText(content);
+      if (text) {
+        pieces.push(text);
       }
     }
   }
@@ -634,7 +659,11 @@ function formatToolHeader(name: string, rawArguments: string): string {
     case 'bash':
       return `Bash(${compactTextForHeader(readStringArg(args, 'command'), 72)})`;
     case 'read':
-      return `Read(${readStringArg(args, 'path')})`;
+      return formatReadHeader(
+        readStringArg(args, 'path'),
+        readOptionalNumberArg(args, 'startLine'),
+        readOptionalNumberArg(args, 'endLine')
+      );
     case 'write':
       return `Write(${readStringArg(args, 'path')})`;
     case 'edit':
@@ -670,6 +699,22 @@ function formatToolHeader(name: string, rawArguments: string): string {
 
 function compactTextForHeader(text: string, limit: number): string {
   return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
+}
+
+function formatReadHeader(path: string, startLine?: number, endLine?: number): string {
+  if (typeof startLine === 'number' && typeof endLine === 'number') {
+    return `Read(${path}:${Math.floor(startLine)}-${Math.floor(endLine)})`;
+  }
+
+  if (typeof startLine === 'number') {
+    return `Read(${path}:${Math.floor(startLine)}-)`;
+  }
+
+  if (typeof endLine === 'number') {
+    return `Read(${path}:1-${Math.floor(endLine)})`;
+  }
+
+  return `Read(${path})`;
 }
 
 function estimateHistoryItemTokens(item: ModelHistoryItem): number {
@@ -745,6 +790,7 @@ async function safeReadText(response: Response): Promise<string> {
 
 async function readStreamingResponse(
   response: Response,
+  sessionId: string,
   onAssistantStream?: (text: string) => Promise<void>
 ): Promise<ResponsePayload> {
   const reader = response.body?.getReader();
@@ -756,6 +802,7 @@ async function readStreamingResponse(
   let buffer = '';
   let completed: ResponsePayload | null = null;
   let liveAssistantText = '';
+  const streamedOutputItems = new Map<string, ResponseItem>();
 
   while (true) {
     const { value, done } = await reader.read();
@@ -771,6 +818,16 @@ async function readStreamingResponse(
       buffer = buffer.slice(boundary + 2);
 
       const event = parseSseEvent(chunk);
+      await debugResponseShape(
+        sessionId,
+        'sse_event',
+        event
+          ? {
+              type: typeof event.type === 'string' ? event.type : '(missing)',
+              event
+            }
+          : { type: '(unparsed)', chunk }
+      );
       if (event?.type === 'error') {
         const errorPayload =
           event.error && typeof event.error === 'object'
@@ -789,6 +846,8 @@ async function readStreamingResponse(
         await onAssistantStream?.(liveAssistantText);
       }
 
+      collectStreamingOutputItem(event, streamedOutputItems);
+
       if (event?.type === 'response.completed' && event.response) {
         completed = event.response as ResponsePayload;
       }
@@ -800,6 +859,16 @@ async function readStreamingResponse(
   if (!completed) {
     throw new Error('Streaming response ended before response.completed.');
   }
+
+  if ((!Array.isArray(completed.output) || completed.output.length === 0) && streamedOutputItems.size > 0) {
+    completed.output = Array.from(streamedOutputItems.values());
+  }
+
+  if (!extractAssistantText(completed) && liveAssistantText.trim()) {
+    completed.output_text = liveAssistantText.trim();
+  }
+
+  await debugResponseShape(sessionId, 'completed_response', completed);
 
   return completed;
 }
@@ -863,11 +932,24 @@ function extractContentPartText(part: unknown): string {
   }
 
   const contentPart = part as { type?: unknown; text?: unknown };
-  if (contentPart.type !== 'output_text') {
+  if (contentPart.type !== 'output_text' && contentPart.type !== 'text') {
     return '';
   }
 
-  return typeof contentPart.text === 'string' ? contentPart.text : '';
+  if (typeof contentPart.text === 'string') {
+    return contentPart.text;
+  }
+
+  if (
+    contentPart.text &&
+    typeof contentPart.text === 'object' &&
+    'value' in contentPart.text &&
+    typeof (contentPart.text as { value?: unknown }).value === 'string'
+  ) {
+    return (contentPart.text as { value: string }).value;
+  }
+
+  return '';
 }
 
 function extractOutputItemText(item: unknown): string {
@@ -885,6 +967,74 @@ function extractOutputItemText(item: unknown): string {
     .filter((part) => part.length > 0);
 
   return pieces.join('');
+}
+
+function collectStreamingOutputItem(
+  event: Record<string, unknown> | null,
+  streamedOutputItems: Map<string, ResponseItem>
+): void {
+  if (!event || typeof event.type !== 'string') {
+    return;
+  }
+
+  if (event.type !== 'response.output_item.added' && event.type !== 'response.output_item.done') {
+    return;
+  }
+
+  const item = normalizeResponseItem(event.item);
+  if (!item || item.type === 'reasoning') {
+    return;
+  }
+
+  const key = item.id ?? item.call_id ?? `${item.type}:${streamedOutputItems.size}`;
+  streamedOutputItems.set(key, item);
+}
+
+function normalizeResponseItem(item: unknown): ResponseItem | null {
+  if (!item || typeof item !== 'object') {
+    return null;
+  }
+
+  const record = item as Record<string, unknown>;
+  const normalized: ResponseItem = {
+    type: typeof record.type === 'string' ? record.type : undefined,
+    id: typeof record.id === 'string' ? record.id : undefined,
+    call_id: typeof record.call_id === 'string' ? record.call_id : undefined,
+    name: typeof record.name === 'string' ? record.name : undefined,
+    arguments: typeof record.arguments === 'string' ? record.arguments : undefined
+  };
+
+  if (Array.isArray(record.content)) {
+    normalized.content = record.content
+      .map((part) => normalizeContentPart(part))
+      .filter((part): part is { type?: string; text?: string | { value?: string } } => Boolean(part));
+  }
+
+  return normalized;
+}
+
+function normalizeContentPart(
+  part: unknown
+): { type?: string; text?: string | { value?: string } } | null {
+  if (!part || typeof part !== 'object') {
+    return null;
+  }
+
+  const record = part as Record<string, unknown>;
+  const normalized: { type?: string; text?: string | { value?: string } } = {
+    type: typeof record.type === 'string' ? record.type : undefined
+  };
+
+  if (typeof record.text === 'string') {
+    normalized.text = record.text;
+  } else if (record.text && typeof record.text === 'object') {
+    const textRecord = record.text as Record<string, unknown>;
+    if (typeof textRecord.value === 'string') {
+      normalized.text = { value: textRecord.value };
+    }
+  }
+
+  return normalized;
 }
 
 function parseSseEvent(chunk: string): Record<string, unknown> | null {
@@ -913,6 +1063,33 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+async function debugResponseShape(
+  sessionId: string,
+  kind: string,
+  payload: unknown
+): Promise<void> {
+  if (!DEBUG_RESPONSES_ENABLED) {
+    return;
+  }
+
+  const dir = path.dirname(DEBUG_RESPONSES_FILE);
+  await mkdir(dir, { recursive: true });
+  await appendFile(
+    DEBUG_RESPONSES_FILE,
+    JSON.stringify(
+      {
+        timestamp: nowIso(),
+        sessionId,
+        kind,
+        payload
+      },
+      null,
+      0
+    ) + '\n',
+    'utf8'
+  );
 }
 
 function shouldInjectExperimentHint(
@@ -1040,11 +1217,13 @@ export const MAIN_TOOL_DEFINITIONS = [
     type: 'function',
     name: 'read',
     description:
-      'Read a specific file from the workspace. Prefer targeted files that are likely to answer the question directly; avoid broad file dumping when a smaller read would do.',
+      'Read a specific file from the workspace. By default, returns the first 100 lines. Use startLine and endLine for targeted slices when you need a different range; avoid broad file dumping when a smaller read would do.',
     parameters: {
       type: 'object',
       properties: {
-        path: { type: 'string' }
+        path: { type: 'string' },
+        startLine: { type: 'number' },
+        endLine: { type: 'number' }
       },
       required: ['path'],
       additionalProperties: false

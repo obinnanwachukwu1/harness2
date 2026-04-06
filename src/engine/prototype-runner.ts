@@ -10,7 +10,7 @@ const HELP_TEXT = [
   'Commands:',
   '/help',
   '/bash <command...>',
-  '/read <path>',
+  '/read <path> [startLine] [endLine]',
   '/write <path> :: <content>',
   '/edit <path> :: <find> => <replace>',
   '/glob <pattern>',
@@ -66,11 +66,23 @@ export class PrototypeRunner {
       case 'read': {
         const filePath = rawArgs[0];
         if (!filePath) {
-          await context.emit('assistant', 'Usage: /read <path>');
+          await context.emit('assistant', 'Usage: /read <path> [startLine] [endLine]');
           return;
         }
 
-        const output = await context.tools.read(filePath);
+        const startLine = rawArgs[1] ? Number.parseInt(rawArgs[1], 10) : undefined;
+        const endLine = rawArgs[2] ? Number.parseInt(rawArgs[2], 10) : undefined;
+        if (
+          (rawArgs[1] && Number.isNaN(startLine)) ||
+          (rawArgs[2] && Number.isNaN(endLine)) ||
+          (startLine !== undefined && startLine < 1) ||
+          (endLine !== undefined && endLine < 1)
+        ) {
+          await context.emit('assistant', 'Usage: /read <path> [startLine] [endLine]');
+          return;
+        }
+
+        const output = await context.tools.read(filePath, startLine, endLine);
         await context.emit('tool', output);
         return;
       }
