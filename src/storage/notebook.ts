@@ -11,10 +11,14 @@ import type {
   ExperimentStatus,
   ExperimentSearchResult,
   ModelHistoryItem,
+  ModelMessageRole,
   ModelSessionRecord,
   OpenAICodexAuthRecord,
   SessionRecord,
   SessionCheckpointRecord,
+  StudyDebtKind,
+  StudyDebtRecord,
+  StudyDebtResolution,
   TranscriptEntry,
   TranscriptRole
 } from '../types.js';
@@ -97,12 +101,28 @@ interface ModelHistoryRow {
   id: number;
   session_id: string;
   item_type: ModelHistoryItem['type'];
-  role: 'user' | 'assistant' | 'system' | null;
+  role: ModelMessageRole | null;
   name: string | null;
   call_id: string | null;
   arguments_text: string | null;
   content_text: string | null;
   created_at: string;
+}
+
+interface StudyDebtRow {
+  id: string;
+  session_id: string;
+  status: 'open' | 'closed';
+  kind: StudyDebtKind;
+  summary: string;
+  why_it_matters: string;
+  affected_paths_json: string | null;
+  recommended_study: string | null;
+  opened_at: string;
+  updated_at: string;
+  closed_at: string | null;
+  resolution: StudyDebtResolution | null;
+  resolution_note: string | null;
 }
 
 interface SessionCheckpointRow {
@@ -237,6 +257,25 @@ export class Notebook {
 
       CREATE INDEX IF NOT EXISTS idx_model_history_items_session_id
       ON model_history_items(session_id, id);
+
+      CREATE TABLE IF NOT EXISTS study_debts (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        status TEXT NOT NULL,
+        kind TEXT NOT NULL,
+        summary TEXT NOT NULL,
+        why_it_matters TEXT NOT NULL,
+        affected_paths_json TEXT,
+        recommended_study TEXT,
+        opened_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        closed_at TEXT,
+        resolution TEXT,
+        resolution_note TEXT
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_study_debts_session_status
+      ON study_debts(session_id, status, updated_at DESC);
 
       CREATE TABLE IF NOT EXISTS session_checkpoints (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -1023,10 +1062,181 @@ export class Notebook {
     return rows.map(mapModelHistoryItem);
   }
 
+  openStudyDebt(input: {
+    sessionId: string;
+    summary: string;
+    whyItMatters: string;
+    kind?: StudyDebtKind;
+    affectedPaths?: string[];
+    recommendedStudy?: string;
+  }): StudyDebtRecord {
+    const timestamp = nowIso();
+    const id = `debt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const affectedPaths =
+      input.affectedPaths && input.affectedPaths.length > 0
+        ? input.affectedPaths.map((item) => item.trim()).filter(Boolean)
+        : null;
+
+    this.db
+      .prepare(
+        `
+          INSERT INTO study_debts (
+            id,
+            session_id,
+            status,
+            kind,
+            summary,
+            why_it_matters,
+            affected_paths_json,
+            recommended_study,
+            opened_at,
+            updated_at,
+            closed_at,
+            resolution,
+            resolution_note
+          )
+          VALUES (?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+        `
+      )
+      .run(
+        id,
+        input.sessionId,
+        input.kind ?? 'runtime',
+        input.summary.trim(),
+        input.whyItMatters.trim(),
+        affectedPaths ? JSON.stringify(affectedPaths) : null,
+        input.recommendedStudy?.trim() || null,
+        timestamp,
+        timestamp
+      );
+
+    this.touchSession(input.sessionId);
+    return this.getStudyDebt(id) as StudyDebtRecord;
+  }
+
+  resolveStudyDebt(input: {
+    debtId: string;
+    resolution: StudyDebtResolution;
+    note: string;
+  }): StudyDebtRecord {
+    const existing = this.getStudyDebt(input.debtId);
+    if (!existing) {
+      throw new Error(`Unknown study debt: ${input.debtId}`);
+    }
+
+    const timestamp = nowIso();
+    this.db
+      .prepare(
+        `
+          UPDATE study_debts
+          SET status = 'closed',
+              updated_at = ?,
+              closed_at = ?,
+              resolution = ?,
+              resolution_note = ?
+          WHERE id = ?
+        `
+      )
+      .run(timestamp, timestamp, input.resolution, input.note.trim(), input.debtId);
+
+    this.touchSession(existing.sessionId);
+    return this.getStudyDebt(input.debtId) as StudyDebtRecord;
+  }
+
+  listOpenStudyDebts(sessionId: string): StudyDebtRecord[] {
+    const rows = this.db
+      .prepare(
+        `
+          SELECT
+            id,
+            session_id,
+            status,
+            kind,
+            summary,
+            why_it_matters,
+            affected_paths_json,
+            recommended_study,
+            opened_at,
+            updated_at,
+            closed_at,
+            resolution,
+            resolution_note
+          FROM study_debts
+          WHERE session_id = ?
+            AND status = 'open'
+          ORDER BY updated_at DESC, id DESC
+        `
+      )
+      .all(sessionId) as unknown as StudyDebtRow[];
+
+    return rows.map(mapStudyDebt);
+  }
+
+  listStudyDebts(sessionId: string): StudyDebtRecord[] {
+    const rows = this.db
+      .prepare(
+        `
+          SELECT
+            id,
+            session_id,
+            status,
+            kind,
+            summary,
+            why_it_matters,
+            affected_paths_json,
+            recommended_study,
+            opened_at,
+            updated_at,
+            closed_at,
+            resolution,
+            resolution_note
+          FROM study_debts
+          WHERE session_id = ?
+          ORDER BY opened_at ASC, id ASC
+        `
+      )
+      .all(sessionId) as unknown as StudyDebtRow[];
+
+    return rows.map(mapStudyDebt);
+  }
+
+  getStudyDebt(debtId: string): StudyDebtRecord | null {
+    const row = this.db
+      .prepare(
+        `
+          SELECT
+            id,
+            session_id,
+            status,
+            kind,
+            summary,
+            why_it_matters,
+            affected_paths_json,
+            recommended_study,
+            opened_at,
+            updated_at,
+            closed_at,
+            resolution,
+            resolution_note
+          FROM study_debts
+          WHERE id = ?
+        `
+      )
+      .get(debtId) as StudyDebtRow | undefined;
+
+    return row ? mapStudyDebt(row) : null;
+  }
+
   buildModelRequestHistory(sessionId: string): ModelHistoryItem[] {
     const checkpoint = this.getLatestSessionCheckpoint(sessionId);
+    const openStudyDebtReminder = this.buildOpenStudyDebtReminder(sessionId);
     if (!checkpoint) {
-      return this.listModelHistory(sessionId);
+      return [
+        ...(openStudyDebtReminder
+          ? [{ type: 'message', role: 'developer', content: openStudyDebtReminder } satisfies ModelHistoryItem]
+          : []),
+        ...this.listModelHistory(sessionId)
+      ];
     }
 
     const tailRows = this.db
@@ -1057,11 +1267,33 @@ export class Notebook {
     return [
       {
         type: 'message',
-        role: 'system',
+        role: 'developer',
         content: checkpoint.checkpointBlock
       },
+      ...(openStudyDebtReminder
+        ? [{ type: 'message', role: 'developer', content: openStudyDebtReminder } satisfies ModelHistoryItem]
+        : []),
       ...tailRows.map(mapModelHistoryItem)
     ];
+  }
+
+  buildOpenStudyDebtReminder(sessionId: string): string | null {
+    const openDebts = this.listOpenStudyDebts(sessionId);
+    if (openDebts.length === 0) {
+      return null;
+    }
+
+    return [
+      'Open study debt:',
+      ...openDebts.map((debt) => {
+        const scope =
+          debt.affectedPaths && debt.affectedPaths.length > 0
+            ? ` scope=${debt.affectedPaths.join(', ')}`
+            : ' scope=all main-workspace edits';
+        const study = debt.recommendedStudy ? ` study=${debt.recommendedStudy}` : '';
+        return `- ${debt.id} [${debt.kind}]: ${debt.summary}; why=${debt.whyItMatters}; discharge via study, static evidence, scope narrowing, or user override before dependent edits.${scope}${study}`;
+      })
+    ].join('\n');
   }
 
   createSessionCheckpoint(input: {
@@ -1330,6 +1562,24 @@ function mapModelHistoryItem(row: ModelHistoryRow): ModelHistoryItem {
   };
 }
 
+function mapStudyDebt(row: StudyDebtRow): StudyDebtRecord {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    status: row.status,
+    kind: row.kind,
+    summary: row.summary,
+    whyItMatters: row.why_it_matters,
+    affectedPaths: parseNullableJsonArray(row.affected_paths_json),
+    recommendedStudy: row.recommended_study,
+    openedAt: row.opened_at,
+    updatedAt: row.updated_at,
+    closedAt: row.closed_at,
+    resolution: row.resolution,
+    resolutionNote: row.resolution_note
+  };
+}
+
 function mapSessionCheckpoint(row: SessionCheckpointRow): SessionCheckpointRecord {
   return {
     id: row.id,
@@ -1364,6 +1614,15 @@ function parseJsonArray(value: string | null): string[] {
   } catch {
     return [];
   }
+}
+
+function parseNullableJsonArray(value: string | null): string[] | null {
+  if (!value) {
+    return null;
+  }
+
+  const parsed = parseJsonArray(value);
+  return parsed.length > 0 ? parsed : [];
 }
 
 function parseExperimentSearchResults(value: string | null): ExperimentSearchResult[] {

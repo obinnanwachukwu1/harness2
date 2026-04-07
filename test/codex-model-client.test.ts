@@ -134,8 +134,11 @@ test('CodexModelClient performs tool round-trips and persists previous_response_
   assert.equal(requests[0]?.headers.get('session_id'), 'session-test');
   assert.equal(requests[0]?.body.model, 'gpt-5.4');
   assert.equal(requests[0]?.body.stream, true);
+  assert.equal(requests[0]?.body.prompt_cache_key, 'session-test');
+  assert.equal('previous_response_id' in (requests[0]?.body ?? {}), false);
   assert.deepEqual(requests[0]?.body.reasoning, { effort: 'medium' });
-  assert.equal('previous_response_id' in (requests[1]?.body ?? {}), false);
+  assert.equal(requests[1]?.body.prompt_cache_key, 'session-test');
+  assert.equal(requests[1]?.body.previous_response_id, 'resp_1');
   assert.deepEqual(requests[1]?.body.input, [
     { role: 'user', content: 'Read the readme' },
     {
@@ -254,8 +257,8 @@ test('CodexModelClient surfaces streaming assistant deltas before completion', a
   assert.equal(emitted[0]?.text, 'Hello world');
 });
 
-test('CodexModelClient injects a harness hint after extended inline probing', async (t) => {
-  const tempDir = await createTempDir('h2-model-hint-');
+test('CodexModelClient injects an early study-opportunity hint before mutation', async (t) => {
+  const tempDir = await createTempDir('h2-model-early-study-hint-');
   t.after(async () => cleanupDir(tempDir));
 
   const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
@@ -296,11 +299,14 @@ test('CodexModelClient injects a harness hint after extended inline probing', as
             type: 'response.completed',
             response: {
               id: 'resp_1',
-              output: Array.from({ length: 8 }, (_, index) => ({
+              output: Array.from({ length: 5 }, (_, index) => ({
                 type: 'function_call',
                 call_id: `call_${index + 1}`,
-                name: 'read',
-                arguments: JSON.stringify({ path: `file-${index + 1}.txt` })
+                name: index % 2 === 0 ? 'read' : 'grep',
+                arguments:
+                  index % 2 === 0
+                    ? JSON.stringify({ path: `app/auth/file-${index + 1}.ts` })
+                    : JSON.stringify({ pattern: 'session', target: 'app/auth' })
               }))
             }
           })}\n\n`,
@@ -363,8 +369,8 @@ test('CodexModelClient injects a harness hint after extended inline probing', as
 
   assert.equal(requests.length, 2);
   const secondInput = requests[1]?.input as Array<Record<string, unknown>>;
-  assert.equal(secondInput[0]?.role, 'system');
-  assert.match(String(secondInput[0]?.content ?? ''), /Harness hint:/);
+  assert.equal(secondInput[0]?.role, 'developer');
+  assert.match(String(secondInput[0]?.content ?? ''), /launch one bounded study now/i);
 });
 
 test('CodexModelClient injects a post-spawn wait hint after repeated probing', async (t) => {
@@ -508,7 +514,7 @@ test('CodexModelClient injects a post-spawn wait hint after repeated probing', a
 
   assert.equal(requests.length, 3);
   const thirdInput = requests[2]?.input as Array<Record<string, unknown>>;
-  assert.equal(thirdInput[0]?.role, 'system');
+  assert.equal(thirdInput[0]?.role, 'developer');
   assert.match(String(thirdInput[0]?.content ?? ''), /You already have a live experiment/);
 });
 
@@ -644,7 +650,7 @@ test('CodexModelClient injects a pre-edit guard hint after long investigation wi
 
   assert.equal(requests.length, 3);
   const thirdInput = requests[2]?.input as Array<Record<string, unknown>>;
-  assert.equal(thirdInput[0]?.role, 'system');
+  assert.equal(thirdInput[0]?.role, 'developer');
   assert.match(String(thirdInput[0]?.content ?? ''), /moving toward implementation/i);
 });
 
@@ -793,7 +799,7 @@ test('CodexModelClient injects an observation hint for experiment subagents afte
 
   assert.equal(requests.length, 3);
   const thirdInput = requests[2]?.input as Array<Record<string, unknown>>;
-  assert.equal(thirdInput[0]?.role, 'system');
+  assert.equal(thirdInput[0]?.role, 'developer');
   assert.match(String(thirdInput[0]?.content ?? ''), /without logging a fresh observation/);
 });
 
@@ -1133,7 +1139,7 @@ test('CodexModelClient rebuilds requests from latest checkpoint plus recent tail
   assert.equal(requests.length, 1);
   assert.equal(typeof requests[0]?.instructions, 'string');
   assert.deepEqual(requests[0]?.input, [
-    { role: 'system', content: 'Harness checkpoint block' },
+    { role: 'developer', content: 'Harness checkpoint block' },
     { role: 'user', content: 'recent user' }
   ]);
 });
@@ -1180,6 +1186,105 @@ test('CodexModelClient estimates context usage from compacted replay state', asy
   assert.equal(usage.totalTokens, 1_050_000);
   assert.ok(usage.usedTokens > 0);
   assert.ok(usage.usedTokens < 10_000);
+});
+
+test('CodexModelClient injects open study debt reminders into model requests', async (t) => {
+  const tempDir = await createTempDir('h2-model-study-debt-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-test', tempDir);
+  notebook.appendModelHistoryItem('session-test', {
+    type: 'message',
+    role: 'user',
+    content: 'implement auth continuity'
+  });
+  notebook.openStudyDebt({
+    sessionId: 'session-test',
+    summary: 'guest-to-login continuity is unproven',
+    whyItMatters: 'Being wrong would change the chosen ownership-transfer path.',
+    kind: 'runtime',
+    affectedPaths: ['app/(auth)', 'lib/db/queries.ts']
+  });
+
+  const now = 1_700_000_000_000;
+  notebook.upsertOpenAICodexAuth({
+    provider: 'openai-codex',
+    type: 'oauth',
+    accessToken: createUnsignedJwt({
+      exp: Math.floor((now + 3600_000) / 1000)
+    }),
+    refreshToken: 'refresh-token',
+    idToken: createUnsignedJwt({
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: 'acct_123'
+      }
+    }),
+    accountId: 'acct_123',
+    expiresAt: now + 3600_000,
+    createdAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString()
+  });
+
+  const requests: Array<Record<string, unknown>> = [];
+  const auth = new OpenAICodexAuth(notebook, { now: () => now });
+  const client = new CodexModelClient(notebook, auth, {
+    fetchImpl: async (_input, init) => {
+      requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return new Response(
+        `data: ${JSON.stringify({
+          type: 'response.completed',
+          response: {
+            id: 'resp_1',
+            output: [
+              {
+                type: 'message',
+                content: [{ type: 'output_text', text: 'ack' }]
+              }
+            ]
+          }
+        })}\n\n`,
+        {
+          headers: { 'content-type': 'text/event-stream' }
+        }
+      );
+    }
+  });
+
+  const tools: AgentTools = {
+    bash: async () => '',
+    read: async () => '',
+    write: async () => '',
+    edit: async () => '',
+    glob: async () => [],
+    grep: async () => '',
+    spawnExperiment: async () => {
+      throw new Error('not used');
+    },
+    readExperiment: async () => {
+      throw new Error('not used');
+    },
+    authLogin: async () => '',
+    authStatus: async () => '',
+    authLogout: async () => '',
+    getModelSettings: async () => '',
+    setModel: async () => '',
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
+  };
+
+  await client.runTurn('session-test', 'ignored because history exists', tools, async () => undefined);
+
+  assert.equal(requests.length, 1);
+  assert.deepEqual(requests[0]?.input, [
+    {
+      role: 'developer',
+      content: notebook.buildOpenStudyDebtReminder('session-test')
+    },
+    { role: 'user', content: 'implement auth continuity' }
+  ]);
 });
 
 test('CodexModelClient turns tool-call failures into tool outputs so the loop can continue', async (t) => {

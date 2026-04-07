@@ -12,6 +12,8 @@ import type {
   ExperimentObservationTag,
   ModelHistoryItem,
   ModelSessionRecord,
+  StudyDebtKind,
+  StudyDebtResolution,
   TranscriptRole
 } from '../types.js';
 
@@ -126,7 +128,16 @@ export class CodexModelClient {
         return;
       }
 
+      const earlyStudyOpportunityHint = shouldInjectEarlyStudyOpportunityHint(
+        inputText,
+        requestItems,
+        toolDefinitions
+      )
+        ? buildEarlyStudyOpportunityHint()
+        : null;
       const hints = [
+        earlyStudyOpportunityHint,
+        !earlyStudyOpportunityHint &&
         shouldInjectExperimentHint(inputText, requestItems, toolDefinitions)
           ? buildExperimentHint()
           : null,
@@ -140,10 +151,11 @@ export class CodexModelClient {
         accessToken,
         accountId: authRecord.accountId,
         sessionId,
+        previousResponseId,
         settings,
         input: [
           ...hints.map((hint) => ({
-            role: 'system' as const,
+            role: 'developer' as const,
             content: hint
           })),
           ...requestItems.map(toResponseInputItem)
@@ -283,6 +295,7 @@ export class CodexModelClient {
     accessToken: string;
     accountId: string;
     sessionId: string;
+    previousResponseId: string | null;
     settings: ModelSessionRecord;
     input: unknown;
     onAssistantStream?: (text: string) => Promise<void>;
@@ -308,9 +321,14 @@ export class CodexModelClient {
       input: input.input,
       tools: input.toolDefinitions,
       tool_choice: 'auto',
+      prompt_cache_key: input.sessionId,
       store: false,
       stream: true
     };
+
+    if (input.previousResponseId) {
+      body.previous_response_id = input.previousResponseId;
+    }
 
     const reasoning: Record<string, unknown> = {};
     if (input.settings.reasoningEffort) {
@@ -327,7 +345,9 @@ export class CodexModelClient {
       endpoint: this.endpoint,
       model: body.model,
       reasoning: body.reasoning ?? null,
-      input: body.input
+      input: body.input,
+      previous_response_id: body.previous_response_id ?? null,
+      prompt_cache_key: body.prompt_cache_key ?? null
     });
 
     const response = await this.fetchWithRetries(this.endpoint, {
@@ -485,6 +505,34 @@ async function executeToolCall(call: ToolCall, tools: AgentTools): Promise<strin
         throw new Error('search_experiments is not available in this session.');
       }
       return JSON.stringify(await tools.searchExperiments(readOptionalStringArg(args, 'query')), null, 2);
+    case 'open_study_debt':
+      if (!tools.openStudyDebt) {
+        throw new Error('open_study_debt is not available in this session.');
+      }
+      return JSON.stringify(
+        await tools.openStudyDebt({
+          summary: readStringArg(args, 'summary'),
+          whyItMatters: readStringArg(args, 'whyItMatters'),
+          kind: readOptionalStringArg(args, 'kind') as StudyDebtKind | undefined,
+          affectedPaths: readOptionalStringArrayArg(args, 'affectedPaths'),
+          recommendedStudy: readOptionalStringArg(args, 'recommendedStudy')
+        }),
+        null,
+        2
+      );
+    case 'resolve_study_debt':
+      if (!tools.resolveStudyDebt) {
+        throw new Error('resolve_study_debt is not available in this session.');
+      }
+      return JSON.stringify(
+        await tools.resolveStudyDebt({
+          debtId: readStringArg(args, 'debtId'),
+          resolution: readStringArg(args, 'resolution') as StudyDebtResolution,
+          note: readStringArg(args, 'note')
+        }),
+        null,
+        2
+      );
     case 'compact':
       if (!tools.compact) {
         throw new Error('compact is not available in this session.');
@@ -658,7 +706,7 @@ function extractReasoningSummary(response: ResponsePayload): string {
 }
 
 function toResponseInputItem(item: ModelHistoryItem):
-  | { role: 'user' | 'assistant' | 'system'; content: string }
+  | { role: 'user' | 'assistant' | 'system' | 'developer'; content: string }
   | { type: 'function_call'; call_id: string; name: string; arguments: string }
   | { type: 'function_call_output'; call_id: string; output: string } {
   if (item.type === 'message') {
@@ -734,6 +782,10 @@ function formatToolHeader(name: string, rawArguments: string): string {
       const query = readOptionalStringArg(args, 'query');
       return query ? `experiment search(${compactTextForHeader(query, 56)})` : 'experiment search()';
     }
+    case 'open_study_debt':
+      return `study debt open(${compactTextForHeader(readStringArg(args, 'summary'), 56)})`;
+    case 'resolve_study_debt':
+      return `study debt resolve(${readStringArg(args, 'debtId')})`;
     case 'extend_experiment_budget':
       return `experiment budget(${readStringArg(args, 'experimentId')})`;
     case 'resolve_experiment':
@@ -1277,15 +1329,9 @@ function shouldInjectExperimentHint(
     return false;
   }
 
-  const currentTurnItems = getCurrentTurnItems(requestItems);
-  const functionCalls = currentTurnItems.filter(
-    (item): item is Extract<ModelHistoryItem, { type: 'function_call' }> => item.type === 'function_call'
-  );
-  const inlineProbeCount = functionCalls.filter((item) =>
-    ['bash', 'read', 'glob', 'grep'].includes(item.name)
-  ).length;
-
-  if (inlineProbeCount < 8) {
+  const functionCalls = getCurrentTurnFunctionCalls(requestItems);
+  const inlineProbeCalls = getInlineProbeCalls(functionCalls);
+  if (inlineProbeCalls.length < 6) {
     return false;
   }
 
@@ -1297,24 +1343,48 @@ function shouldInjectExperimentHint(
     return false;
   }
 
-  const text = inputText.toLowerCase();
-  const experimentFriendly =
-    /(isolat|compat|version|integrat|runtime|concurr|worktree|dependency|install|behavior|safely|evidence|uncertainty|side task|background task)/i.test(
-      text
-    );
-  const externalObserver =
-    /(crash|restart|startup|rehydrat|reconcile|ownership|recover after process death|main process dies)/i.test(
-      text
-    );
+  return (
+    appearsStudyableByExperiment(inputText, inlineProbeCalls) &&
+    isCirclingRiskArea(inlineProbeCalls)
+  );
+}
 
-  return experimentFriendly && !externalObserver;
+function shouldInjectEarlyStudyOpportunityHint(
+  inputText: string,
+  requestItems: ModelHistoryItem[],
+  toolDefinitions: readonly ToolDefinition[]
+): boolean {
+  if (!toolDefinitions.some((tool) => tool.name === 'spawn_experiment')) {
+    return false;
+  }
+
+  const functionCalls = getCurrentTurnFunctionCalls(requestItems);
+  if (functionCalls.some((item) => item.name === 'spawn_experiment')) {
+    return false;
+  }
+
+  if (functionCalls.some((item) => ['write', 'edit'].includes(item.name))) {
+    return false;
+  }
+
+  if (functionCalls.some((item) => item.name === 'open_study_debt')) {
+    return false;
+  }
+
+  const inlineProbeCalls = getInlineProbeCalls(functionCalls);
+  if (inlineProbeCalls.length < 4) {
+    return false;
+  }
+
+  if (!appearsStudyableByExperiment(inputText, inlineProbeCalls)) {
+    return false;
+  }
+
+  return inlineProbeCalls.length >= 5 || isCirclingRiskArea(inlineProbeCalls);
 }
 
 function shouldInjectPreEditGuardHint(requestItems: ModelHistoryItem[]): boolean {
-  const currentTurnItems = getCurrentTurnItems(requestItems);
-  const functionCalls = currentTurnItems.filter(
-    (item): item is Extract<ModelHistoryItem, { type: 'function_call' }> => item.type === 'function_call'
-  );
+  const functionCalls = getCurrentTurnFunctionCalls(requestItems);
 
   const lastCall = functionCalls.at(-1);
   if (!lastCall || !['write', 'edit'].includes(lastCall.name)) {
@@ -1325,18 +1395,21 @@ function shouldInjectPreEditGuardHint(requestItems: ModelHistoryItem[]): boolean
     return false;
   }
 
-  const investigationCalls = functionCalls.slice(0, -1).filter((item) =>
-    ['bash', 'read', 'glob', 'grep'].includes(item.name)
-  ).length;
+  if (functionCalls.some((item) => item.name === 'open_study_debt')) {
+    return false;
+  }
 
-  return investigationCalls >= 8;
+  if (functionCalls.some((item) => item.name === 'resolve_study_debt')) {
+    return false;
+  }
+
+  const investigationCalls = getInlineProbeCalls(functionCalls.slice(0, -1));
+
+  return investigationCalls.length >= 5 && isCirclingRiskArea(investigationCalls);
 }
 
 function shouldInjectPostSpawnWaitHint(requestItems: ModelHistoryItem[]): boolean {
-  const currentTurnItems = getCurrentTurnItems(requestItems);
-  const functionCalls = currentTurnItems.filter(
-    (item): item is Extract<ModelHistoryItem, { type: 'function_call' }> => item.type === 'function_call'
-  );
+  const functionCalls = getCurrentTurnFunctionCalls(requestItems);
   const lastSpawnIndex = functionCalls.map((item) => item.name).lastIndexOf('spawn_experiment');
   if (lastSpawnIndex === -1) {
     return false;
@@ -1362,10 +1435,7 @@ function shouldInjectObservationHint(
     return false;
   }
 
-  const currentTurnItems = getCurrentTurnItems(requestItems);
-  const functionCalls = currentTurnItems.filter(
-    (item): item is Extract<ModelHistoryItem, { type: 'function_call' }> => item.type === 'function_call'
-  );
+  const functionCalls = getCurrentTurnFunctionCalls(requestItems);
   const lastObservationIndex = functionCalls.map((item) => item.name).lastIndexOf('log_observation');
   const sinceLastObservation =
     lastObservationIndex === -1 ? functionCalls : functionCalls.slice(lastObservationIndex + 1);
@@ -1392,13 +1462,154 @@ function getCurrentTurnItems(requestItems: ModelHistoryItem[]): ModelHistoryItem
   return requestItems;
 }
 
+function getCurrentTurnFunctionCalls(
+  requestItems: ModelHistoryItem[]
+): Array<Extract<ModelHistoryItem, { type: 'function_call' }>> {
+  return getCurrentTurnItems(requestItems).filter(
+    (item): item is Extract<ModelHistoryItem, { type: 'function_call' }> => item.type === 'function_call'
+  );
+}
+
+function getInlineProbeCalls(
+  functionCalls: Array<Extract<ModelHistoryItem, { type: 'function_call' }>>
+): Array<Extract<ModelHistoryItem, { type: 'function_call' }>> {
+  return functionCalls.filter((item) => ['bash', 'read', 'glob', 'grep'].includes(item.name));
+}
+
+function appearsStudyableByExperiment(
+  inputText: string,
+  inlineProbeCalls: Array<Extract<ModelHistoryItem, { type: 'function_call' }>>
+): boolean {
+  const combinedSignals = [
+    inputText,
+    ...inlineProbeCalls.map((item) => getStudySignalText(item))
+  ].join('\n');
+
+  const strongLifecycleOnly =
+    /(process death|main process dies|kill the harness|restart the harness|app shutdown|startup reconciliation|rehydrat|supervisor)/i.test(
+      combinedSignals
+    );
+  if (strongLifecycleOnly) {
+    return false;
+  }
+
+  return hasRiskSignal(combinedSignals);
+}
+
+function isCirclingRiskArea(
+  inlineProbeCalls: Array<Extract<ModelHistoryItem, { type: 'function_call' }>>
+): boolean {
+  const focusCounts = new Map<string, number>();
+  let riskySignalCount = 0;
+
+  for (const call of inlineProbeCalls) {
+    const signal = getStudySignalText(call);
+    if (signal && hasRiskSignal(signal)) {
+      riskySignalCount += 1;
+    }
+
+    const focusKey = getStudyFocusKey(call);
+    if (!focusKey) {
+      continue;
+    }
+    focusCounts.set(focusKey, (focusCounts.get(focusKey) ?? 0) + 1);
+  }
+
+  return riskySignalCount >= 3 || Array.from(focusCounts.values()).some((count) => count >= 2);
+}
+
+function hasRiskSignal(text: string): boolean {
+  return /(auth|session|login|register|redirect|cookie|continu|ownership|migrat|transfer|persist|cache|invalidat|provider|fallback|stream|retry|integrat|dependency|compat|isolat|concurr|runtime|behavior|safely|without breaking|actually correct|state|uncertainty|evidence|repro|worktree|background|artifact|autosave|draft)/i.test(
+    text
+  );
+}
+
+function getStudySignalText(
+  call: Extract<ModelHistoryItem, { type: 'function_call' }>
+): string {
+  const args = parseArguments(call.arguments);
+
+  switch (call.name) {
+    case 'read':
+      return readOptionalStringArg(args, 'path') ?? '';
+    case 'grep':
+      return [readOptionalStringArg(args, 'pattern'), readOptionalStringArg(args, 'target')]
+        .filter(Boolean)
+        .join(' ');
+    case 'glob':
+      return readOptionalStringArg(args, 'pattern') ?? '';
+    case 'bash':
+      return readOptionalStringArg(args, 'command') ?? '';
+    default:
+      return '';
+  }
+}
+
+function getStudyFocusKey(
+  call: Extract<ModelHistoryItem, { type: 'function_call' }>
+): string | null {
+  const args = parseArguments(call.arguments);
+
+  if (call.name === 'read') {
+    return normalizeFocusKey(readOptionalStringArg(args, 'path'));
+  }
+
+  if (call.name === 'grep') {
+    return normalizeFocusKey(readOptionalStringArg(args, 'target') ?? readOptionalStringArg(args, 'pattern'));
+  }
+
+  if (call.name === 'glob') {
+    return normalizeFocusKey(readOptionalStringArg(args, 'pattern'));
+  }
+
+  if (call.name === 'bash') {
+    const command = readOptionalStringArg(args, 'command');
+    if (!command) {
+      return null;
+    }
+
+    const match = command.match(
+      /(playwright|curl|next|npm|pnpm|yarn|bun|vitest|jest|test|build|dev|auth|session|login|register|redirect|cookie|cache|stream|provider|retry)/i
+    );
+    return match ? match[1]!.toLowerCase() : null;
+  }
+
+  return null;
+}
+
+function normalizeFocusKey(value: string | undefined): string | null {
+  if (!value) {
+    return null;
+  }
+
+  const cleaned = value.trim().replace(/\\/g, '/');
+  if (!cleaned) {
+    return null;
+  }
+
+  if (cleaned.includes('/')) {
+    const segments = cleaned.split('/').filter(Boolean).slice(0, 2);
+    return segments.length > 0 ? segments.join('/') : null;
+  }
+
+  return cleaned.toLowerCase();
+}
+
+function buildEarlyStudyOpportunityHint(): string {
+  return [
+    'Harness hint:',
+    'You likely have enough context to launch one bounded study now.',
+    'If this uncertainty could change the implementation choice and there is known-safe work you can continue in parallel, spawn the study early instead of waiting until you are blocked.',
+    'Keep the study narrow, concrete, and falsifiable.'
+  ].join(' ');
+}
+
 function buildExperimentHint(): string {
   return [
     'Harness hint:',
-    'You have spent a while gathering evidence inline without yet running an experiment.',
-    'If you already have enough context to state one concrete falsifiable experiment, stop gathering background and run it now.',
-    "If the open question is inside the isolated worktree/subagent boundary, prefer one narrow spawn_experiment over continued bash/read/grep probing.",
-    'If the question requires an external observer outside the side-task lifecycle, continue with direct probing instead.'
+    'You are still circling a studyable uncertainty inline without yet launching a bounded study.',
+    'If spawn_experiment can settle this more cheaply than more background probing, run one narrow study now.',
+    'Prefer a concrete falsifier over more read/grep churn.'
   ].join(' ');
 }
 
@@ -1406,9 +1617,8 @@ function buildPreEditGuardHint(): string {
   return [
     'Harness hint:',
     'You investigated this plan for a while and are now moving toward implementation.',
-    'If the remaining design still depends on an unverified assumption, do not edit yet.',
-    'Either gather decisive evidence, choose a better observer, or narrow the claim and explain the reduced scope.',
-    'If the path is already clearly safe and supported by the code or tests you inspected, proceed.'
+    'If dependent edits still rely on unresolved load-bearing uncertainty, declare or discharge study debt before editing through it.',
+    'Either open study debt, justify why static evidence is sufficient, or explicitly narrow scope before editing dependent code.'
   ].join(' ');
 }
 
@@ -1448,7 +1658,7 @@ export const MAIN_TOOL_DEFINITIONS = [
     type: 'function',
     name: 'bash',
     description:
-      'Run a shell command in the current workspace. Prefer this for direct repo inspection, tiny inline probes, or questions that require an external observer outside the experiment lifecycle, such as crash/restart or startup reconciliation behavior.',
+      'Run a shell command in the current workspace. Prefer this for direct repo inspection, tiny inline probes, targeted tests, or other checks that are cheaper to answer inline than by spawning a bounded experiment.',
     parameters: {
       type: 'object',
       properties: {
@@ -1536,7 +1746,7 @@ export const MAIN_TOOL_DEFINITIONS = [
     type: 'function',
     name: 'spawn_experiment',
     description:
-      'Run a scoped experiment in a separate git worktree. Use this when the uncertainty is load-bearing and can be directly observed by a bounded subagent operating inside an isolated worktree. After a brief orientation pass, if you can state one concrete falsifiable experiment, prefer running it over continued background gathering. Do not use this for questions that require an external observer outside the side-task lifecycle. If you do not have a strong reason to choose a smaller number, use a 50000 token budget.',
+      'Run a scoped experiment in a separate git worktree. Use this when the uncertainty is load-bearing and can be reduced by a bounded disposable study. After a brief orientation pass, if you can state one concrete falsifiable experiment and there is known-safe work you can continue in parallel, prefer launching it early over more background gathering. If you do not have a strong reason to choose a smaller number, use a 50000 token budget.',
     parameters: {
       type: 'object',
       properties: {
@@ -1601,6 +1811,49 @@ export const MAIN_TOOL_DEFINITIONS = [
       properties: {
         query: { type: 'string' }
       },
+      additionalProperties: false
+    }
+  },
+  {
+    type: 'function',
+    name: 'open_study_debt',
+    description:
+      'Declare unresolved, load-bearing uncertainty before editing code that depends on it. Use this when being wrong could materially change the implementation choice. Once declared, dependent main-workspace edits are blocked until the debt is discharged.',
+    parameters: {
+      type: 'object',
+      properties: {
+        summary: { type: 'string' },
+        whyItMatters: { type: 'string' },
+        kind: {
+          type: 'string',
+          enum: ['runtime', 'scope', 'architecture']
+        },
+        affectedPaths: {
+          type: 'array',
+          items: { type: 'string' }
+        },
+        recommendedStudy: { type: 'string' }
+      },
+      required: ['summary', 'whyItMatters'],
+      additionalProperties: false
+    }
+  },
+  {
+    type: 'function',
+    name: 'resolve_study_debt',
+    description:
+      'Discharge a previously opened study debt once it has been resolved by running a study, justifying static evidence, narrowing scope, or honoring a user override.',
+    parameters: {
+      type: 'object',
+      properties: {
+        debtId: { type: 'string' },
+        resolution: {
+          type: 'string',
+          enum: ['study_run', 'static_evidence_sufficient', 'scope_narrowed', 'user_override']
+        },
+        note: { type: 'string' }
+      },
+      required: ['debtId', 'resolution', 'note'],
       additionalProperties: false
     }
   },

@@ -7,6 +7,8 @@ import {
 
 import type { OpenTuiRenderBlock } from '../../../src/ui-opentui/render-types.js';
 
+type ToolTone = Extract<OpenTuiRenderBlock, { kind: 'tool' }>['tone'];
+
 export interface BlockView {
   container: BoxRenderable;
 }
@@ -80,12 +82,13 @@ export function updateBlockView(
       );
       return;
     case 'tool': {
+      const colors = getToolToneColors(block.tone);
       view.container.add(
         new TextRenderable(renderer, {
           id: `${baseId}-tool-header`,
           content: `⏺ ${block.header}`,
-          fg: block.tone === 'experiment' ? '#facc15' : '#8b8b8b',
-          selectionBg: '#fde68a',
+          fg: colors.header,
+          selectionBg: colors.selectionBg,
           selectionFg: '#111111',
           attributes: TextAttributes.BOLD,
           wrapMode: 'word'
@@ -101,15 +104,15 @@ export function updateBlockView(
           new TextRenderable(renderer, {
             id: `${baseId}-tool-body-gutter`,
             content: '⎿ ',
-            fg: block.tone === 'experiment' ? '#facc15' : '#9ca3af'
+            fg: colors.gutter
           })
         );
         bodyRow.add(
           new TextRenderable(renderer, {
             id: `${baseId}-tool-body`,
             content: block.body.join('\n'),
-            fg: block.tone === 'experiment' ? '#facc15' : '#9ca3af',
-            selectionBg: '#fde68a',
+            fg: colors.body,
+            selectionBg: colors.selectionBg,
             selectionFg: '#111111',
             wrapMode: 'word',
             flexGrow: 1
@@ -127,15 +130,15 @@ export function updateBlockView(
           new TextRenderable(renderer, {
             id: `${baseId}-tool-footer-gutter`,
             content: '  ',
-            fg: block.tone === 'experiment' ? '#ca8a04' : '#6b7280'
+            fg: colors.footer
           })
         );
         footerRow.add(
           new TextRenderable(renderer, {
             id: `${baseId}-tool-footer`,
             content: block.footer.join('\n'),
-            fg: block.tone === 'experiment' ? '#ca8a04' : '#6b7280',
-            selectionBg: '#fde68a',
+            fg: colors.footer,
+            selectionBg: colors.selectionBg,
             selectionFg: '#111111',
             wrapMode: 'word',
             flexGrow: 1
@@ -144,6 +147,41 @@ export function updateBlockView(
         view.container.add(footerRow);
       }
     }
+  }
+}
+
+function getToolToneColors(tone: ToolTone): {
+  header: string;
+  gutter: string;
+  body: string;
+  footer: string;
+  selectionBg: string;
+} {
+  switch (tone) {
+    case 'experiment':
+      return {
+        header: '#facc15',
+        gutter: '#facc15',
+        body: '#facc15',
+        footer: '#ca8a04',
+        selectionBg: '#fde68a'
+      };
+    case 'study_debt':
+      return {
+        header: '#fb7185',
+        gutter: '#fb7185',
+        body: '#fda4af',
+        footer: '#e11d48',
+        selectionBg: '#fecdd3'
+      };
+    default:
+      return {
+        header: '#8b8b8b',
+        gutter: '#9ca3af',
+        body: '#9ca3af',
+        footer: '#6b7280',
+        selectionBg: '#d1d5db'
+      };
   }
 }
 

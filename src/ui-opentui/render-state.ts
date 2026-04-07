@@ -1,6 +1,8 @@
 import type { EngineSnapshot, ExperimentRecord, TranscriptEntry } from '../types.js';
 import type { OpenTuiExperimentSummary, OpenTuiRenderBlock, OpenTuiState } from './render-types.js';
 
+type ToolTone = Extract<OpenTuiRenderBlock, { kind: 'tool' }>['tone'];
+
 const INPUT_PLACEHOLDER = 'Send a prompt…  ctrl-c quit  pageup/pagedown scroll  ctrl-t thinking';
 
 export function buildOpenTuiState(snapshot: EngineSnapshot): OpenTuiState {
@@ -96,7 +98,7 @@ function toolTranscriptToBlock(entry: TranscriptEntry): OpenTuiRenderBlock {
   const toolName = metadataMatch?.[1]?.trim() || legacyMatch?.[1]?.trim() || 'tool';
   const explicitLabel = metadataMatch?.[2]?.trim() || null;
   const body = metadataMatch?.[3] ?? legacyMatch?.[2] ?? entry.text;
-  const tone = isExperimentTool(toolName) ? 'experiment' : 'tool';
+  const tone = getToolTone(toolName);
   const summary = summarizeToolTranscript(toolName, body, explicitLabel);
 
   return {
@@ -197,6 +199,9 @@ function summarizeToolTranscript(
     case 'resolve_experiment':
     case 'extend_experiment_budget':
       return summarizeExperimentTool(toolName, body, explicitLabel);
+    case 'open_study_debt':
+    case 'resolve_study_debt':
+      return summarizeStudyDebtTool(toolName, body, explicitLabel);
     default:
       return summarizeGenericTool(toolName, body, explicitLabel, false);
   }
@@ -313,6 +318,44 @@ function summarizeExperimentTool(
   };
 }
 
+function summarizeStudyDebtTool(
+  toolName: string,
+  body: string,
+  explicitLabel: string | null
+) {
+  const parsed = safeJsonParse(body);
+  const label =
+    explicitLabel ||
+    {
+      open_study_debt: 'study debt open',
+      resolve_study_debt: 'study debt resolve'
+    }[toolName] ||
+    toolName;
+
+  if (!parsed || typeof parsed !== 'object') {
+    return summarizeGenericTool(label, body, explicitLabel, false);
+  }
+
+  const previewLines: string[] = [];
+  const maybeObject = parsed as Record<string, unknown>;
+
+  if (typeof maybeObject.debtId === 'string') {
+    previewLines.push(maybeObject.debtId);
+  } else if (typeof maybeObject.id === 'string') {
+    previewLines.push(maybeObject.id);
+  }
+
+  if (typeof maybeObject.status === 'string') {
+    previewLines.push(`status  ${maybeObject.status}`);
+  }
+
+  return {
+    label,
+    previewLines: previewLines.slice(0, 4),
+    footer: null
+  };
+}
+
 function summarizeGenericTool(
   toolName: string,
   body: string,
@@ -337,6 +380,22 @@ function safeJsonParse(body: string): unknown {
 
 function isExperimentTool(toolName: string): boolean {
   return toolName.includes('experiment');
+}
+
+function isStudyDebtTool(toolName: string): boolean {
+  return toolName.includes('study_debt');
+}
+
+function getToolTone(toolName: string): ToolTone {
+  if (isExperimentTool(toolName)) {
+    return 'experiment';
+  }
+
+  if (isStudyDebtTool(toolName)) {
+    return 'study_debt';
+  }
+
+  return 'tool';
 }
 
 function isExperimentNotice(text: string): boolean {

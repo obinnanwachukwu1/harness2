@@ -343,7 +343,7 @@ test('Notebook persists checkpoints and rebuilds compacted request history from 
   assert.deepEqual(notebook.buildModelRequestHistory(session.id), [
     {
       type: 'message',
-      role: 'system',
+      role: 'developer',
       content: 'Harness checkpoint v1'
     },
     {
@@ -376,7 +376,7 @@ test('Notebook persists checkpoints and rebuilds compacted request history from 
   assert.deepEqual(notebook.buildModelRequestHistory(session.id), [
     {
       type: 'message',
-      role: 'system',
+      role: 'developer',
       content: 'Harness checkpoint v2'
     },
     {
@@ -385,4 +385,73 @@ test('Notebook persists checkpoints and rebuilds compacted request history from 
       content: 'tail-two'
     }
   ]);
+});
+
+test('Notebook persists study debt and injects open debt reminders into request history', async (t) => {
+  const tempDir = await createTempDir('h2-notebook-study-debt-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+
+  const session = notebook.createSession('session-study-debt', tempDir);
+  notebook.appendModelHistoryItem(session.id, {
+    type: 'message',
+    role: 'user',
+    content: 'investigate auth continuity'
+  });
+
+  const debt = notebook.openStudyDebt({
+    sessionId: session.id,
+    summary: 'guest-to-login chat continuity is unproven',
+    whyItMatters: 'Being wrong would change the auth transfer implementation.',
+    kind: 'runtime',
+    affectedPaths: ['app/(auth)', 'lib/db/queries.ts'],
+    recommendedStudy: 'guest creates chat, signs in, returns to same chat'
+  });
+
+  assert.equal(debt.status, 'open');
+  assert.equal(notebook.listOpenStudyDebts(session.id).length, 1);
+
+  const requestHistory = notebook.buildModelRequestHistory(session.id);
+  assert.equal(requestHistory[0]?.type, 'message');
+  assert.equal(requestHistory[0]?.role, 'developer');
+  assert.match((requestHistory[0] as any).content, /Open study debt:/);
+  assert.match((requestHistory[0] as any).content, /guest-to-login chat continuity is unproven/);
+
+  notebook.createSessionCheckpoint({
+    sessionId: session.id,
+    goal: 'preserve continuity',
+    completed: 'identified guest/login ambiguity',
+    next: 'run bounded study',
+    gitLog: 'abc123 checkpoint',
+    gitStatus: '(clean)',
+    gitDiffStat: '(clean)',
+    activeExperimentSummaries: [],
+    checkpointBlock: 'Harness checkpoint with debt',
+    tailStartHistoryId: 1
+  });
+
+  const compactedHistory = notebook.buildModelRequestHistory(session.id);
+  assert.deepEqual(compactedHistory.slice(0, 2), [
+    {
+      type: 'message',
+      role: 'developer',
+      content: 'Harness checkpoint with debt'
+    },
+    {
+      type: 'message',
+      role: 'developer',
+      content: notebook.buildOpenStudyDebtReminder(session.id)
+    }
+  ]);
+
+  const resolved = notebook.resolveStudyDebt({
+    debtId: debt.id,
+    resolution: 'scope_narrowed',
+    note: 'Limited the feature to preserve continuity only on the same chat route.'
+  });
+  assert.equal(resolved.status, 'closed');
+  assert.equal(notebook.listOpenStudyDebts(session.id).length, 0);
+  assert.equal(notebook.buildOpenStudyDebtReminder(session.id), null);
 });

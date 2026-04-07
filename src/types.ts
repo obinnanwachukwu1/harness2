@@ -29,10 +29,12 @@ export interface TranscriptEntry {
   createdAt: string;
 }
 
+export type ModelMessageRole = 'user' | 'assistant' | 'system' | 'developer';
+
 export type ModelHistoryItem =
   | {
       type: 'message';
-      role: 'user' | 'assistant' | 'system';
+      role: ModelMessageRole;
       content: string;
     }
   | {
@@ -82,6 +84,38 @@ export interface ExperimentObservation {
   message: string;
   createdAt: string;
   tags: ExperimentObservationTag[];
+}
+
+export type StudyDebtStatus = 'open' | 'closed';
+
+export type StudyDebtKind = 'runtime' | 'scope' | 'architecture';
+
+export type StudyDebtResolution =
+  | 'study_run'
+  | 'static_evidence_sufficient'
+  | 'scope_narrowed'
+  | 'user_override';
+
+export interface StudyDebtRecord {
+  id: string;
+  sessionId: string;
+  status: StudyDebtStatus;
+  kind: StudyDebtKind;
+  summary: string;
+  whyItMatters: string;
+  affectedPaths: string[] | null;
+  recommendedStudy: string | null;
+  openedAt: string;
+  updatedAt: string;
+  closedAt: string | null;
+  resolution: StudyDebtResolution | null;
+  resolutionNote: string | null;
+}
+
+export interface SessionExportResult {
+  sessionId: string;
+  exportPath: string;
+  revealedInFinder: boolean;
 }
 
 export interface ExperimentResolution {
@@ -278,6 +312,19 @@ export interface AgentTools {
     lowSignalWarningEmitted: boolean;
   }>;
   searchExperiments?(query?: string): Promise<ExperimentSearchResult[]>;
+  openStudyDebt?(input: {
+    summary: string;
+    whyItMatters: string;
+    kind?: StudyDebtKind;
+    affectedPaths?: string[];
+    recommendedStudy?: string;
+  }): Promise<{ debtId: string; status: 'open' }>;
+  resolveStudyDebt?(input: {
+    debtId: string;
+    resolution: StudyDebtResolution;
+    note: string;
+  }): Promise<{ debtId: string; status: 'closed' }>;
+  exportSession?(sessionId?: string): Promise<SessionExportResult>;
   clearExperimentJournal?(
     force?: boolean
   ): Promise<{ clearedExperiments: number; clearedObservations: number; blockedActive: number }>;

@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { readFile, writeFile } from 'node:fs/promises';
+import { access, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 
@@ -39,16 +39,19 @@ test('HeadlessEngine routes slash commands through the prototype runner', async 
   assert.ok(
     modelHistory.some(
       (item: any) =>
-        item.type === 'function_call' &&
-        item.name === 'experiment_resolved'
+        item.type === 'message' &&
+        item.role === 'developer' &&
+        typeof item.content === 'string' &&
+        item.content.includes('Experiment resolved')
     )
   );
   assert.ok(
     modelHistory.some(
       (item: any) =>
-        item.type === 'function_call_output' &&
-        typeof item.output === 'string' &&
-        item.output.includes('"verdict": "inconclusive"')
+        item.type === 'message' &&
+        item.role === 'developer' &&
+        typeof item.content === 'string' &&
+        item.content.includes('verdict: inconclusive')
     )
   );
 });
@@ -112,6 +115,13 @@ test('HeadlessEngine compact persists harness checkpoint with git state and acti
     lowSignalWarningEmitted: false,
     promote: false
   });
+  notebook.openStudyDebt({
+    sessionId: engine.snapshot.session.id,
+    summary: 'runtime continuity is unproven',
+    whyItMatters: 'Being wrong would change the next implementation step.',
+    kind: 'runtime',
+    affectedPaths: ['src/engine']
+  });
 
   const result = await (engine as any).runCompact(
     'verify checkpointing',
@@ -126,6 +136,7 @@ test('HeadlessEngine compact persists harness checkpoint with git state and acti
   assert.ok(checkpoint);
   assert.match(checkpoint?.gitLog ?? '', /\b[0-9a-f]{7,}\b/);
   assert.match(checkpoint?.checkpointBlock ?? '', /active_experiments:/);
+  assert.match(checkpoint?.checkpointBlock ?? '', /open_study_debts:/);
   assert.equal(checkpoint?.activeExperimentSummaries[0]?.experimentId, 'exp-running');
 });
 
@@ -262,4 +273,151 @@ test('HeadlessEngine can preview and apply a preserved experiment back into the 
   const adoptedFile = await readFile(path.join(repoDir, 'feature.txt'), 'utf8');
   assert.match(rootReadmeAfter, /updated by experiment/);
   assert.equal(adoptedFile, 'hello from experiment\n');
+});
+
+test('HeadlessEngine blocks main-workspace edits while matching study debt is open', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const notebook = (engine as any).options.notebook;
+  const debt = notebook.openStudyDebt({
+    sessionId: engine.snapshot.session.id,
+    summary: 'guest-to-login continuity is unproven',
+    whyItMatters: 'Being wrong would materially change auth transfer behavior.',
+    kind: 'runtime',
+    affectedPaths: ['README.md'],
+    recommendedStudy: 'run the guest-sign-in continuity flow first'
+  });
+
+  await assert.rejects(
+    () => (engine as any).runWrite('README.md', '# blocked\n'),
+    /Open study debt blocks this edit/
+  );
+
+  await (engine as any).resolveStudyDebt({
+    debtId: debt.id,
+    resolution: 'static_evidence_sufficient',
+    note: 'README edit is now justified by direct code evidence.'
+  });
+
+  await assert.doesNotReject(() => (engine as any).runWrite('README.md', '# allowed\n'));
+});
+
+test('HeadlessEngine study debt path scoping blocks matching paths but allows unrelated edits', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const notebook = (engine as any).options.notebook;
+  notebook.openStudyDebt({
+    sessionId: engine.snapshot.session.id,
+    summary: 'auth continuity is unproven',
+    whyItMatters: 'Wrong assumptions would change auth-path implementation.',
+    kind: 'runtime',
+    affectedPaths: ['src/auth']
+  });
+
+  await assert.doesNotReject(() => (engine as any).runWrite('notes.txt', 'safe\n'));
+  await assert.rejects(
+    () => (engine as any).runWrite('src/auth/flow.ts', 'blocked\n'),
+    /Open study debt blocks this edit/
+  );
+});
+
+test('HeadlessEngine latches repeated study debt mutation blocks within the same turn', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const notebook = (engine as any).options.notebook;
+  notebook.openStudyDebt({
+    sessionId: engine.snapshot.session.id,
+    summary: 'auth continuity is unproven',
+    whyItMatters: 'Being wrong would materially change the dependent edit.',
+    kind: 'runtime',
+    affectedPaths: ['README.md'],
+    recommendedStudy: 'run the guest-login continuity flow first'
+  });
+
+  await assert.rejects(
+    () => (engine as any).runWrite('README.md', '# blocked once\n'),
+    /recommended_study=run the guest-login continuity flow first/
+  );
+
+  await assert.rejects(
+    () => (engine as any).runWrite('README.md', '# blocked twice\n'),
+    /Open study debt still blocks this edit\.\ndebts: debt-/
+  );
+});
+
+test('HeadlessEngine blocks all main-workspace edits when open study debt has no affected paths', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const notebook = (engine as any).options.notebook;
+  notebook.openStudyDebt({
+    sessionId: engine.snapshot.session.id,
+    summary: 'chosen approach is still unproven',
+    whyItMatters: 'Being wrong would materially change the implementation path.',
+    kind: 'architecture'
+  });
+
+  await assert.rejects(
+    () => (engine as any).runWrite('notes.txt', 'blocked\n'),
+    /Open study debt blocks this edit/
+  );
+});
+
+test('HeadlessEngine does not apply main-session study debt to experiment worktree edits', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const notebook = (engine as any).options.notebook;
+  notebook.openStudyDebt({
+    sessionId: engine.snapshot.session.id,
+    summary: 'chosen approach is still unproven',
+    whyItMatters: 'Main-workspace edits should stay blocked until the debt is discharged.',
+    kind: 'architecture'
+  });
+
+  const worktreeDir = path.join(repoDir, '.harness2', 'worktrees', 'exp-test');
+  await assert.doesNotReject(() =>
+    (engine as any).runWriteAtRoot(worktreeDir, 'notes.txt', 'experiment-safe\n')
+  );
+  assert.equal(await readFile(path.join(worktreeDir, 'notes.txt'), 'utf8'), 'experiment-safe\n');
+});
+
+test('HeadlessEngine exports the current session to markdown via /export', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  await engine.submit('/read README.md');
+  await engine.submit('/export');
+
+  const exportPath = path.join(repoDir, '.h2', 'session-exports', `${engine.snapshot.session.id}.md`);
+  await assert.doesNotReject(() => access(exportPath));
+
+  const exported = await readFile(exportPath, 'utf8');
+  assert.match(exported, new RegExp(`# Session Export ${engine.snapshot.session.id}`));
+  assert.match(exported, /## Transcript/);
+  assert.match(exported, /README\.md/);
+
+  const transcript = engine.snapshot.transcript.map((entry) => entry.text).join('\n\n');
+  assert.match(transcript, /Exported .*session-exports/);
 });

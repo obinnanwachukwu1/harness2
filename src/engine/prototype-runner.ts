@@ -20,6 +20,7 @@ const HELP_TEXT = [
   '/adopt <experimentId> [--apply]',
   '/experiment-budget <experimentId> <additionalTokens>',
   '/experiments [query]',
+  '/export [sessionId]',
   '/clear-journal [--force]',
   '/auth login',
   '/auth status',
@@ -290,6 +291,23 @@ export class PrototypeRunner {
         await context.emit(
           'assistant',
           `Cleared ${result.clearedExperiments} experiment(s) and ${result.clearedObservations} observation(s) from the current session journal.`
+        );
+        return;
+      }
+
+      case 'export': {
+        if (!context.tools.exportSession) {
+          await context.emit('assistant', 'Session export is not available.');
+          return;
+        }
+
+        const sessionId = rawArgs[0];
+        const result = await context.tools.exportSession(sessionId);
+        await context.emit(
+          'assistant',
+          result.revealedInFinder
+            ? `Exported ${result.sessionId} to ${result.exportPath} and revealed it in Finder.`
+            : `Exported ${result.sessionId} to ${result.exportPath}.`
         );
         return;
       }

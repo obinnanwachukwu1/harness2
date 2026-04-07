@@ -19,7 +19,7 @@ export type OpenTuiRenderBlock =
   | {
       id: string;
       kind: 'tool';
-      tone: 'tool' | 'experiment';
+      tone: 'tool' | 'experiment' | 'study_debt';
       header: string;
       body: string[];
       footer: string[];

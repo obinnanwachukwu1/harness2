@@ -25,7 +25,10 @@ import type {
   ExperimentSearchResult,
   ExperimentWaitResult,
   ModelHistoryItem,
+  SessionExportResult,
   SpawnExperimentInput,
+  StudyDebtKind,
+  StudyDebtResolution,
   TranscriptRole
 } from '../types.js';
 import { PrototypeRunner } from './prototype-runner.js';
@@ -75,6 +78,8 @@ export class HeadlessEngine {
   private thinkingEnabled = true;
   private turnQueue: Promise<void> = Promise.resolve();
   private lastTestStatus: string | null = null;
+  private activeTurnId = 0;
+  private lastStudyDebtIntercept: { turnId: number; debtKey: string } | null = null;
 
   private constructor(
     private readonly options: {
@@ -112,6 +117,9 @@ export class HeadlessEngine {
       readExperiment: (experimentId) => this.readExperiment(experimentId),
       waitExperiment: (experimentId, timeoutMs) => this.waitExperiment(experimentId, timeoutMs),
       searchExperiments: (query) => this.searchExperiments(query),
+      openStudyDebt: (input) => this.openStudyDebt(input),
+      resolveStudyDebt: (input) => this.resolveStudyDebt(input),
+      exportSession: (sessionId) => this.exportSession(sessionId),
       clearExperimentJournal: (force) => this.clearExperimentJournal(force),
       adoptExperiment: (experimentId, adoptionOptions) =>
         this.adoptExperiment(experimentId, adoptionOptions),
@@ -173,6 +181,7 @@ export class HeadlessEngine {
         return;
       }
 
+      this.activeTurnId += 1;
       this.processingTurn = true;
       this.statusText = 'running turn';
       this.liveAssistantText = null;
@@ -271,7 +280,7 @@ export class HeadlessEngine {
       }
       this.appendModelHistory({
         type: 'message',
-        role,
+        role: role === 'system' ? 'developer' : role,
         content: text
       });
       return;
@@ -351,6 +360,7 @@ export class HeadlessEngine {
 
   private async runWriteAtRoot(root: string, filePath: string, content: string): Promise<string> {
     const resolvedPath = this.resolveRootedPath(root, filePath);
+    this.assertStudyDebtAllowsMutation(root, resolvedPath);
     await mkdir(path.dirname(resolvedPath), { recursive: true });
     await writeFile(resolvedPath, content, 'utf8');
     return `Wrote ${content.length} chars to ${relativeToWorkspace(root, resolvedPath)}.`;
@@ -363,6 +373,7 @@ export class HeadlessEngine {
     replaceText: string
   ): Promise<string> {
     const resolvedPath = this.resolveRootedPath(root, filePath);
+    this.assertStudyDebtAllowsMutation(root, resolvedPath);
     const current = await readFile(resolvedPath, 'utf8');
 
     if (!current.includes(findText)) {
@@ -452,10 +463,81 @@ export class HeadlessEngine {
     return this.experimentManager.search(this.options.sessionId, query);
   }
 
+  private async openStudyDebt(input: {
+    summary: string;
+    whyItMatters: string;
+    kind?: StudyDebtKind;
+    affectedPaths?: string[];
+    recommendedStudy?: string;
+  }): Promise<{ debtId: string; status: 'open' }> {
+    const record = this.options.notebook.openStudyDebt({
+      sessionId: this.options.sessionId,
+      summary: input.summary,
+      whyItMatters: input.whyItMatters,
+      kind: input.kind,
+      affectedPaths: input.affectedPaths,
+      recommendedStudy: input.recommendedStudy
+    });
+    this.emitChange();
+    return {
+      debtId: record.id,
+      status: 'open'
+    };
+  }
+
+  private async resolveStudyDebt(input: {
+    debtId: string;
+    resolution: StudyDebtResolution;
+    note: string;
+  }): Promise<{ debtId: string; status: 'closed' }> {
+    const record = this.options.notebook.resolveStudyDebt(input);
+    this.emitChange();
+    return {
+      debtId: record.id,
+      status: 'closed'
+    };
+  }
+
   private async clearExperimentJournal(
     force = false
   ): Promise<{ clearedExperiments: number; clearedObservations: number; blockedActive: number }> {
     return this.options.notebook.clearExperimentJournal(this.options.sessionId, { force });
+  }
+
+  private async exportSession(sessionId = this.options.sessionId): Promise<SessionExportResult> {
+    const session = this.options.notebook.getSession(sessionId);
+    if (!session) {
+      throw new Error(`Unknown session: ${sessionId}`);
+    }
+
+    const transcript = this.options.notebook.listTranscript(sessionId, Number.MAX_SAFE_INTEGER);
+    const experiments = this.options.notebook.listExperiments(sessionId);
+    const studyDebts = this.options.notebook.listStudyDebts(sessionId);
+    const exportDir = path.join(session.cwd, '.h2', 'session-exports');
+    const exportPath = path.join(exportDir, `${sessionId}.md`);
+
+    await mkdir(exportDir, { recursive: true });
+    await writeFile(
+      exportPath,
+      renderSessionExport({
+        session,
+        transcript,
+        experiments,
+        studyDebts
+      }),
+      'utf8'
+    );
+
+    const reveal = await execa('open', ['-R', exportPath], {
+      cwd: session.cwd,
+      reject: false
+    });
+
+    return {
+      sessionId,
+      exportPath,
+      revealedInFinder: reveal.exitCode === 0
+    };
   }
 
   private async adoptExperiment(
@@ -761,27 +843,7 @@ export class HeadlessEngine {
 
     const message = lines.join('\n');
     this.appendTranscript('assistant', message);
-    this.appendExperimentLifecycleEvent('experiment_resolved', resolution.id, {
-      id: resolution.id,
-      hypothesis: resolution.hypothesis,
-      verdict: resolution.verdict,
-      summary: resolution.summary,
-      budget: resolution.budget,
-      tokensUsed: resolution.tokensUsed,
-      contextTokensUsed: resolution.contextTokensUsed,
-      toolOutputTokensUsed: resolution.toolOutputTokensUsed,
-      observationTokensUsed: resolution.observationTokensUsed,
-      discovered: resolution.discovered,
-      artifacts: resolution.artifacts,
-      constraints: resolution.constraints,
-      confidenceNote: resolution.confidenceNote,
-      promote: resolution.promote,
-      preserved: resolution.preserved,
-      worktreePath: resolution.worktreePath,
-      branchName: resolution.branchName,
-      baseCommitSha: resolution.baseCommitSha,
-      resolvedAt: resolution.resolvedAt
-    });
+    this.appendExperimentLifecycleNotice(message);
   }
 
   private handleExperimentQualitySignal(notification: ExperimentQualityNotification): void {
@@ -795,14 +857,7 @@ export class HeadlessEngine {
     ].join('\n');
 
     this.appendTranscript('assistant', message);
-    this.appendExperimentLifecycleEvent('experiment_low_signal_warning', notification.id, {
-      id: notification.id,
-      hypothesis: notification.hypothesis,
-      message: notification.message,
-      budget: notification.budget,
-      tokensUsed: notification.tokensUsed,
-      toolOutputTokensUsed: notification.toolOutputTokensUsed
-    });
+    this.appendExperimentLifecycleNotice(message);
   }
 
   private handleExperimentBudgetExceeded(notification: ExperimentBudgetNotification): void {
@@ -817,34 +872,14 @@ export class HeadlessEngine {
     ].join('\n');
 
     this.appendTranscript('assistant', message);
-    this.appendExperimentLifecycleEvent('experiment_budget_exhausted', notification.id, {
-      id: notification.id,
-      hypothesis: notification.hypothesis,
-      message: notification.message,
-      budget: notification.budget,
-      tokensUsed: notification.tokensUsed,
-      contextTokensUsed: notification.contextTokensUsed,
-      toolOutputTokensUsed: notification.toolOutputTokensUsed,
-      observationTokensUsed: notification.observationTokensUsed
-    });
+    this.appendExperimentLifecycleNotice(message);
   }
 
-  private appendExperimentLifecycleEvent(
-    name: 'experiment_resolved' | 'experiment_low_signal_warning' | 'experiment_budget_exhausted',
-    experimentId: string,
-    payload: Record<string, unknown>
-  ): void {
-    const callId = `${name}_${experimentId}_${Date.now()}`;
+  private appendExperimentLifecycleNotice(message: string): void {
     this.appendModelHistory({
-      type: 'function_call',
-      call_id: callId,
-      name,
-      arguments: JSON.stringify({ experimentId })
-    });
-    this.appendModelHistory({
-      type: 'function_call_output',
-      call_id: callId,
-      output: JSON.stringify(payload, null, 2)
+      type: 'message',
+      role: 'developer',
+      content: message
     });
   }
 
@@ -857,6 +892,77 @@ export class HeadlessEngine {
     }
 
     return resolvedPath;
+  }
+
+  private assertStudyDebtAllowsMutation(root: string, resolvedPath: string): void {
+    if (root !== this.options.cwd) {
+      return;
+    }
+
+    const openDebts = this.options.notebook.listOpenStudyDebts(this.options.sessionId);
+    if (openDebts.length === 0) {
+      return;
+    }
+
+    const blockingDebts = openDebts.filter((debt) => {
+      if (!debt.affectedPaths || debt.affectedPaths.length === 0) {
+        return true;
+      }
+
+      return debt.affectedPaths.some((scope) => {
+        const resolvedScope = this.resolveRootedPath(this.options.cwd, scope);
+        return (
+          resolvedPath === resolvedScope ||
+          resolvedPath.startsWith(`${resolvedScope}${path.sep}`)
+        );
+      });
+    });
+
+    if (blockingDebts.length === 0) {
+      return;
+    }
+
+    const debtKey = blockingDebts
+      .map((debt) => debt.id)
+      .sort()
+      .join('|');
+    const repeatedIntercept =
+      this.lastStudyDebtIntercept?.turnId === this.activeTurnId &&
+      this.lastStudyDebtIntercept.debtKey === debtKey;
+    this.lastStudyDebtIntercept = {
+      turnId: this.activeTurnId,
+      debtKey
+    };
+
+    if (repeatedIntercept) {
+      throw new Error(
+        [
+          'Open study debt still blocks this edit.',
+          `debts: ${blockingDebts.map((debt) => debt.id).join(', ')}`,
+          'Discharge or resolve the debt before editing dependent code.'
+        ].join('\n')
+      );
+    }
+
+    const guidance = blockingDebts
+      .map((debt) => {
+        const scope =
+          debt.affectedPaths && debt.affectedPaths.length > 0
+            ? `affected_paths=${debt.affectedPaths.join(', ')}`
+            : 'affected_paths=all main-workspace edits';
+        const study = debt.recommendedStudy ? ` recommended_study=${debt.recommendedStudy}` : '';
+        return `${debt.id} [${debt.kind}] ${debt.summary}; why=${debt.whyItMatters}; ${scope}.${study}`;
+      })
+      .join('\n');
+
+    throw new Error(
+      [
+        'Open study debt blocks this edit.',
+        guidance,
+        'Before editing dependent code, either run a bounded study, resolve the debt with static evidence justification, resolve it via explicit scope narrowing, or record a user override with resolve_study_debt.',
+        'If this edit depends on additional unresolved risk that is not covered here, open study debt for that too before continuing.'
+      ].join('\n')
+    );
   }
 
   private async runCompact(
@@ -874,6 +980,7 @@ export class HeadlessEngine {
     const activeExperimentSummaries = this.options.notebook
       .searchExperimentSummaries(this.options.sessionId)
       .filter((experiment) => experiment.status === 'running');
+    const openStudyDebts = this.options.notebook.listOpenStudyDebts(this.options.sessionId);
 
     const tailStartHistoryId = this.options.notebook.getTailStartHistoryId(this.options.sessionId, 12);
     const checkpointBlock = this.buildCheckpointBlock({
@@ -885,7 +992,8 @@ export class HeadlessEngine {
       gitStatus,
       gitDiffStat,
       lastTestStatus: this.lastTestStatus,
-      activeExperimentSummaries
+      activeExperimentSummaries,
+      openStudyDebts
     });
 
     const checkpoint = this.options.notebook.createSessionCheckpoint({
@@ -948,6 +1056,11 @@ export class HeadlessEngine {
     gitDiffStat: string;
     lastTestStatus: string | null;
     activeExperimentSummaries: ExperimentSearchResult[];
+    openStudyDebts: Array<{
+      id: string;
+      kind: string;
+      summary: string;
+    }>;
   }): string {
     const experimentLines =
       input.activeExperimentSummaries.length > 0
@@ -955,6 +1068,10 @@ export class HeadlessEngine {
             (experiment) =>
               `- ${experiment.experimentId} | ${experiment.status} | ${experiment.hypothesis}`
           )
+        : ['- none'];
+    const studyDebtLines =
+      input.openStudyDebts.length > 0
+        ? input.openStudyDebts.map((debt) => `- ${debt.id} | ${debt.kind} | ${debt.summary}`)
         : ['- none'];
 
     return [
@@ -977,6 +1094,9 @@ export class HeadlessEngine {
       input.gitDiffStat,
       '',
       `last_test_status: ${input.lastTestStatus ?? 'unknown'}`,
+      '',
+      'open_study_debts:',
+      ...studyDebtLines,
       '',
       'active_experiments:',
       ...experimentLines
@@ -1035,6 +1155,91 @@ export class HeadlessEngine {
     const patch = [trackedDiff.trimEnd(), ...untrackedDiffs].filter(Boolean).join('\n\n');
     return patch ? `${patch}\n` : '';
   }
+}
+
+function renderSessionExport(input: {
+  session: { id: string; cwd: string; startedAt: string; lastActiveAt: string };
+  transcript: Array<{ id: number; role: TranscriptRole; text: string; createdAt: string }>;
+  experiments: ExperimentRecord[];
+  studyDebts: Array<{
+    id: string;
+    status: string;
+    kind: string;
+    summary: string;
+    whyItMatters: string;
+    affectedPaths: string[] | null;
+    recommendedStudy: string | null;
+    resolution: string | null;
+    resolutionNote: string | null;
+  }>;
+}): string {
+  const experimentSection =
+    input.experiments.length > 0
+      ? input.experiments
+          .map((experiment) =>
+            [
+              `- ${experiment.id}`,
+              `  - status: ${experiment.status}`,
+              `  - hypothesis: ${experiment.hypothesis}`,
+              experiment.finalSummary ? `  - summary: ${experiment.finalSummary}` : null,
+              experiment.discovered.length > 0
+                ? `  - discovered: ${experiment.discovered.join(' | ')}`
+                : null
+            ]
+              .filter((line): line is string => Boolean(line))
+              .join('\n')
+          )
+          .join('\n')
+      : '- none';
+
+  const debtSection =
+    input.studyDebts.length > 0
+      ? input.studyDebts
+          .map((debt) =>
+            [
+              `- ${debt.id}`,
+              `  - status: ${debt.status}`,
+              `  - kind: ${debt.kind}`,
+              `  - summary: ${debt.summary}`,
+              `  - why: ${debt.whyItMatters}`,
+              debt.affectedPaths && debt.affectedPaths.length > 0
+                ? `  - affectedPaths: ${debt.affectedPaths.join(', ')}`
+                : null,
+              debt.recommendedStudy ? `  - recommendedStudy: ${debt.recommendedStudy}` : null,
+              debt.resolution ? `  - resolution: ${debt.resolution}` : null,
+              debt.resolutionNote ? `  - resolutionNote: ${debt.resolutionNote}` : null
+            ]
+              .filter((line): line is string => Boolean(line))
+              .join('\n')
+          )
+          .join('\n')
+      : '- none';
+
+  const transcriptSection = input.transcript
+    .map(
+      (entry) =>
+        `## ${entry.id} ${entry.role} ${entry.createdAt}\n\n${entry.text.trim() || '(empty)'}`
+    )
+    .join('\n\n');
+
+  return [
+    `# Session Export ${input.session.id}`,
+    '',
+    '## Metadata',
+    `- sessionId: ${input.session.id}`,
+    `- cwd: ${input.session.cwd}`,
+    `- startedAt: ${input.session.startedAt}`,
+    `- lastActiveAt: ${input.session.lastActiveAt}`,
+    '',
+    '## Experiments',
+    experimentSection,
+    '',
+    '## Study Debt',
+    debtSection,
+    '',
+    '## Transcript',
+    transcriptSection
+  ].join('\n');
 }
 
 function formatCommandResult(
