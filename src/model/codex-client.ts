@@ -2,6 +2,8 @@ import { appendFile, mkdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 
+import { jsonSchema, stepCountIs, streamText, tool, type ModelMessage } from 'ai';
+import { createOpenAI } from '@ai-sdk/openai';
 import { OPENAI_CODEX_ORIGINATOR, OpenAICodexAuth } from '../auth/openai-codex.js';
 import { ExperimentBudgetExceededError } from '../experiments/experiment-manager.js';
 import { clampText, DEFAULT_EXPERIMENT_BUDGET_TOKENS, estimateTokens, nowIso } from '../lib/utils.js';
@@ -34,21 +36,11 @@ interface CodexModelClientOptions {
   model?: string;
 }
 
-interface ResponseItem {
-  type?: string;
+interface ModelStepResponse {
   id?: string;
-  call_id?: string;
-  name?: string;
-  arguments?: string;
-  content?: Array<{ type?: string; text?: string | { value?: string } }>;
-  summary?: Array<{ type?: string; text?: string | { value?: string }; summary_text?: string }>;
-}
-
-interface ResponsePayload {
-  id?: string;
-  output?: ResponseItem[];
-  output_text?: string;
-  reasoning_summary?: string;
+  assistantText: string;
+  reasoningSummary: string;
+  toolCalls: ToolCall[];
 }
 
 interface ToolDefinition {
@@ -72,6 +64,7 @@ export class CodexModelClient {
   private readonly fetchImpl: typeof fetch;
   private readonly endpoint: string;
   private readonly defaultModel: string;
+  private readonly aiProviderBaseUrl: string;
 
   constructor(
     private readonly notebook: Notebook,
@@ -81,6 +74,7 @@ export class CodexModelClient {
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
     this.defaultModel = options.model ?? DEFAULT_MODEL;
+    this.aiProviderBaseUrl = 'https://api.openai.com/v1';
   }
 
   async runTurn(
@@ -151,7 +145,6 @@ export class CodexModelClient {
         accessToken,
         accountId: authRecord.accountId,
         sessionId,
-        previousResponseId,
         settings,
         input: [
           ...hints.map((hint) => ({
@@ -177,9 +170,9 @@ export class CodexModelClient {
         updatedAt: nowIso()
       });
 
-      const toolCalls = extractToolCalls(response);
-      const assistantText = extractAssistantText(response);
-      const reasoningSummary = thinkingEnabled ? extractReasoningSummary(response) : '';
+      const toolCalls = response.toolCalls;
+      const assistantText = response.assistantText;
+      const reasoningSummary = thinkingEnabled ? response.reasoningSummary : '';
 
       if (reasoningSummary) {
         await onReasoningSummaryStream?.(reasoningSummary);
@@ -199,7 +192,6 @@ export class CodexModelClient {
         if (!assistantText) {
           await debugResponseShape(sessionId, 'no_visible_text_fallback', {
             responseId: response.id ?? null,
-            outputTypes: (response.output ?? []).map((item) => item.type ?? '(missing)'),
             response
           });
           const fallback = 'The model returned no visible text.';
@@ -295,89 +287,153 @@ export class CodexModelClient {
     accessToken: string;
     accountId: string;
     sessionId: string;
-    previousResponseId: string | null;
     settings: ModelSessionRecord;
-    input: unknown;
+    input: Array<{ role: 'user' | 'assistant' | 'system' | 'developer'; content: string } | {
+      type: 'function_call';
+      call_id: string;
+      name: string;
+      arguments: string;
+    } | {
+      type: 'function_call_output';
+      call_id: string;
+      output: string;
+    }>;
     onAssistantStream?: (text: string) => Promise<void>;
     onReasoningSummaryStream?: (text: string) => Promise<void>;
     thinkingEnabled: boolean;
     toolDefinitions: readonly ToolDefinition[];
     instructions: string;
-  }): Promise<ResponsePayload> {
-    const headers: Record<string, string> = {
-      authorization: `Bearer ${input.accessToken}`,
-      'content-type': 'application/json',
-      originator: OPENAI_CODEX_ORIGINATOR,
-      session_id: input.sessionId
-    };
-
-    if (input.accountId) {
-      headers['chatgpt-account-id'] = input.accountId;
-    }
-
-    const body: Record<string, unknown> = {
-      model: input.settings.model,
-      instructions: input.instructions,
-      input: input.input,
-      tools: input.toolDefinitions,
-      tool_choice: 'auto',
-      prompt_cache_key: input.sessionId,
-      store: false,
-      stream: true
-    };
-
-    if (input.previousResponseId) {
-      body.previous_response_id = input.previousResponseId;
-    }
-
-    const reasoning: Record<string, unknown> = {};
-    if (input.settings.reasoningEffort) {
-      reasoning.effort = input.settings.reasoningEffort;
-    }
-    if (input.thinkingEnabled) {
-      reasoning.summary = 'auto';
-    }
-    if (Object.keys(reasoning).length > 0) {
-      body.reasoning = reasoning;
-    }
+  }): Promise<ModelStepResponse> {
+    const model = this.createCodexModel(
+      input.accessToken,
+      input.accountId,
+      input.sessionId,
+      input.settings.model
+    );
+    const messages = buildAiSdkMessages(input.input);
+    const tools = buildAiSdkTools(input.toolDefinitions);
+    let liveAssistantText = '';
+    let liveReasoningSummary = '';
 
     await debugResponseShape(input.sessionId, 'request', {
       endpoint: this.endpoint,
-      model: body.model,
-      reasoning: body.reasoning ?? null,
-      input: body.input,
-      previous_response_id: body.previous_response_id ?? null,
-      prompt_cache_key: body.prompt_cache_key ?? null
+      model: input.settings.model,
+      reasoning:
+        input.settings.reasoningEffort || input.thinkingEnabled
+          ? {
+              effort: input.settings.reasoningEffort ?? null,
+              summary: input.thinkingEnabled ? 'auto' : null
+            }
+          : null,
+      input: messages,
+      prompt_cache_key: input.sessionId
     });
 
-    const response = await this.fetchWithRetries(this.endpoint, {
-      method: 'POST',
-      headers,
-      body: JSON.stringify(body)
+    const result = streamText({
+      model,
+      messages,
+      tools,
+      toolChoice: 'auto',
+      stopWhen: stepCountIs(1),
+      maxRetries: MAX_TRANSIENT_MODEL_RETRIES,
+      providerOptions: {
+        openai: {
+          instructions: input.instructions,
+          promptCacheKey: input.sessionId,
+          store: false,
+          systemMessageMode: 'developer',
+          ...(input.settings.reasoningEffort
+            ? { reasoningEffort: input.settings.reasoningEffort }
+            : {}),
+          ...(input.thinkingEnabled ? { reasoningSummary: 'auto' } : {})
+        }
+      },
+      onChunk: async ({ chunk }) => {
+        if (chunk.type === 'text-delta') {
+          liveAssistantText += chunk.text;
+          await input.onAssistantStream?.(liveAssistantText);
+        }
+
+        if (chunk.type === 'reasoning-delta') {
+          liveReasoningSummary += chunk.text;
+          await input.onReasoningSummaryStream?.(liveReasoningSummary);
+        }
+      },
+      onError: async ({ error }) => {
+        throw error;
+      }
     });
 
-    if (!response.ok) {
-      const requestId = response.headers.get('x-request-id') ?? response.headers.get('x-oai-request-id');
-      const details = await safeReadText(response);
-      const suffix = requestId ? ` request_id=${requestId}` : '';
-      throw new Error(
-        `Model request failed: ${response.status} ${response.statusText}${suffix}\n${clampText(details, 1500)}`
-      );
+    for await (const _part of result.fullStream) {
+      // Streaming side effects are handled in onChunk; consuming the stream drives the SDK.
     }
 
-    const contentType = response.headers.get('content-type') ?? '';
-    if (contentType.includes('application/json')) {
-      const payload = (await response.json()) as ResponsePayload;
-      await debugResponseShape(input.sessionId, 'json_response', payload);
-      return payload;
-    }
+    const response = await result.response;
+    const assistantText = await result.text;
+    const reasoningSummary = await result.reasoningText;
+    const toolCalls = await result.toolCalls;
 
-    return readStreamingResponse(
-      response,
-      input.sessionId,
-      input.onAssistantStream,
-      input.onReasoningSummaryStream
-    );
+    await debugResponseShape(input.sessionId, 'sdk_response', {
+      id: response.id ?? null,
+      finishReason: await result.finishReason,
+      text: assistantText,
+      reasoningText: reasoningSummary ?? null,
+      toolCalls: toolCalls.map((call) => ({
+        toolCallId: call.toolCallId,
+        toolName: call.toolName,
+        input: call.input
+      })),
+      usage: await result.usage
+    });
+
+    return {
+      id: response.id ?? undefined,
+      assistantText: (assistantText.trim() || liveAssistantText.trim()),
+      reasoningSummary: (reasoningSummary?.trim() || liveReasoningSummary.trim()),
+      toolCalls: toolCalls.map((call) => ({
+        name: call.toolName,
+        callId: call.toolCallId,
+        rawArguments: JSON.stringify(call.input)
+      }))
+    };
+  }
+
+  private createCodexModel(
+    accessToken: string,
+    accountId: string,
+    sessionId: string,
+    modelId: string
+  ) {
+    const provider = createOpenAI({
+      apiKey: accessToken,
+      baseURL: this.aiProviderBaseUrl,
+      fetch: async (requestInput, init) => {
+        const headers = new Headers(init?.headers);
+        headers.set('authorization', `Bearer ${accessToken}`);
+        headers.set('originator', OPENAI_CODEX_ORIGINATOR);
+        headers.set('session_id', sessionId);
+
+        if (accountId) {
+          headers.set('chatgpt-account-id', accountId);
+        }
+
+        const parsed =
+          requestInput instanceof URL
+            ? requestInput
+            : new URL(typeof requestInput === 'string' ? requestInput : requestInput.url);
+        const url =
+          parsed.pathname.includes('/v1/responses') || parsed.pathname.includes('/chat/completions')
+            ? new URL(this.endpoint)
+            : parsed;
+
+        return this.fetchWithRetries(url, {
+          ...init,
+          headers
+        });
+      }
+    });
+
+    return provider.responses(modelId);
   }
 
   private persistSession(record: ModelSessionRecord): void {
@@ -664,47 +720,6 @@ function readOptionalStringArrayArg(args: Record<string, unknown>, key: string):
   return filtered.length > 0 ? filtered : [];
 }
 
-function extractAssistantText(response: ResponsePayload): string {
-  if (typeof response.output_text === 'string' && response.output_text.trim()) {
-    return response.output_text.trim();
-  }
-
-  const pieces: string[] = [];
-  for (const item of response.output ?? []) {
-    if (item.type !== 'message') {
-      continue;
-    }
-    for (const content of item.content ?? []) {
-      const text = extractContentPartText(content);
-      if (text) {
-        pieces.push(text);
-      }
-    }
-  }
-
-  return pieces.join('\n').trim();
-}
-
-function extractReasoningSummary(response: ResponsePayload): string {
-  if (typeof response.reasoning_summary === 'string' && response.reasoning_summary.trim()) {
-    return response.reasoning_summary.trim();
-  }
-
-  const pieces: string[] = [];
-  for (const item of response.output ?? []) {
-    if (item.type !== 'reasoning') {
-      continue;
-    }
-
-    const summary = extractReasoningItemSummary(item);
-    if (summary) {
-      pieces.push(summary);
-    }
-  }
-
-  return pieces.join('\n').trim();
-}
-
 function toResponseInputItem(item: ModelHistoryItem):
   | { role: 'user' | 'assistant' | 'system' | 'developer'; content: string }
   | { type: 'function_call'; call_id: string; name: string; arguments: string }
@@ -723,24 +738,77 @@ function toResponseInputItem(item: ModelHistoryItem):
   return item;
 }
 
-function extractToolCalls(response: ResponsePayload): ToolCall[] {
-  const calls: ToolCall[] = [];
-  for (const item of response.output ?? []) {
-    if (item.type !== 'function_call') {
+function buildAiSdkMessages(
+  items: Array<
+    | { role: 'user' | 'assistant' | 'system' | 'developer'; content: string }
+    | { type: 'function_call'; call_id: string; name: string; arguments: string }
+    | { type: 'function_call_output'; call_id: string; output: string }
+  >
+): ModelMessage[] {
+  const messages: ModelMessage[] = [];
+  const toolCallNames = new Map<string, string>();
+
+  for (const item of items) {
+    if ('role' in item) {
+      if (item.role === 'user') {
+        messages.push({ role: 'user', content: item.content });
+        continue;
+      }
+
+      if (item.role === 'assistant') {
+        messages.push({ role: 'assistant', content: item.content });
+        continue;
+      }
+
+      messages.push({ role: 'system', content: item.content });
       continue;
     }
 
-    if (!item.name || !item.call_id || typeof item.arguments !== 'string') {
+    if (item.type === 'function_call') {
+      toolCallNames.set(item.call_id, item.name);
+      messages.push({
+        role: 'assistant',
+        content: [
+          {
+            type: 'tool-call',
+            toolCallId: item.call_id,
+            toolName: item.name,
+            input: parseArguments(item.arguments)
+          }
+        ]
+      });
       continue;
     }
 
-    calls.push({
-      name: item.name,
-      callId: item.call_id,
-      rawArguments: item.arguments
+    messages.push({
+      role: 'tool',
+      content: [
+        {
+          type: 'tool-result',
+          toolCallId: item.call_id,
+          toolName: toolCallNames.get(item.call_id) ?? 'unknown_tool',
+          output: {
+            type: 'text',
+            value: item.output
+          }
+        }
+      ]
     });
   }
-  return calls;
+
+  return messages;
+}
+
+function buildAiSdkTools(toolDefinitions: readonly ToolDefinition[]) {
+  return Object.fromEntries(
+    toolDefinitions.map((definition) => [
+      definition.name,
+      tool({
+        description: definition.description,
+        inputSchema: jsonSchema(definition.parameters),
+      })
+    ])
+  );
 }
 
 function formatToolOutput(name: string, rawArguments: string, output: string): string {
@@ -878,413 +946,6 @@ function normalizeMaxModelSteps(value: string | undefined): number | null {
   }
 
   return parsed;
-}
-
-async function safeReadText(response: Response): Promise<string> {
-  try {
-    return await response.text();
-  } catch {
-    return '(no response body)';
-  }
-}
-
-async function readStreamingResponse(
-  response: Response,
-  sessionId: string,
-  onAssistantStream?: (text: string) => Promise<void>,
-  onReasoningSummaryStream?: (text: string) => Promise<void>
-): Promise<ResponsePayload> {
-  const reader = response.body?.getReader();
-  if (!reader) {
-    throw new Error('Streaming response did not include a body.');
-  }
-
-  const decoder = new TextDecoder();
-  let buffer = '';
-  let completed: ResponsePayload | null = null;
-  let liveAssistantText = '';
-  let liveReasoningSummary = '';
-  const streamedOutputItems = new Map<string, ResponseItem>();
-
-  while (true) {
-    const { value, done } = await reader.read();
-    if (done) {
-      break;
-    }
-
-    buffer += decoder.decode(value, { stream: true });
-
-    let boundary = buffer.indexOf('\n\n');
-    while (boundary !== -1) {
-      const chunk = buffer.slice(0, boundary);
-      buffer = buffer.slice(boundary + 2);
-
-      const event = parseSseEvent(chunk);
-      await debugResponseShape(
-        sessionId,
-        'sse_event',
-        event
-          ? {
-              type: typeof event.type === 'string' ? event.type : '(missing)',
-              event
-            }
-          : { type: '(unparsed)', chunk }
-      );
-      if (event?.type === 'error') {
-        const errorPayload =
-          event.error && typeof event.error === 'object'
-            ? (event.error as { message?: unknown })
-            : undefined;
-        const message =
-          typeof errorPayload?.message === 'string'
-            ? errorPayload.message
-            : 'Streaming response failed.';
-        throw new Error(message);
-      }
-
-      const streamUpdate = extractStreamingTextUpdate(event);
-      if (streamUpdate) {
-        liveAssistantText = mergeStreamingText(liveAssistantText, streamUpdate);
-        await onAssistantStream?.(liveAssistantText);
-      }
-
-      const reasoningUpdate = extractStreamingReasoningSummaryUpdate(event);
-      if (reasoningUpdate) {
-        liveReasoningSummary = mergeStreamingText(liveReasoningSummary, reasoningUpdate);
-        await onReasoningSummaryStream?.(liveReasoningSummary);
-      }
-
-      collectStreamingOutputItem(event, streamedOutputItems);
-
-      if (event?.type === 'response.completed' && event.response) {
-        completed = event.response as ResponsePayload;
-      }
-
-      boundary = buffer.indexOf('\n\n');
-    }
-  }
-
-  if (!completed) {
-    throw new Error('Streaming response ended before response.completed.');
-  }
-
-  if ((!Array.isArray(completed.output) || completed.output.length === 0) && streamedOutputItems.size > 0) {
-    completed.output = Array.from(streamedOutputItems.values());
-  }
-
-  if (!extractAssistantText(completed) && liveAssistantText.trim()) {
-    completed.output_text = liveAssistantText.trim();
-  }
-
-  if (!extractReasoningSummary(completed) && liveReasoningSummary.trim()) {
-    completed.reasoning_summary = liveReasoningSummary.trim();
-  }
-
-  await debugResponseShape(sessionId, 'completed_response', completed);
-
-  return completed;
-}
-
-function extractStreamingTextUpdate(
-  event: Record<string, unknown> | null
-): { mode: 'append' | 'replace'; text: string } | null {
-  if (!event || typeof event.type !== 'string') {
-    return null;
-  }
-
-  if (event.type === 'response.output_text.delta' || event.type === 'response.text.delta') {
-    return typeof event.delta === 'string' && event.delta.length > 0
-      ? { mode: 'append', text: event.delta }
-      : null;
-  }
-
-  if (event.type === 'response.content_part.added' || event.type === 'response.content_part.done') {
-    const text = extractContentPartText(event.part) || extractContentPartText(event.content_part);
-    return text ? { mode: 'replace', text } : null;
-  }
-
-  if (event.type === 'response.output_item.added' || event.type === 'response.output_item.done') {
-    const text = extractOutputItemText(event.item);
-    return text ? { mode: 'replace', text } : null;
-  }
-
-  return null;
-}
-
-function extractStreamingReasoningSummaryUpdate(
-  event: Record<string, unknown> | null
-): { mode: 'append' | 'replace'; text: string } | null {
-  if (!event || typeof event.type !== 'string') {
-    return null;
-  }
-
-  if (event.type === 'response.reasoning_summary_text.delta') {
-    return typeof event.delta === 'string' && event.delta.length > 0
-      ? { mode: 'append', text: event.delta }
-      : null;
-  }
-
-  if (event.type === 'response.reasoning_summary_text.done') {
-    const text =
-      typeof event.text === 'string'
-        ? event.text
-        : typeof event.delta === 'string'
-          ? event.delta
-          : '';
-    return text ? { mode: 'replace', text } : null;
-  }
-
-  if (event.type === 'response.reasoning_summary_part.added' || event.type === 'response.reasoning_summary_part.done') {
-    const text = extractReasoningSummaryPartText(event.part) || extractReasoningSummaryPartText(event.summary_part);
-    return text ? { mode: 'replace', text } : null;
-  }
-
-  if (event.type === 'response.output_item.added' || event.type === 'response.output_item.done') {
-    const text = extractReasoningItemSummary(event.item);
-    return text ? { mode: 'replace', text } : null;
-  }
-
-  return null;
-}
-
-function mergeStreamingText(
-  current: string,
-  update: { mode: 'append' | 'replace'; text: string }
-): string {
-  if (update.mode === 'append') {
-    return current + update.text;
-  }
-
-  if (!current) {
-    return update.text;
-  }
-
-  if (update.text === current) {
-    return current;
-  }
-
-  if (update.text.startsWith(current)) {
-    return update.text;
-  }
-
-  if (current.startsWith(update.text)) {
-    return current;
-  }
-
-  return update.text;
-}
-
-function extractContentPartText(part: unknown): string {
-  if (!part || typeof part !== 'object') {
-    return '';
-  }
-
-  const contentPart = part as { type?: unknown; text?: unknown };
-  if (contentPart.type !== 'output_text' && contentPart.type !== 'text') {
-    return '';
-  }
-
-  if (typeof contentPart.text === 'string') {
-    return contentPart.text;
-  }
-
-  if (
-    contentPart.text &&
-    typeof contentPart.text === 'object' &&
-    'value' in contentPart.text &&
-    typeof (contentPart.text as { value?: unknown }).value === 'string'
-  ) {
-    return (contentPart.text as { value: string }).value;
-  }
-
-  return '';
-}
-
-function extractOutputItemText(item: unknown): string {
-  if (!item || typeof item !== 'object') {
-    return '';
-  }
-
-  const outputItem = item as { type?: unknown; content?: unknown };
-  if (outputItem.type !== 'message' || !Array.isArray(outputItem.content)) {
-    return '';
-  }
-
-  const pieces = outputItem.content
-    .map((part) => extractContentPartText(part))
-    .filter((part) => part.length > 0);
-
-  return pieces.join('');
-}
-
-function extractReasoningItemSummary(item: unknown): string {
-  if (!item || typeof item !== 'object') {
-    return '';
-  }
-
-  const outputItem = item as { type?: unknown; summary?: unknown };
-  if (outputItem.type !== 'reasoning' || !Array.isArray(outputItem.summary)) {
-    return '';
-  }
-
-  const pieces = outputItem.summary
-    .map((part) => extractReasoningSummaryPartText(part))
-    .filter((part) => part.length > 0);
-
-  return pieces.join('\n').trim();
-}
-
-function extractReasoningSummaryPartText(part: unknown): string {
-  if (!part || typeof part !== 'object') {
-    return '';
-  }
-
-  const record = part as { type?: unknown; text?: unknown; summary_text?: unknown };
-  if (typeof record.text === 'string') {
-    return record.text;
-  }
-
-  if (typeof record.summary_text === 'string') {
-    return record.summary_text;
-  }
-
-  if (
-    record.text &&
-    typeof record.text === 'object' &&
-    'value' in record.text &&
-    typeof (record.text as { value?: unknown }).value === 'string'
-  ) {
-    return (record.text as { value: string }).value;
-  }
-
-  return '';
-}
-
-function collectStreamingOutputItem(
-  event: Record<string, unknown> | null,
-  streamedOutputItems: Map<string, ResponseItem>
-): void {
-  if (!event || typeof event.type !== 'string') {
-    return;
-  }
-
-  if (event.type !== 'response.output_item.added' && event.type !== 'response.output_item.done') {
-    return;
-  }
-
-  const item = normalizeResponseItem(event.item);
-  if (!item || item.type === 'reasoning') {
-    return;
-  }
-
-  const key = item.id ?? item.call_id ?? `${item.type}:${streamedOutputItems.size}`;
-  streamedOutputItems.set(key, item);
-}
-
-function normalizeResponseItem(item: unknown): ResponseItem | null {
-  if (!item || typeof item !== 'object') {
-    return null;
-  }
-
-  const record = item as Record<string, unknown>;
-  const normalized: ResponseItem = {
-    type: typeof record.type === 'string' ? record.type : undefined,
-    id: typeof record.id === 'string' ? record.id : undefined,
-    call_id: typeof record.call_id === 'string' ? record.call_id : undefined,
-    name: typeof record.name === 'string' ? record.name : undefined,
-    arguments: typeof record.arguments === 'string' ? record.arguments : undefined
-  };
-
-  if (Array.isArray(record.content)) {
-    normalized.content = record.content
-      .map((part) => normalizeContentPart(part))
-      .filter((part): part is { type?: string; text?: string | { value?: string } } => Boolean(part));
-  }
-
-  if (Array.isArray(record.summary)) {
-    normalized.summary = record.summary
-      .map((part) => normalizeReasoningSummaryPart(part))
-      .filter(
-        (part): part is { type?: string; text?: string | { value?: string }; summary_text?: string } =>
-          Boolean(part)
-      );
-  }
-
-  return normalized;
-}
-
-function normalizeContentPart(
-  part: unknown
-): { type?: string; text?: string | { value?: string } } | null {
-  if (!part || typeof part !== 'object') {
-    return null;
-  }
-
-  const record = part as Record<string, unknown>;
-  const normalized: { type?: string; text?: string | { value?: string } } = {
-    type: typeof record.type === 'string' ? record.type : undefined
-  };
-
-  if (typeof record.text === 'string') {
-    normalized.text = record.text;
-  } else if (record.text && typeof record.text === 'object') {
-    const textRecord = record.text as Record<string, unknown>;
-    if (typeof textRecord.value === 'string') {
-      normalized.text = { value: textRecord.value };
-    }
-  }
-
-  return normalized;
-}
-
-function normalizeReasoningSummaryPart(
-  part: unknown
-): { type?: string; text?: string | { value?: string }; summary_text?: string } | null {
-  if (!part || typeof part !== 'object') {
-    return null;
-  }
-
-  const record = part as Record<string, unknown>;
-  const normalized: { type?: string; text?: string | { value?: string }; summary_text?: string } = {
-    type: typeof record.type === 'string' ? record.type : undefined
-  };
-
-  if (typeof record.text === 'string') {
-    normalized.text = record.text;
-  } else if (record.text && typeof record.text === 'object') {
-    const textRecord = record.text as Record<string, unknown>;
-    if (typeof textRecord.value === 'string') {
-      normalized.text = { value: textRecord.value };
-    }
-  }
-
-  if (typeof record.summary_text === 'string') {
-    normalized.summary_text = record.summary_text;
-  }
-
-  return normalized;
-}
-
-function parseSseEvent(chunk: string): Record<string, unknown> | null {
-  const dataLines = chunk
-    .split(/\r?\n/)
-    .filter((line) => line.startsWith('data:'))
-    .map((line) => line.slice(5).trimStart());
-
-  if (dataLines.length === 0) {
-    return null;
-  }
-
-  const data = dataLines.join('\n');
-  if (data === '[DONE]') {
-    return null;
-  }
-
-  try {
-    return JSON.parse(data) as Record<string, unknown>;
-  } catch {
-    return null;
-  }
 }
 
 function delay(ms: number): Promise<void> {

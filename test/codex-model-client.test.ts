@@ -8,7 +8,65 @@ import { Notebook } from '../src/storage/notebook.js';
 import type { AgentTools, TranscriptRole } from '../src/types.js';
 import { cleanupDir, createTempDir, createUnsignedJwt } from '../test-support/helpers.js';
 
-test('CodexModelClient performs tool round-trips and persists previous_response_id', async (t) => {
+function createResponsesStream(events: unknown[]): Response {
+  return new Response(
+    events.map((event) => `data: ${JSON.stringify(event)}\n\n`).join(''),
+    { headers: { 'content-type': 'text/event-stream' } }
+  );
+}
+
+function responseCreated(id: string, model = 'gpt-5.4') {
+  return {
+    type: 'response.created',
+    response: {
+      id,
+      created_at: 1_700_000_000,
+      model,
+      service_tier: null
+    }
+  };
+}
+
+function responseCompleted(id: string, model = 'gpt-5.4') {
+  return {
+    type: 'response.completed',
+    response: {
+      id,
+      created_at: 1_700_000_000,
+      model,
+      service_tier: null,
+      incomplete_details: null,
+      usage: {
+        input_tokens: 1,
+        input_tokens_details: { cached_tokens: 0 },
+        output_tokens: 1,
+        output_tokens_details: { reasoning_tokens: 0 }
+      }
+    }
+  };
+}
+
+function functionCallDone(
+  callId: string,
+  name: string,
+  input: Record<string, unknown>,
+  outputIndex = 0
+) {
+  return {
+    type: 'response.output_item.done',
+    output_index: outputIndex,
+    item: {
+      type: 'function_call',
+      id: `fc_${callId}`,
+      call_id: callId,
+      name,
+      arguments: JSON.stringify(input),
+      status: 'completed'
+    }
+  };
+}
+
+test('CodexModelClient performs tool round-trips and persists the latest response id', async (t) => {
   const tempDir = await createTempDir('h2-model-');
   t.after(async () => cleanupDir(tempDir));
 
@@ -49,44 +107,22 @@ test('CodexModelClient performs tool round-trips and persists previous_response_
 
       responseCount += 1;
       if (responseCount === 1) {
-        return new Response(
-          `data: ${JSON.stringify({
-            type: 'response.completed',
-            response: {
-              id: 'resp_1',
-              output: [
-                {
-                  type: 'function_call',
-                  call_id: 'call_1',
-                  name: 'read',
-                  arguments: JSON.stringify({ path: 'README.md' })
-                }
-              ]
-            }
-          })}\n\n`,
-          {
-            headers: { 'content-type': 'text/event-stream' }
-          }
-        );
+        return createResponsesStream([
+          responseCreated('resp_1'),
+          functionCallDone('call_1', 'read', { path: 'README.md' }),
+          responseCompleted('resp_1')
+        ]);
       }
 
-      return new Response(
-        `data: ${JSON.stringify({
-          type: 'response.completed',
-          response: {
-            id: 'resp_2',
-            output: [
-              {
-                type: 'message',
-                content: [{ type: 'output_text', text: 'Done reading the file.' }]
-              }
-            ]
-          }
-        })}\n\n`,
+      return createResponsesStream([
+        responseCreated('resp_2'),
         {
-          headers: { 'content-type': 'text/event-stream' }
-        }
-      );
+          type: 'response.output_text.delta',
+          item_id: 'msg_2',
+          delta: 'Done reading the file.'
+        },
+        responseCompleted('resp_2')
+      ]);
     }
   });
 
@@ -138,9 +174,9 @@ test('CodexModelClient performs tool round-trips and persists previous_response_
   assert.equal('previous_response_id' in (requests[0]?.body ?? {}), false);
   assert.deepEqual(requests[0]?.body.reasoning, { effort: 'medium' });
   assert.equal(requests[1]?.body.prompt_cache_key, 'session-test');
-  assert.equal(requests[1]?.body.previous_response_id, 'resp_1');
+  assert.equal('previous_response_id' in (requests[1]?.body ?? {}), false);
   assert.deepEqual(requests[1]?.body.input, [
-    { role: 'user', content: 'Read the readme' },
+    { role: 'user', content: [{ type: 'input_text', text: 'Read the readme' }] },
     {
       type: 'function_call',
       call_id: 'call_1',
@@ -151,7 +187,7 @@ test('CodexModelClient performs tool round-trips and persists previous_response_
   ]);
 
   assert.equal(notebook.getModelSession('session-test')?.previousResponseId, 'resp_2');
-  assert.deepEqual(streamed, []);
+  assert.deepEqual(streamed, ['Done reading the file.']);
   assert.equal(emitted[0]?.role, 'tool');
   assert.match(emitted[0]?.text ?? '', /^@@tool\tread\tRead\(README\.md\)/);
   assert.equal(emitted[1]?.role, 'assistant');
@@ -188,31 +224,20 @@ test('CodexModelClient surfaces streaming assistant deltas before completion', a
   const auth = new OpenAICodexAuth(notebook, { now: () => now });
   const client = new CodexModelClient(notebook, auth, {
     fetchImpl: async () =>
-      new Response(
-        `data: ${JSON.stringify({
-          type: 'response.output_text.delta',
-          delta: 'Hello'
-        })}\n\n` +
-          `data: ${JSON.stringify({
-            type: 'response.output_text.delta',
-            delta: ' world'
-          })}\n\n` +
-          `data: ${JSON.stringify({
-            type: 'response.completed',
-            response: {
-              id: 'resp_1',
-              output: [
-                {
-                  type: 'message',
-                  content: [{ type: 'output_text', text: 'Hello world' }]
-                }
-              ]
-            }
-          })}\n\n`,
+      createResponsesStream([
+        responseCreated('resp_1'),
         {
-          headers: { 'content-type': 'text/event-stream' }
-        }
-      )
+          type: 'response.output_text.delta',
+          item_id: 'msg_1',
+          delta: 'Hello'
+        },
+        {
+          type: 'response.output_text.delta',
+          item_id: 'msg_1',
+          delta: ' world'
+        },
+        responseCompleted('resp_1')
+      ])
   });
 
   const streamed: string[] = [];
@@ -294,45 +319,27 @@ test('CodexModelClient injects an early study-opportunity hint before mutation',
       responseCount += 1;
 
       if (responseCount === 1) {
-        return new Response(
-          `data: ${JSON.stringify({
-            type: 'response.completed',
-            response: {
-              id: 'resp_1',
-              output: Array.from({ length: 5 }, (_, index) => ({
-                type: 'function_call',
-                call_id: `call_${index + 1}`,
-                name: index % 2 === 0 ? 'read' : 'grep',
-                arguments:
-                  index % 2 === 0
-                    ? JSON.stringify({ path: `app/auth/file-${index + 1}.ts` })
-                    : JSON.stringify({ pattern: 'session', target: 'app/auth' })
-              }))
-            }
-          })}\n\n`,
-          {
-            headers: { 'content-type': 'text/event-stream' }
-          }
-        );
+        return createResponsesStream([
+          responseCreated('resp_1'),
+          ...Array.from({ length: 5 }, (_, index) =>
+            functionCallDone(
+              `call_${index + 1}`,
+              index % 2 === 0 ? 'read' : 'grep',
+              index % 2 === 0
+                ? { path: `app/auth/file-${index + 1}.ts` }
+                : { pattern: 'session', target: 'app/auth' },
+              index
+            )
+          ),
+          responseCompleted('resp_1')
+        ]);
       }
 
-      return new Response(
-        `data: ${JSON.stringify({
-          type: 'response.completed',
-          response: {
-            id: 'resp_2',
-            output: [
-              {
-                type: 'message',
-                content: [{ type: 'output_text', text: 'Done.' }]
-              }
-            ]
-          }
-        })}\n\n`,
-        {
-          headers: { 'content-type': 'text/event-stream' }
-        }
-      );
+      return createResponsesStream([
+        responseCreated('resp_2'),
+        { type: 'response.output_text.delta', item_id: 'msg_2', delta: 'Done.' },
+        responseCompleted('resp_2')
+      ]);
     }
   });
 
@@ -410,72 +417,28 @@ test('CodexModelClient injects a post-spawn wait hint after repeated probing', a
       responseCount += 1;
 
       if (responseCount === 1) {
-        return new Response(
-          `data: ${JSON.stringify({
-            type: 'response.completed',
-            response: {
-              id: 'resp_1',
-              output: [
-                {
-                  type: 'function_call',
-                  call_id: 'call_spawn',
-                  name: 'spawn_experiment',
-                  arguments: JSON.stringify({ hypothesis: 'test it' })
-                }
-              ]
-            }
-          })}\n\n`,
-          { headers: { 'content-type': 'text/event-stream' } }
-        );
+        return createResponsesStream([
+          responseCreated('resp_1'),
+          functionCallDone('call_spawn', 'spawn_experiment', { hypothesis: 'test it' }),
+          responseCompleted('resp_1')
+        ]);
       }
 
       if (responseCount === 2) {
-        return new Response(
-          `data: ${JSON.stringify({
-            type: 'response.completed',
-            response: {
-              id: 'resp_2',
-              output: [
-                {
-                  type: 'function_call',
-                  call_id: 'call_read_1',
-                  name: 'read',
-                  arguments: JSON.stringify({ path: 'a.ts' })
-                },
-                {
-                  type: 'function_call',
-                  call_id: 'call_read_2',
-                  name: 'grep',
-                  arguments: JSON.stringify({ pattern: 'foo' })
-                },
-                {
-                  type: 'function_call',
-                  call_id: 'call_read_3',
-                  name: 'bash',
-                  arguments: JSON.stringify({ command: 'pwd' })
-                }
-              ]
-            }
-          })}\n\n`,
-          { headers: { 'content-type': 'text/event-stream' } }
-        );
+        return createResponsesStream([
+          responseCreated('resp_2'),
+          functionCallDone('call_read_1', 'read', { path: 'a.ts' }, 0),
+          functionCallDone('call_read_2', 'grep', { pattern: 'foo' }, 1),
+          functionCallDone('call_read_3', 'bash', { command: 'pwd' }, 2),
+          responseCompleted('resp_2')
+        ]);
       }
 
-      return new Response(
-        `data: ${JSON.stringify({
-          type: 'response.completed',
-          response: {
-            id: 'resp_3',
-            output: [
-              {
-                type: 'message',
-                content: [{ type: 'output_text', text: 'Done.' }]
-              }
-            ]
-          }
-        })}\n\n`,
-        { headers: { 'content-type': 'text/event-stream' } }
-      );
+      return createResponsesStream([
+        responseCreated('resp_3'),
+        { type: 'response.output_text.delta', item_id: 'msg_3', delta: 'Done.' },
+        responseCompleted('resp_3')
+      ]);
     }
   });
 
@@ -555,65 +518,39 @@ test('CodexModelClient injects a pre-edit guard hint after long investigation wi
       responseCount += 1;
 
       if (responseCount === 1) {
-        return new Response(
-          `data: ${JSON.stringify({
-            type: 'response.completed',
-            response: {
-              id: 'resp_1',
-              output: Array.from({ length: 8 }, (_, index) => ({
-                type: 'function_call',
-                call_id: `call_probe_${index + 1}`,
-                name: index % 2 === 0 ? 'read' : 'grep',
-                arguments:
-                  index % 2 === 0
-                    ? JSON.stringify({ path: `file-${index + 1}.ts` })
-                    : JSON.stringify({ pattern: 'resume', target: 'src' })
-              }))
-            }
-          })}\n\n`,
-          { headers: { 'content-type': 'text/event-stream' } }
-        );
+        return createResponsesStream([
+          responseCreated('resp_1'),
+          ...Array.from({ length: 8 }, (_, index) =>
+            functionCallDone(
+              `call_probe_${index + 1}`,
+              index % 2 === 0 ? 'read' : 'grep',
+              index % 2 === 0
+                ? { path: `file-${index + 1}.ts` }
+                : { pattern: 'resume', target: 'src' },
+              index
+            )
+          ),
+          responseCompleted('resp_1')
+        ]);
       }
 
       if (responseCount === 2) {
-        return new Response(
-          `data: ${JSON.stringify({
-            type: 'response.completed',
-            response: {
-              id: 'resp_2',
-              output: [
-                {
-                  type: 'function_call',
-                  call_id: 'call_edit',
-                  name: 'edit',
-                  arguments: JSON.stringify({
-                    path: 'src/example.ts',
-                    findText: 'old',
-                    replaceText: 'new'
-                  })
-                }
-              ]
-            }
-          })}\n\n`,
-          { headers: { 'content-type': 'text/event-stream' } }
-        );
+        return createResponsesStream([
+          responseCreated('resp_2'),
+          functionCallDone('call_edit', 'edit', {
+            path: 'src/example.ts',
+            findText: 'old',
+            replaceText: 'new'
+          }),
+          responseCompleted('resp_2')
+        ]);
       }
 
-      return new Response(
-        `data: ${JSON.stringify({
-          type: 'response.completed',
-          response: {
-            id: 'resp_3',
-            output: [
-              {
-                type: 'message',
-                content: [{ type: 'output_text', text: 'Done.' }]
-              }
-            ]
-          }
-        })}\n\n`,
-        { headers: { 'content-type': 'text/event-stream' } }
-      );
+      return createResponsesStream([
+        responseCreated('resp_3'),
+        { type: 'response.output_text.delta', item_id: 'msg_3', delta: 'Done.' },
+        responseCompleted('resp_3')
+      ]);
     }
   });
 
@@ -691,72 +628,28 @@ test('CodexModelClient injects an observation hint for experiment subagents afte
       responseCount += 1;
 
       if (responseCount === 1) {
-        return new Response(
-          `data: ${JSON.stringify({
-            type: 'response.completed',
-            response: {
-              id: 'resp_1',
-              output: [
-                {
-                  type: 'function_call',
-                  call_id: 'call_read_1',
-                  name: 'read',
-                  arguments: JSON.stringify({ path: 'a.ts' })
-                },
-                {
-                  type: 'function_call',
-                  call_id: 'call_grep_1',
-                  name: 'grep',
-                  arguments: JSON.stringify({ pattern: 'foo' })
-                }
-              ]
-            }
-          })}\n\n`,
-          { headers: { 'content-type': 'text/event-stream' } }
-        );
+        return createResponsesStream([
+          responseCreated('resp_1'),
+          functionCallDone('call_read_1', 'read', { path: 'a.ts' }, 0),
+          functionCallDone('call_grep_1', 'grep', { pattern: 'foo' }, 1),
+          responseCompleted('resp_1')
+        ]);
       }
 
       if (responseCount === 2) {
-        return new Response(
-          `data: ${JSON.stringify({
-            type: 'response.completed',
-            response: {
-              id: 'resp_2',
-              output: [
-                {
-                  type: 'function_call',
-                  call_id: 'call_bash_1',
-                  name: 'bash',
-                  arguments: JSON.stringify({ command: 'pwd' })
-                },
-                {
-                  type: 'function_call',
-                  call_id: 'call_glob_1',
-                  name: 'glob',
-                  arguments: JSON.stringify({ pattern: '*.ts' })
-                }
-              ]
-            }
-          })}\n\n`,
-          { headers: { 'content-type': 'text/event-stream' } }
-        );
+        return createResponsesStream([
+          responseCreated('resp_2'),
+          functionCallDone('call_bash_1', 'bash', { command: 'pwd' }, 0),
+          functionCallDone('call_glob_1', 'glob', { pattern: '*.ts' }, 1),
+          responseCompleted('resp_2')
+        ]);
       }
 
-      return new Response(
-        `data: ${JSON.stringify({
-          type: 'response.completed',
-          response: {
-            id: 'resp_3',
-            output: [
-              {
-                type: 'message',
-                content: [{ type: 'output_text', text: 'Done.' }]
-              }
-            ]
-          }
-        })}\n\n`,
-        { headers: { 'content-type': 'text/event-stream' } }
-      );
+      return createResponsesStream([
+        responseCreated('resp_3'),
+        { type: 'response.output_text.delta', item_id: 'msg_3', delta: 'Done.' },
+        responseCompleted('resp_3')
+      ]);
     }
   });
 
@@ -833,27 +726,15 @@ test('CodexModelClient surfaces streaming content-part events before completion'
   const auth = new OpenAICodexAuth(notebook, { now: () => now });
   const client = new CodexModelClient(notebook, auth, {
     fetchImpl: async () =>
-      new Response(
-        `data: ${JSON.stringify({
-          type: 'response.content_part.added',
-          part: { type: 'output_text', text: 'Draft text' }
-        })}\n\n` +
-          `data: ${JSON.stringify({
-            type: 'response.completed',
-            response: {
-              id: 'resp_1',
-              output: [
-                {
-                  type: 'message',
-                  content: [{ type: 'output_text', text: 'Draft text' }]
-                }
-              ]
-            }
-          })}\n\n`,
+      createResponsesStream([
+        responseCreated('resp_1'),
         {
-          headers: { 'content-type': 'text/event-stream' }
-        }
-      )
+          type: 'response.output_text.delta',
+          item_id: 'msg_1',
+          delta: 'Draft text'
+        },
+        responseCompleted('resp_1')
+      ])
   });
 
   const streamed: string[] = [];
@@ -898,7 +779,7 @@ test('CodexModelClient surfaces streaming content-part events before completion'
   assert.equal(emitted[0]?.text, 'Draft text');
 });
 
-test('CodexModelClient does not duplicate live assistant text when delta and snapshot events overlap', async (t) => {
+test('CodexModelClient does not duplicate live assistant text when final snapshots overlap deltas', async (t) => {
   const tempDir = await createTempDir('h2-model-stream-dedupe-');
   t.after(async () => cleanupDir(tempDir));
 
@@ -928,42 +809,29 @@ test('CodexModelClient does not duplicate live assistant text when delta and sna
   const auth = new OpenAICodexAuth(notebook, { now: () => now });
   const client = new CodexModelClient(notebook, auth, {
     fetchImpl: async () =>
-      new Response(
-        `data: ${JSON.stringify({
-          type: 'response.output_text.delta',
-          delta: 'Hello'
-        })}\n\n` +
-          `data: ${JSON.stringify({
-            type: 'response.content_part.added',
-            part: { type: 'output_text', text: 'Hello' }
-          })}\n\n` +
-          `data: ${JSON.stringify({
-            type: 'response.output_text.delta',
-            delta: ' world'
-          })}\n\n` +
-          `data: ${JSON.stringify({
-            type: 'response.output_item.done',
-            item: {
-              type: 'message',
-              content: [{ type: 'output_text', text: 'Hello world' }]
-            }
-          })}\n\n` +
-          `data: ${JSON.stringify({
-            type: 'response.completed',
-            response: {
-              id: 'resp_1',
-              output: [
-                {
-                  type: 'message',
-                  content: [{ type: 'output_text', text: 'Hello world' }]
-                }
-              ]
-            }
-          })}\n\n`,
+      createResponsesStream([
+        responseCreated('resp_1'),
         {
-          headers: { 'content-type': 'text/event-stream' }
-        }
-      )
+          type: 'response.output_text.delta',
+          item_id: 'msg_1',
+          delta: 'Hello'
+        },
+        {
+          type: 'response.output_text.delta',
+          item_id: 'msg_1',
+          delta: ' world'
+        },
+        {
+          type: 'response.output_item.done',
+          output_index: 0,
+          item: {
+            type: 'message',
+            id: 'msg_1',
+            phase: null
+          }
+        },
+        responseCompleted('resp_1')
+      ])
   });
 
   const streamed: string[] = [];
@@ -1003,7 +871,7 @@ test('CodexModelClient does not duplicate live assistant text when delta and sna
     }
   );
 
-  assert.deepEqual(streamed, ['Hello', 'Hello', 'Hello world', 'Hello world']);
+  assert.deepEqual(streamed, ['Hello', 'Hello world']);
   assert.equal(emitted[0]?.role, 'assistant');
   assert.equal(emitted[0]?.text, 'Hello world');
 });
@@ -1091,23 +959,11 @@ test('CodexModelClient rebuilds requests from latest checkpoint plus recent tail
   const client = new CodexModelClient(notebook, auth, {
     fetchImpl: async (_input, init) => {
       requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
-      return new Response(
-        `data: ${JSON.stringify({
-          type: 'response.completed',
-          response: {
-            id: 'resp_1',
-            output: [
-              {
-                type: 'message',
-                content: [{ type: 'output_text', text: 'done' }]
-              }
-            ]
-          }
-        })}\n\n`,
-        {
-          headers: { 'content-type': 'text/event-stream' }
-        }
-      );
+      return createResponsesStream([
+        responseCreated('resp_1'),
+        { type: 'response.output_text.delta', item_id: 'msg_1', delta: 'done' },
+        responseCompleted('resp_1')
+      ]);
     }
   });
 
@@ -1140,7 +996,7 @@ test('CodexModelClient rebuilds requests from latest checkpoint plus recent tail
   assert.equal(typeof requests[0]?.instructions, 'string');
   assert.deepEqual(requests[0]?.input, [
     { role: 'developer', content: 'Harness checkpoint block' },
-    { role: 'user', content: 'recent user' }
+    { role: 'user', content: [{ type: 'input_text', text: 'recent user' }] }
   ]);
 });
 
@@ -1232,23 +1088,11 @@ test('CodexModelClient injects open study debt reminders into model requests', a
   const client = new CodexModelClient(notebook, auth, {
     fetchImpl: async (_input, init) => {
       requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
-      return new Response(
-        `data: ${JSON.stringify({
-          type: 'response.completed',
-          response: {
-            id: 'resp_1',
-            output: [
-              {
-                type: 'message',
-                content: [{ type: 'output_text', text: 'ack' }]
-              }
-            ]
-          }
-        })}\n\n`,
-        {
-          headers: { 'content-type': 'text/event-stream' }
-        }
-      );
+      return createResponsesStream([
+        responseCreated('resp_1'),
+        { type: 'response.output_text.delta', item_id: 'msg_1', delta: 'ack' },
+        responseCompleted('resp_1')
+      ]);
     }
   });
 
@@ -1283,7 +1127,7 @@ test('CodexModelClient injects open study debt reminders into model requests', a
       role: 'developer',
       content: notebook.buildOpenStudyDebtReminder('session-test')
     },
-    { role: 'user', content: 'implement auth continuity' }
+    { role: 'user', content: [{ type: 'input_text', text: 'implement auth continuity' }] }
   ]);
 });
 
@@ -1323,52 +1167,25 @@ test('CodexModelClient turns tool-call failures into tool outputs so the loop ca
       responseCount += 1;
 
       if (responseCount === 1) {
-        return new Response(
-          `data: ${JSON.stringify({
-            type: 'response.completed',
-            response: {
-              id: 'resp_1',
-              output: [
-                {
-                  type: 'function_call',
-                  call_id: 'call_1',
-                  name: 'spawn_experiment',
-                  arguments: JSON.stringify({
-                    hypothesis: 'test concurrency guard',
-                    budgetTokens: 1200
-                  })
-                }
-              ]
-            }
-          })}\n\n`,
-          {
-            headers: { 'content-type': 'text/event-stream' }
-          }
-        );
+        return createResponsesStream([
+          responseCreated('resp_1'),
+          functionCallDone('call_1', 'spawn_experiment', {
+            hypothesis: 'test concurrency guard',
+            budgetTokens: 1200
+          }),
+          responseCompleted('resp_1')
+        ]);
       }
 
-      return new Response(
-        `data: ${JSON.stringify({
-          type: 'response.completed',
-          response: {
-            id: 'resp_2',
-            output: [
-              {
-                type: 'message',
-                content: [
-                  {
-                    type: 'output_text',
-                    text: 'The experiment spawn failed because the harness concurrency limit was reached.'
-                  }
-                ]
-              }
-            ]
-          }
-        })}\n\n`,
+      return createResponsesStream([
+        responseCreated('resp_2'),
         {
-          headers: { 'content-type': 'text/event-stream' }
-        }
-      );
+          type: 'response.output_text.delta',
+          item_id: 'msg_2',
+          delta: 'The experiment spawn failed because the harness concurrency limit was reached.'
+        },
+        responseCompleted('resp_2')
+      ]);
     }
   });
 
@@ -1409,7 +1226,7 @@ test('CodexModelClient turns tool-call failures into tool outputs so the loop ca
 
   assert.equal(requests.length, 2);
   assert.deepEqual(requests[1]?.input, [
-    { role: 'user', content: 'Try spawning an experiment' },
+    { role: 'user', content: [{ type: 'input_text', text: 'Try spawning an experiment' }] },
     {
       type: 'function_call',
       call_id: 'call_1',
@@ -1480,23 +1297,11 @@ test('CodexModelClient retries transient 500 responses before succeeding', async
         });
       }
 
-      return new Response(
-        `data: ${JSON.stringify({
-          type: 'response.completed',
-          response: {
-            id: 'resp_1',
-            output: [
-              {
-                type: 'message',
-                content: [{ type: 'output_text', text: 'Recovered after retry.' }]
-              }
-            ]
-          }
-        })}\n\n`,
-        {
-          headers: { 'content-type': 'text/event-stream' }
-        }
-      );
+      return createResponsesStream([
+        responseCreated('resp_1'),
+        { type: 'response.output_text.delta', item_id: 'msg_1', delta: 'Recovered after retry.' },
+        responseCompleted('resp_1')
+      ]);
     }
   });
 
@@ -1568,33 +1373,12 @@ test('CodexModelClient preserves streamed visible text when completed payload om
   const auth = new OpenAICodexAuth(notebook, { now: () => now });
   const client = new CodexModelClient(notebook, auth, {
     fetchImpl: async () =>
-      new Response(
-        [
-          `data: ${JSON.stringify({ type: 'response.text.delta', delta: 'Hello' })}`,
-          '',
-          '',
-          `data: ${JSON.stringify({ type: 'response.text.delta', delta: ' world' })}`,
-          '',
-          '',
-          `data: ${JSON.stringify({
-            type: 'response.completed',
-            response: {
-              id: 'resp_text_only',
-              output: [
-                {
-                  type: 'message',
-                  content: [{ type: 'text', text: { value: 'Hello world' } }]
-                }
-              ]
-            }
-          })}`,
-          '',
-          ''
-        ].join('\n'),
-        {
-          headers: { 'content-type': 'text/event-stream' }
-        }
-      )
+      createResponsesStream([
+        responseCreated('resp_text_only'),
+        { type: 'response.output_text.delta', item_id: 'msg_1', delta: 'Hello' },
+        { type: 'response.output_text.delta', item_id: 'msg_1', delta: ' world' },
+        responseCompleted('resp_text_only')
+      ])
   });
 
   const emitted: Array<{ role: TranscriptRole; text: string }> = [];
@@ -1672,65 +1456,18 @@ test('CodexModelClient reconstructs streamed tool calls when completed payload o
     fetchImpl: async () => {
       responseCount += 1;
       if (responseCount === 1) {
-        return new Response(
-          `data: ${JSON.stringify({
-            type: 'response.output_item.added',
-            item: {
-              id: 'fc_1',
-              type: 'function_call',
-              call_id: 'call_1',
-              name: 'read',
-              arguments: '',
-              status: 'in_progress'
-            }
-          })}\n\n` +
-            `data: ${JSON.stringify({
-              type: 'response.function_call_arguments.done',
-              item_id: 'fc_1',
-              output_index: 0,
-              arguments: '{"path":"README.md"}'
-            })}\n\n` +
-            `data: ${JSON.stringify({
-              type: 'response.output_item.done',
-              item: {
-                id: 'fc_1',
-                type: 'function_call',
-                call_id: 'call_1',
-                name: 'read',
-                arguments: '{"path":"README.md"}',
-                status: 'completed'
-              }
-            })}\n\n` +
-            `data: ${JSON.stringify({
-              type: 'response.completed',
-              response: {
-                id: 'resp_1',
-                output: []
-              }
-            })}\n\n`,
-          {
-            headers: { 'content-type': 'text/event-stream' }
-          }
-        );
+        return createResponsesStream([
+          responseCreated('resp_1'),
+          functionCallDone('call_1', 'read', { path: 'README.md' }),
+          responseCompleted('resp_1')
+        ]);
       }
 
-      return new Response(
-        `data: ${JSON.stringify({
-          type: 'response.completed',
-          response: {
-            id: 'resp_2',
-            output: [
-              {
-                type: 'message',
-                content: [{ type: 'output_text', text: 'Done.' }]
-              }
-            ]
-          }
-        })}\n\n`,
-        {
-          headers: { 'content-type': 'text/event-stream' }
-        }
-      );
+      return createResponsesStream([
+        responseCreated('resp_2'),
+        { type: 'response.output_text.delta', item_id: 'msg_2', delta: 'Done.' },
+        responseCompleted('resp_2')
+      ]);
     }
   });
 
@@ -1806,44 +1543,18 @@ test('CodexModelClient formats ranged read tool headers', async (t) => {
     fetchImpl: async () => {
       responseCount += 1;
       if (responseCount === 1) {
-        return new Response(
-          `data: ${JSON.stringify({
-            type: 'response.completed',
-            response: {
-              id: 'resp_1',
-              output: [
-                {
-                  type: 'function_call',
-                  call_id: 'call_1',
-                  name: 'read',
-                  arguments: JSON.stringify({ path: 'README.md', startLine: 10, endLine: 20 })
-                }
-              ]
-            }
-          })}\n\n`,
-          {
-            headers: { 'content-type': 'text/event-stream' }
-          }
-        );
+        return createResponsesStream([
+          responseCreated('resp_1'),
+          functionCallDone('call_1', 'read', { path: 'README.md', startLine: 10, endLine: 20 }),
+          responseCompleted('resp_1')
+        ]);
       }
 
-      return new Response(
-        `data: ${JSON.stringify({
-          type: 'response.completed',
-          response: {
-            id: 'resp_2',
-            output: [
-              {
-                type: 'message',
-                content: [{ type: 'output_text', text: 'Done.' }]
-              }
-            ]
-          }
-        })}\n\n`,
-        {
-          headers: { 'content-type': 'text/event-stream' }
-        }
-      );
+      return createResponsesStream([
+        responseCreated('resp_2'),
+        { type: 'response.output_text.delta', item_id: 'msg_2', delta: 'Done.' },
+        responseCompleted('resp_2')
+      ]);
     }
   });
 
