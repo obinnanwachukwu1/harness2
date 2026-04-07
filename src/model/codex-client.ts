@@ -29,6 +29,7 @@ const DEBUG_RESPONSES_ENABLED = process.env.H2_DEBUG_RESPONSES === '1';
 const DEBUG_RESPONSES_FILE =
   process.env.H2_DEBUG_RESPONSES_FILE ??
   path.join(process.cwd(), '.h2', 'debug', 'responses.jsonl');
+const DEFAULT_WEB_SEARCH_MODE = 'cached';
 
 interface CodexModelClientOptions {
   fetchImpl?: typeof fetch;
@@ -41,6 +42,7 @@ interface ModelStepResponse {
   assistantText: string;
   reasoningSummary: string;
   toolCalls: ToolCall[];
+  providerToolEvents: ProviderToolEvent[];
 }
 
 interface ToolDefinition {
@@ -53,11 +55,18 @@ interface ToolDefinition {
 interface ContextWindowUsage {
   usedTokens: number;
   totalTokens: number;
+  standardRateTokens: number | null;
 }
 
 interface ToolExecutionResult {
   output: string;
   failed: boolean;
+}
+
+interface ProviderToolEvent {
+  name: 'web_search';
+  transcript: string;
+  historyNotice: string;
 }
 
 export class CodexModelClient {
@@ -173,10 +182,20 @@ export class CodexModelClient {
       const toolCalls = response.toolCalls;
       const assistantText = response.assistantText;
       const reasoningSummary = thinkingEnabled ? response.reasoningSummary : '';
+      const providerToolEvents = response.providerToolEvents;
 
       if (reasoningSummary) {
         await onReasoningSummaryStream?.(reasoningSummary);
         await emit('system', `@@thinking\t${reasoningSummary}`);
+      }
+
+      for (const event of providerToolEvents) {
+        this.persistHistoryItem(sessionId, {
+          type: 'message',
+          role: 'developer',
+          content: event.historyNotice
+        });
+        await emit('tool', event.transcript);
       }
 
       if (assistantText) {
@@ -205,30 +224,47 @@ export class CodexModelClient {
         return;
       }
 
-      for (const call of toolCalls) {
-        const result = await executeToolCallSafely(call, tools);
-        const functionCallItem: ModelHistoryItem = {
-          type: 'function_call',
-          call_id: call.callId,
-          name: call.name,
-          arguments: call.rawArguments
-        };
-        const functionCallOutputItem: ModelHistoryItem = {
-          type: 'function_call_output',
-          call_id: call.callId,
-          output: result.output
-        };
+      for (let index = 0; index < toolCalls.length; ) {
+        const batchCalls = [toolCalls[index]!];
+        let nextIndex = index + 1;
 
-        this.persistHistoryItem(sessionId, functionCallItem);
-        this.persistHistoryItem(sessionId, functionCallOutputItem);
-        await emit(
-          'tool',
-          formatToolOutput(
-            call.name,
-            call.rawArguments,
-            result.failed ? `${result.output}\nTool execution failed.` : result.output
-          )
-        );
+        if (isParallelReadOnlyToolCall(batchCalls[0]!)) {
+          while (nextIndex < toolCalls.length && isParallelReadOnlyToolCall(toolCalls[nextIndex]!)) {
+            batchCalls.push(toolCalls[nextIndex]!);
+            nextIndex += 1;
+          }
+        }
+
+        const results = await executeToolCallBatch(batchCalls, tools);
+
+        for (let batchIndex = 0; batchIndex < batchCalls.length; batchIndex += 1) {
+          const call = batchCalls[batchIndex]!;
+          const result = results[batchIndex]!;
+          const functionCallItem: ModelHistoryItem = {
+            type: 'function_call',
+            call_id: call.callId,
+            name: call.name,
+            arguments: call.rawArguments
+          };
+          const functionCallOutputItem: ModelHistoryItem = {
+            type: 'function_call_output',
+            call_id: call.callId,
+            output: result.output
+          };
+
+          this.persistHistoryItem(sessionId, functionCallItem);
+          this.persistHistoryItem(sessionId, functionCallOutputItem);
+          await emit(
+            'tool',
+            formatToolOutput(
+              call.name,
+              call.rawArguments,
+              result.failed ? `${result.output}\nTool execution failed.` : result.output
+            )
+          );
+        }
+
+        index = nextIndex;
       }
 
       requestItems = this.notebook.buildModelRequestHistory(sessionId);
@@ -279,7 +315,8 @@ export class CodexModelClient {
 
     return {
       usedTokens,
-      totalTokens: getModelContextWindow(settings.model)
+      totalTokens: getModelContextWindow(settings.model),
+      standardRateTokens: getModelStandardRateThreshold(settings.model)
     };
   }
 
@@ -304,14 +341,10 @@ export class CodexModelClient {
     toolDefinitions: readonly ToolDefinition[];
     instructions: string;
   }): Promise<ModelStepResponse> {
-    const model = this.createCodexModel(
-      input.accessToken,
-      input.accountId,
-      input.sessionId,
-      input.settings.model
-    );
+    const provider = this.createCodexProvider(input.accessToken, input.accountId, input.sessionId);
+    const model = provider.responses(input.settings.model);
     const messages = buildAiSdkMessages(input.input);
-    const tools = buildAiSdkTools(input.toolDefinitions);
+    const tools = buildAiSdkTools(input.toolDefinitions, provider, getWebSearchMode());
     let liveAssistantText = '';
     let liveReasoningSummary = '';
 
@@ -372,6 +405,10 @@ export class CodexModelClient {
     const assistantText = await result.text;
     const reasoningSummary = await result.reasoningText;
     const toolCalls = await result.toolCalls;
+    const toolResults = await result.toolResults;
+    const sources = await result.sources;
+    const providerToolEvents = buildProviderToolEvents(toolCalls, toolResults, sources);
+    const localToolCalls = toolCalls.filter((call) => !call.providerExecuted);
 
     await debugResponseShape(input.sessionId, 'sdk_response', {
       id: response.id ?? null,
@@ -381,8 +418,11 @@ export class CodexModelClient {
       toolCalls: toolCalls.map((call) => ({
         toolCallId: call.toolCallId,
         toolName: call.toolName,
-        input: call.input
+        input: call.input,
+        providerExecuted: call.providerExecuted ?? false
       })),
+      toolResults,
+      sources,
       usage: await result.usage
     });
 
@@ -390,21 +430,17 @@ export class CodexModelClient {
       id: response.id ?? undefined,
       assistantText: (assistantText.trim() || liveAssistantText.trim()),
       reasoningSummary: (reasoningSummary?.trim() || liveReasoningSummary.trim()),
-      toolCalls: toolCalls.map((call) => ({
+      toolCalls: localToolCalls.map((call) => ({
         name: call.toolName,
         callId: call.toolCallId,
         rawArguments: JSON.stringify(call.input)
-      }))
+      })),
+      providerToolEvents
     };
   }
 
-  private createCodexModel(
-    accessToken: string,
-    accountId: string,
-    sessionId: string,
-    modelId: string
-  ) {
-    const provider = createOpenAI({
+  private createCodexProvider(accessToken: string, accountId: string, sessionId: string) {
+    return createOpenAI({
       apiKey: accessToken,
       baseURL: this.aiProviderBaseUrl,
       fetch: async (requestInput, init) => {
@@ -432,8 +468,6 @@ export class CodexModelClient {
         });
       }
     });
-
-    return provider.responses(modelId);
   }
 
   private persistSession(record: ModelSessionRecord): void {
@@ -504,7 +538,18 @@ async function executeToolCall(call: ToolCall, tools: AgentTools): Promise<strin
         readOptionalNumberArg(args, 'startLine'),
         readOptionalNumberArg(args, 'endLine')
       );
+    case 'ls':
+      if (!tools.ls) {
+        throw new Error('ls is not available in this session.');
+      }
+      return tools.ls(
+        readOptionalStringArg(args, 'path'),
+        readOptionalBooleanArg(args, 'recursive')
+      );
     case 'write':
+      if (!tools.write) {
+        throw new Error('write is not available in this session.');
+      }
       return tools.write(readStringArg(args, 'path'), readStringArg(args, 'content'));
     case 'edit':
       return tools.edit(
@@ -514,17 +559,33 @@ async function executeToolCall(call: ToolCall, tools: AgentTools): Promise<strin
       );
     case 'glob':
       return JSON.stringify(await tools.glob(readStringArg(args, 'pattern')), null, 2);
+    case 'rg':
+      if (!tools.rg) {
+        throw new Error('rg is not available in this session.');
+      }
+      return tools.rg(readStringArg(args, 'pattern'), readOptionalStringOrArrayArg(args, 'target'));
     case 'grep':
-      return tools.grep(readStringArg(args, 'pattern'), readOptionalStringArg(args, 'target'));
+      if (tools.grep) {
+        return tools.grep(
+          readStringArg(args, 'pattern'),
+          readOptionalStringOrArrayArg(args, 'target')
+        );
+      }
+      if (!tools.rg) {
+        throw new Error('rg is not available in this session.');
+      }
+      return tools.rg(readStringArg(args, 'pattern'), readOptionalStringOrArrayArg(args, 'target'));
     case 'spawn_experiment': {
       const experiment = await tools.spawnExperiment({
+        studyDebtId:
+          readOptionalStringArg(args, 'questionId') ?? readOptionalStringArg(args, 'studyDebtId'),
         hypothesis: readStringArg(args, 'hypothesis'),
         context: readOptionalStringArg(args, 'context'),
         budgetTokens:
           readOptionalNumberArg(args, 'budgetTokens') ?? DEFAULT_EXPERIMENT_BUDGET_TOKENS,
         preserve: readOptionalBooleanArg(args, 'preserve') ?? false
       });
-      return JSON.stringify(experiment, null, 2);
+      return JSON.stringify(serializeExperimentForModel(experiment), null, 2);
     }
     case 'extend_experiment_budget':
       if (!tools.extendExperimentBudget) {
@@ -540,7 +601,7 @@ async function executeToolCall(call: ToolCall, tools: AgentTools): Promise<strin
       );
     case 'read_experiment':
       return JSON.stringify(
-        await tools.readExperiment(readStringArg(args, 'experimentId')),
+        serializeExperimentForModel(await tools.readExperiment(readStringArg(args, 'experimentId'))),
         null,
         2
       );
@@ -561,9 +622,10 @@ async function executeToolCall(call: ToolCall, tools: AgentTools): Promise<strin
         throw new Error('search_experiments is not available in this session.');
       }
       return JSON.stringify(await tools.searchExperiments(readOptionalStringArg(args, 'query')), null, 2);
+    case 'open_question':
     case 'open_study_debt':
       if (!tools.openStudyDebt) {
-        throw new Error('open_study_debt is not available in this session.');
+        throw new Error('open_question is not available in this session.');
       }
       return JSON.stringify(
         await tools.openStudyDebt({
@@ -576,13 +638,15 @@ async function executeToolCall(call: ToolCall, tools: AgentTools): Promise<strin
         null,
         2
       );
+    case 'resolve_question':
     case 'resolve_study_debt':
       if (!tools.resolveStudyDebt) {
-        throw new Error('resolve_study_debt is not available in this session.');
+        throw new Error('resolve_question is not available in this session.');
       }
       return JSON.stringify(
         await tools.resolveStudyDebt({
-          debtId: readStringArg(args, 'debtId'),
+          questionId:
+            readOptionalStringArg(args, 'questionId') ?? readStringArg(args, 'debtId'),
           resolution: readStringArg(args, 'resolution') as StudyDebtResolution,
           note: readStringArg(args, 'note')
         }),
@@ -674,6 +738,30 @@ async function executeToolCallSafely(
   }
 }
 
+async function executeToolCallBatch(
+  calls: readonly ToolCall[],
+  tools: AgentTools
+): Promise<ToolExecutionResult[]> {
+  if (calls.length <= 1) {
+    return calls.length === 1 ? [await executeToolCallSafely(calls[0]!, tools)] : [];
+  }
+
+  return Promise.all(calls.map((call) => executeToolCallSafely(call, tools)));
+}
+
+function serializeExperimentForModel<T extends object>(value: T): Record<string, unknown> {
+  const output: Record<string, unknown> = { ...(value as Record<string, unknown>) };
+  if ('studyDebtId' in output) {
+    output.questionId = output.studyDebtId;
+    delete output.studyDebtId;
+  }
+  return output;
+}
+
+function isParallelReadOnlyToolCall(call: ToolCall): boolean {
+  return ['read', 'ls', 'glob', 'rg', 'grep'].includes(call.name);
+}
+
 function parseArguments(raw: string): Record<string, unknown> {
   try {
     const parsed = JSON.parse(raw) as unknown;
@@ -698,6 +786,17 @@ function readStringArg(args: Record<string, unknown>, key: string): string {
 function readOptionalStringArg(args: Record<string, unknown>, key: string): string | undefined {
   const value = args[key];
   return typeof value === 'string' && value.length > 0 ? value : undefined;
+}
+
+function readOptionalStringOrArrayArg(
+  args: Record<string, unknown>,
+  key: string
+): string | string[] | undefined {
+  const stringValue = readOptionalStringArg(args, key);
+  if (stringValue !== undefined) {
+    return stringValue;
+  }
+  return readOptionalStringArrayArg(args, key);
 }
 
 function readOptionalNumberArg(args: Record<string, unknown>, key: string): number | undefined {
@@ -799,8 +898,88 @@ function buildAiSdkMessages(
   return messages;
 }
 
-function buildAiSdkTools(toolDefinitions: readonly ToolDefinition[]) {
-  return Object.fromEntries(
+function getWebSearchMode(): 'disabled' | 'cached' | 'live' {
+  const raw = process.env.H2_WEB_SEARCH_MODE?.trim().toLowerCase();
+  if (raw === 'disabled' || raw === 'cached' || raw === 'live') {
+    return raw;
+  }
+  return DEFAULT_WEB_SEARCH_MODE;
+}
+
+function buildProviderToolEvents(
+  toolCalls: Array<{ toolCallId: string; toolName: string; providerExecuted?: boolean }>,
+  toolResults: Array<{
+    toolCallId: string;
+    toolName: string;
+    providerExecuted?: boolean;
+    output: unknown;
+  }>,
+  sources: Array<{ type?: string; url?: string; name?: string }>
+): ProviderToolEvent[] {
+  const providerToolResults = toolResults.filter(
+    (result) => result.providerExecuted && result.toolName === 'web_search'
+  );
+  const toolCallsById = new Map(toolCalls.map((call) => [call.toolCallId, call]));
+  const events: ProviderToolEvent[] = [];
+
+  for (const result of providerToolResults) {
+    const call = toolCallsById.get(result.toolCallId);
+    const output = readWebSearchOutput(result?.output);
+    const query =
+      output?.action?.type === 'search' ? output.action.query?.trim() || undefined : undefined;
+    const outputSources = output?.sources
+      ?.map((source) => (source.type === 'url' ? source.url : source.name))
+      .filter((value): value is string => typeof value === 'string' && value.length > 0);
+    const fallbackSources = sources
+      .map((source) => source.url ?? source.name)
+      .filter((value): value is string => typeof value === 'string' && value.length > 0);
+    const sourceList = (outputSources && outputSources.length > 0 ? outputSources : fallbackSources).slice(0, 5);
+    const queryText = query ?? 'provider-executed web search';
+    const transcriptLines = [`query: ${queryText}`];
+    if (sourceList.length > 0) {
+      transcriptLines.push('sources:');
+      transcriptLines.push(...sourceList.map((source) => `- ${source}`));
+    } else {
+      transcriptLines.push('sources: none returned');
+    }
+
+    events.push({
+      name: 'web_search',
+      transcript: `@@tool\tweb_search\tWebSearch(${compactTextForHeader(queryText, 72)})\n${transcriptLines.join('\n')}`,
+      historyNotice: [
+        'Built-in web_search executed.',
+        `query: ${queryText}`,
+        sourceList.length > 0 ? `sources: ${sourceList.join(', ')}` : 'sources: none returned'
+      ].join('\n')
+    });
+  }
+
+  return events;
+}
+
+function readWebSearchOutput(value: unknown):
+  | {
+      action?: { type?: string; query?: string };
+      sources?: Array<{ type: string; url?: string; name?: string }>;
+    }
+  | undefined {
+  if (!value || typeof value !== 'object' || Array.isArray(value)) {
+    return undefined;
+  }
+
+  const candidate = value as {
+    action?: { type?: string; query?: string };
+    sources?: Array<{ type: string; url?: string; name?: string }>;
+  };
+  return candidate;
+}
+
+function buildAiSdkTools(
+  toolDefinitions: readonly ToolDefinition[],
+  provider: ReturnType<typeof createOpenAI>,
+  webSearchMode: 'disabled' | 'cached' | 'live'
+) {
+  const tools = Object.fromEntries(
     toolDefinitions.map((definition) => [
       definition.name,
       tool({
@@ -809,6 +988,18 @@ function buildAiSdkTools(toolDefinitions: readonly ToolDefinition[]) {
       })
     ])
   );
+
+  if (webSearchMode === 'disabled') {
+    return tools;
+  }
+
+  return {
+    ...tools,
+    web_search: provider.tools.webSearch({
+      externalWebAccess: webSearchMode === 'live',
+      searchContextSize: 'medium'
+    })
+  };
 }
 
 function formatToolOutput(name: string, rawArguments: string, output: string): string {
@@ -828,20 +1019,35 @@ function formatToolHeader(name: string, rawArguments: string): string {
         readOptionalNumberArg(args, 'startLine'),
         readOptionalNumberArg(args, 'endLine')
       );
+    case 'ls':
+      return `Ls(${readOptionalStringArg(args, 'path') ?? '.'})`;
     case 'write':
       return `Write(${readStringArg(args, 'path')})`;
     case 'edit':
       return `Edit(${readStringArg(args, 'path')})`;
     case 'glob':
       return `Glob(${readStringArg(args, 'pattern')})`;
-    case 'grep': {
-      const target = readOptionalStringArg(args, 'target');
+    case 'rg': {
+      const target = readOptionalStringOrArrayArg(args, 'target');
+      const targetText = Array.isArray(target) ? target.join(' ') : target;
       return target
-        ? `Grep(${readStringArg(args, 'pattern')} in ${target})`
-        : `Grep(${readStringArg(args, 'pattern')})`;
+        ? `Rg(${readStringArg(args, 'pattern')} in ${targetText})`
+        : `Rg(${readStringArg(args, 'pattern')})`;
     }
-    case 'spawn_experiment':
-      return `experiment spawn(${compactTextForHeader(readStringArg(args, 'hypothesis'), 64)})`;
+    case 'grep': {
+      const target = readOptionalStringOrArrayArg(args, 'target');
+      const targetText = Array.isArray(target) ? target.join(' ') : target;
+      return target
+        ? `Rg(${readStringArg(args, 'pattern')} in ${targetText})`
+        : `Rg(${readStringArg(args, 'pattern')})`;
+    }
+    case 'spawn_experiment': {
+      const questionId =
+        readOptionalStringArg(args, 'questionId') ?? readOptionalStringArg(args, 'studyDebtId');
+      return questionId
+        ? `experiment spawn(${questionId}: ${compactTextForHeader(readStringArg(args, 'hypothesis'), 52)})`
+        : `experiment spawn(${compactTextForHeader(readStringArg(args, 'hypothesis'), 64)})`;
+    }
     case 'read_experiment':
       return `experiment read(${readStringArg(args, 'experimentId')})`;
     case 'wait_experiment':
@@ -850,10 +1056,12 @@ function formatToolHeader(name: string, rawArguments: string): string {
       const query = readOptionalStringArg(args, 'query');
       return query ? `experiment search(${compactTextForHeader(query, 56)})` : 'experiment search()';
     }
+    case 'open_question':
     case 'open_study_debt':
-      return `study debt open(${compactTextForHeader(readStringArg(args, 'summary'), 56)})`;
+      return `open question(${compactTextForHeader(readStringArg(args, 'summary'), 56)})`;
+    case 'resolve_question':
     case 'resolve_study_debt':
-      return `study debt resolve(${readStringArg(args, 'debtId')})`;
+      return `resolve question(${readOptionalStringArg(args, 'questionId') ?? readStringArg(args, 'debtId')})`;
     case 'extend_experiment_budget':
       return `experiment budget(${readStringArg(args, 'experimentId')})`;
     case 'resolve_experiment':
@@ -921,6 +1129,16 @@ function getModelContextWindow(model: string): number {
   }
 
   return 272_000;
+}
+
+function getModelStandardRateThreshold(model: string): number | null {
+  const normalized = model.trim().toLowerCase();
+
+  if (normalized === 'gpt-5.4' || normalized === 'gpt-5.4-pro') {
+    return 272_000;
+  }
+
+  return null;
 }
 
 function normalizeReasoningEffort(value: string | undefined): 'low' | 'medium' | 'high' | null {
@@ -1028,7 +1246,7 @@ function shouldInjectEarlyStudyOpportunityHint(
     return false;
   }
 
-  if (functionCalls.some((item) => item.name === 'open_study_debt')) {
+  if (functionCalls.some((item) => ['open_question', 'open_study_debt'].includes(item.name))) {
     return false;
   }
 
@@ -1056,11 +1274,11 @@ function shouldInjectPreEditGuardHint(requestItems: ModelHistoryItem[]): boolean
     return false;
   }
 
-  if (functionCalls.some((item) => item.name === 'open_study_debt')) {
+  if (functionCalls.some((item) => ['open_question', 'open_study_debt'].includes(item.name))) {
     return false;
   }
 
-  if (functionCalls.some((item) => item.name === 'resolve_study_debt')) {
+  if (functionCalls.some((item) => ['resolve_question', 'resolve_study_debt'].includes(item.name))) {
     return false;
   }
 
@@ -1082,7 +1300,7 @@ function shouldInjectPostSpawnWaitHint(requestItems: ModelHistoryItem[]): boolea
   }
 
   const repeatedInlineProbing = afterSpawn.filter((item) =>
-    ['bash', 'read', 'glob', 'grep'].includes(item.name)
+    ['bash', 'read', 'ls', 'glob', 'rg', 'grep'].includes(item.name)
   ).length;
 
   return repeatedInlineProbing >= 3;
@@ -1134,7 +1352,7 @@ function getCurrentTurnFunctionCalls(
 function getInlineProbeCalls(
   functionCalls: Array<Extract<ModelHistoryItem, { type: 'function_call' }>>
 ): Array<Extract<ModelHistoryItem, { type: 'function_call' }>> {
-  return functionCalls.filter((item) => ['bash', 'read', 'glob', 'grep'].includes(item.name));
+  return functionCalls.filter((item) => ['bash', 'read', 'ls', 'glob', 'rg', 'grep'].includes(item.name));
 }
 
 function appearsStudyableByExperiment(
@@ -1193,6 +1411,9 @@ function getStudySignalText(
   switch (call.name) {
     case 'read':
       return readOptionalStringArg(args, 'path') ?? '';
+    case 'ls':
+      return readOptionalStringArg(args, 'path') ?? '.';
+    case 'rg':
     case 'grep':
       return [readOptionalStringArg(args, 'pattern'), readOptionalStringArg(args, 'target')]
         .filter(Boolean)
@@ -1215,7 +1436,11 @@ function getStudyFocusKey(
     return normalizeFocusKey(readOptionalStringArg(args, 'path'));
   }
 
-  if (call.name === 'grep') {
+  if (call.name === 'ls') {
+    return normalizeFocusKey(readOptionalStringArg(args, 'path'));
+  }
+
+  if (call.name === 'rg' || call.name === 'grep') {
     return normalizeFocusKey(readOptionalStringArg(args, 'target') ?? readOptionalStringArg(args, 'pattern'));
   }
 
@@ -1270,7 +1495,7 @@ function buildExperimentHint(): string {
     'Harness hint:',
     'You are still circling a studyable uncertainty inline without yet launching a bounded study.',
     'If spawn_experiment can settle this more cheaply than more background probing, run one narrow study now.',
-    'Prefer a concrete falsifier over more read/grep churn.'
+    'Prefer a concrete falsifier over more read/rg churn.'
   ].join(' ');
 }
 
@@ -1278,8 +1503,8 @@ function buildPreEditGuardHint(): string {
   return [
     'Harness hint:',
     'You investigated this plan for a while and are now moving toward implementation.',
-    'If dependent edits still rely on unresolved load-bearing uncertainty, declare or discharge study debt before editing through it.',
-    'Either open study debt, justify why static evidence is sufficient, or explicitly narrow scope before editing dependent code.'
+    'If dependent edits still rely on unresolved load-bearing uncertainty, declare or resolve an open question before editing through it.',
+    'Either open a question, justify why static evidence is sufficient, or explicitly narrow scope before editing dependent code.'
   ].join(' ');
 }
 
@@ -1347,15 +1572,14 @@ export const MAIN_TOOL_DEFINITIONS = [
   },
   {
     type: 'function',
-    name: 'write',
-    description: 'Write a file in the workspace, creating parent directories if needed.',
+    name: 'ls',
+    description: 'List a directory in the workspace. Use this for quick orientation before broader globbing or searching.',
     parameters: {
       type: 'object',
       properties: {
         path: { type: 'string' },
-        content: { type: 'string' }
+        recursive: { type: 'boolean' }
       },
-      required: ['path', 'content'],
       additionalProperties: false
     }
   },
@@ -1390,14 +1614,16 @@ export const MAIN_TOOL_DEFINITIONS = [
   },
   {
     type: 'function',
-    name: 'grep',
+    name: 'rg',
     description:
       'Search files for a text pattern. Prefer targeted paths or symbols over repo-wide fishing, and avoid searching dependency trees unless the question specifically depends on them.',
     parameters: {
       type: 'object',
       properties: {
         pattern: { type: 'string' },
-        target: { type: 'string' }
+        target: {
+          anyOf: [{ type: 'string' }, { type: 'array', items: { type: 'string' } }]
+        }
       },
       required: ['pattern'],
       additionalProperties: false
@@ -1407,10 +1633,11 @@ export const MAIN_TOOL_DEFINITIONS = [
     type: 'function',
     name: 'spawn_experiment',
     description:
-      'Run a scoped experiment in a separate git worktree. Use this when the uncertainty is load-bearing and can be reduced by a bounded disposable study. After a brief orientation pass, if you can state one concrete falsifiable experiment and there is known-safe work you can continue in parallel, prefer launching it early over more background gathering. If you do not have a strong reason to choose a smaller number, use a 50000 token budget.',
+      'Run a scoped experiment in a separate git worktree. Use this when the uncertainty is load-bearing and a bounded disposable study is the cheapest reliable way to answer the residual uncertainty after a focused local evidence pass. Do not use it to repeat the same local inspection the main thread can already perform directly. After a brief orientation pass, if you can state one concrete falsifiable experiment and there is known-safe work you can continue in parallel, prefer launching it early over more background gathering. If an open question exists, this experiment must be tied to that question via questionId and should test the single residual uncertainty that static inspection has not settled yet, not restate the whole implementation plan. If one focused local evidence pass is likely to settle the question directly, finish that pass before spawning. If inspection already settles the question, resolve it statically instead of spawning. If you do not have a strong reason to choose a smaller number, use a 50000 token budget.',
     parameters: {
       type: 'object',
       properties: {
+        questionId: { type: 'string' },
         hypothesis: { type: 'string' },
         context: { type: 'string' },
         budgetTokens: { type: 'number' },
@@ -1477,9 +1704,9 @@ export const MAIN_TOOL_DEFINITIONS = [
   },
   {
     type: 'function',
-    name: 'open_study_debt',
+    name: 'open_question',
     description:
-      'Declare unresolved, load-bearing uncertainty before editing code that depends on it. Use this when being wrong could materially change the implementation choice. Once declared, dependent main-workspace edits are blocked until the debt is discharged.',
+      'Declare an unresolved, load-bearing open question before editing code that depends on it. Use this when being wrong could materially change the implementation choice. Once declared, dependent main-workspace edits are blocked until the question is resolved. Opening a question does not require an experiment; you can resolve it with quick static evidence, a small inline probe, or a bounded study.',
     parameters: {
       type: 'object',
       properties: {
@@ -1501,20 +1728,20 @@ export const MAIN_TOOL_DEFINITIONS = [
   },
   {
     type: 'function',
-    name: 'resolve_study_debt',
+    name: 'resolve_question',
     description:
-      'Discharge a previously opened study debt once it has been resolved by running a study, justifying static evidence, narrowing scope, or honoring a user override.',
+      'Resolve a previously opened question once it has been answered by running a study, justifying static evidence, narrowing scope, or honoring a user override.',
     parameters: {
       type: 'object',
       properties: {
-        debtId: { type: 'string' },
+        questionId: { type: 'string' },
         resolution: {
           type: 'string',
           enum: ['study_run', 'static_evidence_sufficient', 'scope_narrowed', 'user_override']
         },
         note: { type: 'string' }
       },
-      required: ['debtId', 'resolution', 'note'],
+      required: ['questionId', 'resolution', 'note'],
       additionalProperties: false
     }
   },

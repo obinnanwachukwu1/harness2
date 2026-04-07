@@ -1,4 +1,4 @@
-import { glob, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, glob, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 
@@ -37,6 +37,12 @@ interface OpenEngineOptions {
   cwd: string;
   sessionId?: string;
 }
+
+const DEFAULT_EXPERIMENT_MODEL = process.env.H2_EXPERIMENT_MODEL ?? 'gpt-5.4-mini';
+const DEFAULT_EXPERIMENT_REASONING_EFFORT =
+  (process.env.H2_EXPERIMENT_REASONING_EFFORT as 'low' | 'medium' | 'high' | 'off' | undefined) ??
+  'high';
+const DEFAULT_COMMAND_SHELL = process.env.H2_COMMAND_SHELL ?? process.env.SHELL ?? 'zsh';
 
 export class HeadlessEngine {
   static async open(options: OpenEngineOptions): Promise<HeadlessEngine> {
@@ -107,10 +113,12 @@ export class HeadlessEngine {
     this.tools = {
       bash: (command) => this.runBash(command),
       read: (filePath, startLine, endLine) => this.runRead(filePath, startLine, endLine),
+      ls: (filePath, recursive) => this.runLs(filePath, recursive),
       write: (filePath, content) => this.runWrite(filePath, content),
       edit: (filePath, findText, replaceText) => this.runEdit(filePath, findText, replaceText),
       glob: (pattern) => this.runGlob(pattern),
-      grep: (pattern, target) => this.runGrep(pattern, target),
+      rg: (pattern, target) => this.runRg(pattern, target),
+      grep: (pattern, target) => this.runRg(pattern, target),
       spawnExperiment: (input) => this.spawnExperiment(input),
       extendExperimentBudget: (experimentId, additionalTokens) =>
         this.extendExperimentBudget(experimentId, additionalTokens),
@@ -145,6 +153,7 @@ export class HeadlessEngine {
       this.statusText,
       contextWindow.usedTokens,
       contextWindow.totalTokens,
+      contextWindow.standardRateTokens,
       this.liveAssistantText,
       this.liveReasoningSummary,
       this.thinkingEnabled
@@ -307,6 +316,10 @@ export class HeadlessEngine {
     return this.runReadAtRoot(this.options.cwd, filePath, startLine, endLine);
   }
 
+  private async runLs(filePath = '.', recursive = false): Promise<string> {
+    return this.runLsAtRoot(this.options.cwd, filePath, recursive);
+  }
+
   private async runWrite(filePath: string, content: string): Promise<string> {
     return this.runWriteAtRoot(this.options.cwd, filePath, content);
   }
@@ -319,14 +332,13 @@ export class HeadlessEngine {
     return this.runGlobAtRoot(this.options.cwd, patternText);
   }
 
-  private async runGrep(patternText: string, target = '.'): Promise<string> {
-    return this.runGrepAtRoot(this.options.cwd, patternText, target);
+  private async runRg(patternText: string, target: string | string[] = '.'): Promise<string> {
+    return this.runRgAtRoot(this.options.cwd, patternText, target);
   }
 
   private async runBashAtRoot(root: string, command: string): Promise<string> {
-    const result = await execaCommand(command, {
+    const result = await execa(DEFAULT_COMMAND_SHELL, ['-lc', command], {
       cwd: root,
-      shell: true,
       reject: false
     });
 
@@ -356,14 +368,6 @@ export class HeadlessEngine {
       '',
       clampText(numberedSlice.join('\n'), 12000)
     ].join('\n');
-  }
-
-  private async runWriteAtRoot(root: string, filePath: string, content: string): Promise<string> {
-    const resolvedPath = this.resolveRootedPath(root, filePath);
-    this.assertStudyDebtAllowsMutation(root, resolvedPath);
-    await mkdir(path.dirname(resolvedPath), { recursive: true });
-    await writeFile(resolvedPath, content, 'utf8');
-    return `Wrote ${content.length} chars to ${relativeToWorkspace(root, resolvedPath)}.`;
   }
 
   private async runEditAtRoot(
@@ -396,11 +400,52 @@ export class HeadlessEngine {
       .sort();
   }
 
-  private async runGrepAtRoot(root: string, patternText: string, target = '.'): Promise<string> {
+  private async runWriteAtRoot(root: string, filePath: string, content: string): Promise<string> {
+    const resolvedPath = this.resolveRootedPath(root, filePath);
+    this.assertStudyDebtAllowsMutation(root, resolvedPath);
+    await mkdir(path.dirname(resolvedPath), { recursive: true });
+    await writeFile(resolvedPath, content, 'utf8');
+    return `Wrote ${content.length} chars to ${relativeToWorkspace(root, resolvedPath)}.`;
+  }
+
+  private async runLsAtRoot(root: string, filePath = '.', recursive = false): Promise<string> {
+    const targetPath = this.resolveRootedPath(root, filePath);
+    const command = recursive ? `ls -laR ${shellQuote(targetPath)}` : `ls -la ${shellQuote(targetPath)}`;
+    const result = await execaCommand(command, {
+      cwd: root,
+      shell: true,
+      reject: false
+    });
+
+    return formatCommandResult(
+      command,
+      result.exitCode ?? 1,
+      result.stdout,
+      result.stderr
+    );
+  }
+
+  private async runRgAtRoot(
+    root: string,
+    patternText: string,
+    target: string | string[] = '.'
+  ): Promise<string> {
+    const targets = await normalizeRgTargets(root, target);
     try {
       const result = await execa(
         'rg',
-        ['-n', '--hidden', '--glob', '!.git', '--glob', '!.h2', '--glob', '!.harness2', patternText, target],
+        [
+          '-n',
+          '--hidden',
+          '--glob',
+          '!.git',
+          '--glob',
+          '!.h2',
+          '--glob',
+          '!.harness2',
+          patternText,
+          ...targets
+        ],
         {
           cwd: root,
           reject: false
@@ -412,19 +457,19 @@ export class HeadlessEngine {
       }
 
       return formatCommandResult(
-        `rg -n --hidden ${patternText} ${target}`,
+        `rg -n --hidden ${patternText} ${targets.join(' ')}`,
         result.exitCode ?? 1,
         result.stdout,
         result.stderr
       );
     } catch (error) {
-      const result = await execa('grep', ['-R', '-n', patternText, target], {
+      const result = await execa('grep', ['-R', '-n', patternText, ...targets], {
         cwd: root,
         reject: false
       });
 
       return formatCommandResult(
-        `grep -R -n ${patternText} ${target}`,
+        `grep -R -n ${patternText} ${targets.join(' ')}`,
         result.exitCode ?? 1,
         result.stdout,
         result.stderr
@@ -433,10 +478,35 @@ export class HeadlessEngine {
   }
 
   private async spawnExperiment(
-    input: Omit<SpawnExperimentInput, 'sessionId'>
+    input: Omit<SpawnExperimentInput, 'sessionId'> & { questionId?: string }
   ): Promise<ExperimentRecord> {
+    const questionId = input.questionId ?? input.studyDebtId;
+    const openDebts = this.options.notebook.listOpenStudyDebts(this.options.sessionId);
+    if (openDebts.length > 0 && !questionId) {
+      throw new Error(
+        [
+          'An open question exists, so this experiment must be tied to a question.',
+          `open_questions: ${openDebts.map((debt) => debt.id).join(', ')}`,
+          'If this experiment is meant to reduce one of those uncertainties, pass questionId.',
+          'If you discovered a different unresolved uncertainty, open a new question for it first.'
+        ].join('\n')
+      );
+    }
+
+    if (questionId) {
+      const studyDebt = this.options.notebook.getStudyDebt(questionId);
+      if (!studyDebt || studyDebt.sessionId !== this.options.sessionId) {
+        throw new Error(`Unknown question: ${questionId}`);
+      }
+
+      if (studyDebt.status !== 'open') {
+        throw new Error(`Question ${questionId} is already closed.`);
+      }
+    }
+
     return this.experimentManager.spawn({
       ...input,
+      studyDebtId: questionId,
       sessionId: this.options.sessionId
     });
   }
@@ -469,7 +539,7 @@ export class HeadlessEngine {
     kind?: StudyDebtKind;
     affectedPaths?: string[];
     recommendedStudy?: string;
-  }): Promise<{ debtId: string; status: 'open' }> {
+  }): Promise<{ questionId: string; status: 'open' }> {
     const record = this.options.notebook.openStudyDebt({
       sessionId: this.options.sessionId,
       summary: input.summary,
@@ -480,20 +550,24 @@ export class HeadlessEngine {
     });
     this.emitChange();
     return {
-      debtId: record.id,
+      questionId: record.id,
       status: 'open'
     };
   }
 
   private async resolveStudyDebt(input: {
-    debtId: string;
+    questionId: string;
     resolution: StudyDebtResolution;
     note: string;
-  }): Promise<{ debtId: string; status: 'closed' }> {
-    const record = this.options.notebook.resolveStudyDebt(input);
+  }): Promise<{ questionId: string; status: 'closed' }> {
+    const record = this.options.notebook.resolveStudyDebt({
+      questionId: input.questionId,
+      resolution: input.resolution,
+      note: input.note
+    });
     this.emitChange();
     return {
-      debtId: record.id,
+      questionId: record.id,
       status: 'closed'
     };
   }
@@ -708,6 +782,9 @@ export class HeadlessEngine {
 
   private async runExperimentSubagent(experiment: ExperimentRecord): Promise<void> {
     const experimentSessionId = this.experimentManager.getExperimentSessionId(experiment.id);
+    this.options.notebook.createSession(experimentSessionId, experiment.worktreePath);
+    this.model.setModel(experimentSessionId, DEFAULT_EXPERIMENT_MODEL);
+    this.model.setReasoningEffort(experimentSessionId, DEFAULT_EXPERIMENT_REASONING_EFFORT);
     const prompt = [
       `Run a scoped experiment in the isolated worktree at ${experiment.worktreePath}.`,
       `Hypothesis: ${experiment.hypothesis}`,
@@ -735,6 +812,11 @@ export class HeadlessEngine {
         await this.experimentManager.recordToolUsage(experiment.id, output);
         return output;
       },
+      ls: async (filePath, recursive) => {
+        const output = await this.runLsAtRoot(experiment.worktreePath, filePath, recursive);
+        await this.experimentManager.recordToolUsage(experiment.id, output);
+        return output;
+      },
       write: async (filePath, content) => {
         const output = await this.runWriteAtRoot(experiment.worktreePath, filePath, content);
         await this.experimentManager.recordToolUsage(experiment.id, output);
@@ -755,8 +837,13 @@ export class HeadlessEngine {
         await this.experimentManager.recordToolUsage(experiment.id, JSON.stringify(output));
         return output;
       },
+      rg: async (pattern, target) => {
+        const output = await this.runRgAtRoot(experiment.worktreePath, pattern, target);
+        await this.experimentManager.recordToolUsage(experiment.id, output);
+        return output;
+      },
       grep: async (pattern, target) => {
-        const output = await this.runGrepAtRoot(experiment.worktreePath, pattern, target);
+        const output = await this.runRgAtRoot(experiment.worktreePath, pattern, target);
         await this.experimentManager.recordToolUsage(experiment.id, output);
         return output;
       },
@@ -926,6 +1013,13 @@ export class HeadlessEngine {
       .map((debt) => debt.id)
       .sort()
       .join('|');
+    const invalidatedByDebt = new Map(
+      blockingDebts.map((debt) => [
+        debt.id,
+        this.options.notebook.listInvalidatedExperimentsForStudyDebt(debt.id)
+      ])
+    );
+    const linkedInvalidations = Array.from(invalidatedByDebt.values()).flat();
     const repeatedIntercept =
       this.lastStudyDebtIntercept?.turnId === this.activeTurnId &&
       this.lastStudyDebtIntercept.debtKey === debtKey;
@@ -937,9 +1031,16 @@ export class HeadlessEngine {
     if (repeatedIntercept) {
       throw new Error(
         [
-          'Open study debt still blocks this edit.',
-          `debts: ${blockingDebts.map((debt) => debt.id).join(', ')}`,
-          'Discharge or resolve the debt before editing dependent code.'
+          'An open question still blocks this edit.',
+          `questions: ${blockingDebts.map((debt) => debt.id).join(', ')}`,
+          ...(linkedInvalidations.length > 0
+            ? [
+                `invalidated_experiments: ${linkedInvalidations
+                  .map((experiment) => experiment.id)
+                  .join(', ')}`
+              ]
+            : []),
+          'Resolve the question before editing dependent code.'
         ].join('\n')
       );
     }
@@ -951,16 +1052,25 @@ export class HeadlessEngine {
             ? `affected_paths=${debt.affectedPaths.join(', ')}`
             : 'affected_paths=all main-workspace edits';
         const study = debt.recommendedStudy ? ` recommended_study=${debt.recommendedStudy}` : '';
-        return `${debt.id} [${debt.kind}] ${debt.summary}; why=${debt.whyItMatters}; ${scope}.${study}`;
+        const invalidated = invalidatedByDebt.get(debt.id) ?? [];
+        const invalidation =
+          invalidated.length > 0
+            ? ` linked_invalidated_experiments=${invalidated
+                .map((experiment) => `${experiment.id}:${experiment.finalSummary ?? experiment.hypothesis}`)
+                .join(' | ')}.`
+            : '';
+        return `${debt.id} [${debt.kind}] ${debt.summary}; why=${debt.whyItMatters}; ${scope}.${study}${invalidation}`;
       })
       .join('\n');
 
     throw new Error(
       [
-        'Open study debt blocks this edit.',
+        'An open question blocks this edit.',
         guidance,
-        'Before editing dependent code, either run a bounded study, resolve the debt with static evidence justification, resolve it via explicit scope narrowing, or record a user override with resolve_study_debt.',
-        'If this edit depends on additional unresolved risk that is not covered here, open study debt for that too before continuing.'
+        linkedInvalidations.length > 0
+          ? 'A linked experiment invalidated the current path. Before editing dependent code, narrow the claim with resolve_question(scope_narrowed), open a new question for a different path, or record a user override.'
+          : 'Before editing dependent code, either run a bounded study, resolve the question with static evidence justification, resolve it via explicit scope narrowing, or record a user override with resolve_question.',
+        'If this edit depends on additional unresolved risk that is not covered here, open a question for that too before continuing.'
       ].join('\n')
     );
   }
@@ -1095,7 +1205,7 @@ export class HeadlessEngine {
       '',
       `last_test_status: ${input.lastTestStatus ?? 'unknown'}`,
       '',
-      'open_study_debts:',
+      'open_questions:',
       ...studyDebtLines,
       '',
       'active_experiments:',
@@ -1267,6 +1377,45 @@ function formatCommandResult(
 
 function relativeToWorkspace(cwd: string, filePath: string): string {
   return path.relative(cwd, filePath) || '.';
+}
+
+function shellQuote(value: string): string {
+  return `'${value.replace(/'/g, `'\"'\"'`)}'`;
+}
+
+async function normalizeRgTargets(root: string, target: string | string[]): Promise<string[]> {
+  if (Array.isArray(target)) {
+    const normalized = target
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0);
+    return normalized.length > 0 ? normalized : ['.'];
+  }
+
+  const trimmed = target.trim();
+  if (!trimmed) {
+    return ['.'];
+  }
+
+  if (!(await rootedPathExists(root, trimmed))) {
+    const splitTargets = trimmed
+      .split(/[\s,]+/)
+      .map((value) => value.trim())
+      .filter((value) => value.length > 0);
+    if (splitTargets.length > 1) {
+      return splitTargets;
+    }
+  }
+
+  return [trimmed];
+}
+
+async function rootedPathExists(root: string, relativePath: string): Promise<boolean> {
+  try {
+    await access(path.resolve(root, relativePath));
+    return true;
+  } catch {
+    return false;
+  }
 }
 
 function normalizeReadStartLine(startLine?: number): number {

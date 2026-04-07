@@ -66,6 +66,28 @@ function functionCallDone(
   };
 }
 
+function webSearchCallDone(
+  id: string,
+  query: string,
+  sources: Array<{ type: 'url'; url: string }> = [{ type: 'url', url: 'https://example.com' }],
+  outputIndex = 0
+) {
+  return {
+    type: 'response.output_item.done',
+    output_index: outputIndex,
+    item: {
+      type: 'web_search_call',
+      id,
+      status: 'completed',
+      action: {
+        type: 'search',
+        query
+      },
+      sources
+    }
+  };
+}
+
 test('CodexModelClient performs tool round-trips and persists the latest response id', async (t) => {
   const tempDir = await createTempDir('h2-model-');
   t.after(async () => cleanupDir(tempDir));
@@ -192,6 +214,316 @@ test('CodexModelClient performs tool round-trips and persists the latest respons
   assert.match(emitted[0]?.text ?? '', /^@@tool\tread\tRead\(README\.md\)/);
   assert.equal(emitted[1]?.role, 'assistant');
   assert.equal(emitted[1]?.text, 'Done reading the file.');
+});
+
+test('CodexModelClient sends the built-in web_search tool when enabled', async (t) => {
+  const priorMode = process.env.H2_WEB_SEARCH_MODE;
+  process.env.H2_WEB_SEARCH_MODE = 'cached';
+  t.after(() => {
+    if (priorMode === undefined) {
+      delete process.env.H2_WEB_SEARCH_MODE;
+    } else {
+      process.env.H2_WEB_SEARCH_MODE = priorMode;
+    }
+  });
+
+  const tempDir = await createTempDir('h2-model-web-search-request-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-test', tempDir);
+
+  const now = 1_700_000_000_000;
+  notebook.upsertOpenAICodexAuth({
+    provider: 'openai-codex',
+    type: 'oauth',
+    accessToken: createUnsignedJwt({
+      exp: Math.floor((now + 3600_000) / 1000)
+    }),
+    refreshToken: 'refresh-token',
+    idToken: createUnsignedJwt({
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: 'acct_123'
+      }
+    }),
+    accountId: 'acct_123',
+    expiresAt: now + 3600_000,
+    createdAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString()
+  });
+
+  const requests: Array<Record<string, unknown>> = [];
+  const auth = new OpenAICodexAuth(notebook, { now: () => now });
+  const client = new CodexModelClient(notebook, auth, {
+    fetchImpl: async (_input, init) => {
+      requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      return createResponsesStream([
+        responseCreated('resp_1'),
+        {
+          type: 'response.output_text.delta',
+          item_id: 'msg_1',
+          delta: 'Used web search.'
+        },
+        responseCompleted('resp_1')
+      ]);
+    }
+  });
+
+  const tools: AgentTools = {
+    bash: async () => '',
+    read: async () => '',
+    write: async () => '',
+    edit: async () => '',
+    glob: async () => [],
+    grep: async () => '',
+    spawnExperiment: async () => {
+      throw new Error('not used');
+    },
+    readExperiment: async () => {
+      throw new Error('not used');
+    },
+    authLogin: async () => '',
+    authStatus: async () => '',
+    authLogout: async () => '',
+    getModelSettings: async () => '',
+    setModel: async () => '',
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
+  };
+
+  await client.runTurn('session-test', 'Find recent news.', tools, async () => {});
+
+  const requestTools = requests[0]?.tools as Array<Record<string, unknown>>;
+  const webSearchTool = requestTools.find((tool) => tool.type === 'web_search');
+  assert.deepEqual(webSearchTool, {
+    type: 'web_search',
+    external_web_access: false,
+    search_context_size: 'medium'
+  });
+});
+
+test('CodexModelClient does not route provider-executed web search through the local tool loop', async (t) => {
+  const priorMode = process.env.H2_WEB_SEARCH_MODE;
+  process.env.H2_WEB_SEARCH_MODE = 'cached';
+  t.after(() => {
+    if (priorMode === undefined) {
+      delete process.env.H2_WEB_SEARCH_MODE;
+    } else {
+      process.env.H2_WEB_SEARCH_MODE = priorMode;
+    }
+  });
+
+  const tempDir = await createTempDir('h2-model-web-search-provider-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-test', tempDir);
+
+  const now = 1_700_000_000_000;
+  notebook.upsertOpenAICodexAuth({
+    provider: 'openai-codex',
+    type: 'oauth',
+    accessToken: createUnsignedJwt({
+      exp: Math.floor((now + 3600_000) / 1000)
+    }),
+    refreshToken: 'refresh-token',
+    idToken: createUnsignedJwt({
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: 'acct_123'
+      }
+    }),
+    accountId: 'acct_123',
+    expiresAt: now + 3600_000,
+    createdAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString()
+  });
+
+  const auth = new OpenAICodexAuth(notebook, { now: () => now });
+  const client = new CodexModelClient(notebook, auth, {
+    fetchImpl: async () =>
+      createResponsesStream([
+        responseCreated('resp_1'),
+        webSearchCallDone('ws_1', 'weather seattle'),
+        {
+          type: 'response.output_text.delta',
+          item_id: 'msg_1',
+          delta: 'It is rainy.'
+        },
+        responseCompleted('resp_1')
+      ])
+  });
+
+  let localToolExecutions = 0;
+  const emitted: Array<{ role: TranscriptRole; text: string }> = [];
+  const tools: AgentTools = {
+    bash: async () => {
+      localToolExecutions += 1;
+      return '';
+    },
+    read: async () => {
+      localToolExecutions += 1;
+      return '';
+    },
+    write: async () => {
+      localToolExecutions += 1;
+      return '';
+    },
+    edit: async () => {
+      localToolExecutions += 1;
+      return '';
+    },
+    glob: async () => {
+      localToolExecutions += 1;
+      return [];
+    },
+    grep: async () => {
+      localToolExecutions += 1;
+      return '';
+    },
+    spawnExperiment: async () => {
+      localToolExecutions += 1;
+      throw new Error('not used');
+    },
+    readExperiment: async () => {
+      localToolExecutions += 1;
+      throw new Error('not used');
+    },
+    authLogin: async () => '',
+    authStatus: async () => '',
+    authLogout: async () => '',
+    getModelSettings: async () => '',
+    setModel: async () => '',
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
+  };
+
+  await client.runTurn(
+    'session-test',
+    'Check the weather.',
+    tools,
+    async (role, text) => {
+      emitted.push({ role, text });
+    }
+  );
+
+  assert.equal(localToolExecutions, 0);
+  assert.equal(emitted[0]?.role, 'tool');
+  assert.match(emitted[0]?.text ?? '', /^@@tool\tweb_search\tWebSearch\(weather seattle\)/);
+  assert.equal(emitted[1]?.role, 'assistant');
+  assert.equal(emitted[1]?.text, 'It is rainy.');
+});
+
+test('CodexModelClient executes independent read-only tool calls in parallel while preserving output order', async (t) => {
+  const tempDir = await createTempDir('h2-model-parallel-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-test', tempDir);
+
+  const now = 1_700_000_000_000;
+  notebook.upsertOpenAICodexAuth({
+    provider: 'openai-codex',
+    type: 'oauth',
+    accessToken: createUnsignedJwt({
+      exp: Math.floor((now + 3600_000) / 1000)
+    }),
+    refreshToken: 'refresh-token',
+    idToken: createUnsignedJwt({
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: 'acct_123'
+      }
+    }),
+    accountId: 'acct_123',
+    expiresAt: now + 3600_000,
+    createdAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString()
+  });
+
+  let responseCount = 0;
+  const auth = new OpenAICodexAuth(notebook, { now: () => now });
+  const client = new CodexModelClient(notebook, auth, {
+    fetchImpl: async () => {
+      responseCount += 1;
+      if (responseCount === 1) {
+        return createResponsesStream([
+          responseCreated('resp_1'),
+          functionCallDone('call_read', 'read', { path: 'README.md' }, 0),
+          functionCallDone('call_rg', 'rg', { pattern: 'session', target: 'src' }, 1),
+          responseCompleted('resp_1')
+        ]);
+      }
+
+      return createResponsesStream([
+        responseCreated('resp_2'),
+        {
+          type: 'response.output_text.delta',
+          item_id: 'msg_2',
+          delta: 'Done.'
+        },
+        responseCompleted('resp_2')
+      ]);
+    }
+  });
+
+  const toolEvents: string[] = [];
+  const emitted: Array<{ role: TranscriptRole; text: string }> = [];
+  const tools: AgentTools = {
+    bash: async () => '',
+    read: async (filePath) => {
+      toolEvents.push(`start:read:${filePath}`);
+      await new Promise((resolve) => setTimeout(resolve, 40));
+      toolEvents.push(`end:read:${filePath}`);
+      return `read ${filePath}`;
+    },
+    ls: async () => '',
+    edit: async () => '',
+    glob: async () => [],
+    rg: async (pattern, target) => {
+      toolEvents.push(`start:rg:${pattern}:${target}`);
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      toolEvents.push(`end:rg:${pattern}:${target}`);
+      return `rg ${pattern} ${target}`;
+    },
+    spawnExperiment: async () => {
+      throw new Error('not used');
+    },
+    readExperiment: async () => {
+      throw new Error('not used');
+    },
+    authLogin: async () => '',
+    authStatus: async () => '',
+    authLogout: async () => '',
+    getModelSettings: async () => '',
+    setModel: async () => '',
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
+  };
+
+  await client.runTurn(
+    'session-test',
+    'Read the readme and search src for session references',
+    tools,
+    async (role, text) => {
+      emitted.push({ role, text });
+    }
+  );
+
+  assert.deepEqual(toolEvents.slice(0, 4), [
+    'start:read:README.md',
+    'start:rg:session:src',
+    'end:rg:session:src',
+    'end:read:README.md'
+  ]);
+  assert.equal(emitted[0]?.role, 'tool');
+  assert.match(emitted[0]?.text ?? '', /^@@tool\tread\tRead\(README\.md\)/);
+  assert.equal(emitted[1]?.role, 'tool');
+  assert.match(emitted[1]?.text ?? '', /^@@tool\trg\tRg\(session in src\)/);
 });
 
 test('CodexModelClient surfaces streaming assistant deltas before completion', async (t) => {
@@ -1044,8 +1376,8 @@ test('CodexModelClient estimates context usage from compacted replay state', asy
   assert.ok(usage.usedTokens < 10_000);
 });
 
-test('CodexModelClient injects open study debt reminders into model requests', async (t) => {
-  const tempDir = await createTempDir('h2-model-study-debt-');
+test('CodexModelClient injects open question reminders into model requests', async (t) => {
+  const tempDir = await createTempDir('h2-model-open-question-');
   t.after(async () => cleanupDir(tempDir));
 
   const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));

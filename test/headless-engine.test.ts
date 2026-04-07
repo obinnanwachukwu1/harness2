@@ -1,5 +1,5 @@
 import assert from 'node:assert/strict';
-import { access, readFile, writeFile } from 'node:fs/promises';
+import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 
@@ -78,6 +78,40 @@ test('HeadlessEngine read defaults to 100 lines and supports explicit line range
   assert.match(transcript, /125: line 125/);
 });
 
+test('HeadlessEngine bash supports multiline heredocs', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const output = await (engine as any).runBash(`python3 - <<'PY'
+print("hello")
+for i in range(2):
+    print(i)
+PY`);
+
+  assert.match(output, /exit: 0/);
+  assert.match(output, /hello/);
+  assert.match(output, /\n0\n1/);
+});
+
+test('HeadlessEngine rg accepts whitespace-separated multi-target strings', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  await writeFile(path.join(repoDir, 'app.txt'), 'alpha\n', 'utf8');
+  await mkdir(path.join(repoDir, 'lib'), { recursive: true });
+  await writeFile(path.join(repoDir, 'lib', 'notes.txt'), 'alpha\n', 'utf8');
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const output = await (engine as any).runRg('alpha', '. lib');
+  assert.match(output, /app\.txt/);
+  assert.match(output, /lib\/notes\.txt/);
+});
+
 test('HeadlessEngine compact persists harness checkpoint with git state and active experiments', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));
@@ -90,6 +124,7 @@ test('HeadlessEngine compact persists harness checkpoint with git state and acti
   notebook.upsertExperiment({
     id: 'exp-running',
     sessionId: engine.snapshot.session.id,
+    studyDebtId: null,
     hypothesis: 'verify checkpoint captures running experiments',
     command: 'subagent',
     context: '',
@@ -136,7 +171,7 @@ test('HeadlessEngine compact persists harness checkpoint with git state and acti
   assert.ok(checkpoint);
   assert.match(checkpoint?.gitLog ?? '', /\b[0-9a-f]{7,}\b/);
   assert.match(checkpoint?.checkpointBlock ?? '', /active_experiments:/);
-  assert.match(checkpoint?.checkpointBlock ?? '', /open_study_debts:/);
+  assert.match(checkpoint?.checkpointBlock ?? '', /open_questions:/);
   assert.equal(checkpoint?.activeExperimentSummaries[0]?.experimentId, 'exp-running');
 });
 
@@ -229,6 +264,7 @@ test('HeadlessEngine can preview and apply a preserved experiment back into the 
   notebook.upsertExperiment({
     id: 'exp-adopt',
     sessionId: engine.snapshot.session.id,
+    studyDebtId: null,
     hypothesis: 'preserved changes should be adoptable',
     command: 'subagent',
     context: '',
@@ -275,7 +311,7 @@ test('HeadlessEngine can preview and apply a preserved experiment back into the 
   assert.equal(adoptedFile, 'hello from experiment\n');
 });
 
-test('HeadlessEngine blocks main-workspace edits while matching study debt is open', async (t) => {
+test('HeadlessEngine blocks main-workspace edits while a matching open question is open', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));
 
@@ -294,11 +330,11 @@ test('HeadlessEngine blocks main-workspace edits while matching study debt is op
 
   await assert.rejects(
     () => (engine as any).runWrite('README.md', '# blocked\n'),
-    /Open study debt blocks this edit/
+    /An open question blocks this edit/
   );
 
   await (engine as any).resolveStudyDebt({
-    debtId: debt.id,
+    questionId: debt.id,
     resolution: 'static_evidence_sufficient',
     note: 'README edit is now justified by direct code evidence.'
   });
@@ -306,7 +342,7 @@ test('HeadlessEngine blocks main-workspace edits while matching study debt is op
   await assert.doesNotReject(() => (engine as any).runWrite('README.md', '# allowed\n'));
 });
 
-test('HeadlessEngine study debt path scoping blocks matching paths but allows unrelated edits', async (t) => {
+test('HeadlessEngine open-question path scoping blocks matching paths but allows unrelated edits', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));
 
@@ -325,11 +361,11 @@ test('HeadlessEngine study debt path scoping blocks matching paths but allows un
   await assert.doesNotReject(() => (engine as any).runWrite('notes.txt', 'safe\n'));
   await assert.rejects(
     () => (engine as any).runWrite('src/auth/flow.ts', 'blocked\n'),
-    /Open study debt blocks this edit/
+    /An open question blocks this edit/
   );
 });
 
-test('HeadlessEngine latches repeated study debt mutation blocks within the same turn', async (t) => {
+test('HeadlessEngine latches repeated open-question mutation blocks within the same turn', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));
 
@@ -353,11 +389,11 @@ test('HeadlessEngine latches repeated study debt mutation blocks within the same
 
   await assert.rejects(
     () => (engine as any).runWrite('README.md', '# blocked twice\n'),
-    /Open study debt still blocks this edit\.\ndebts: debt-/
+    /An open question still blocks this edit\.\nquestions: question-/
   );
 });
 
-test('HeadlessEngine blocks all main-workspace edits when open study debt has no affected paths', async (t) => {
+test('HeadlessEngine blocks all main-workspace edits when an open question has no affected paths', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));
 
@@ -374,11 +410,11 @@ test('HeadlessEngine blocks all main-workspace edits when open study debt has no
 
   await assert.rejects(
     () => (engine as any).runWrite('notes.txt', 'blocked\n'),
-    /Open study debt blocks this edit/
+    /An open question blocks this edit/
   );
 });
 
-test('HeadlessEngine does not apply main-session study debt to experiment worktree edits', async (t) => {
+test('HeadlessEngine does not apply main-session open questions to experiment worktree edits', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));
 
@@ -398,6 +434,270 @@ test('HeadlessEngine does not apply main-session study debt to experiment worktr
     (engine as any).runWriteAtRoot(worktreeDir, 'notes.txt', 'experiment-safe\n')
   );
   assert.equal(await readFile(path.join(worktreeDir, 'notes.txt'), 'utf8'), 'experiment-safe\n');
+});
+
+test('HeadlessEngine defaults experiment subagents to gpt-5.4-mini with high reasoning', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const originalRunTurn = (engine as any).model.runTurn;
+  let recordedModel: string | null = null;
+  (engine as any).model.runTurn = async (
+    sessionId: string,
+    _input: string,
+    _tools: unknown,
+    _emit: unknown,
+    _onAssistantStream: unknown,
+    _onReasoningSummaryStream: unknown,
+    _thinkingEnabled: boolean,
+    _toolDefinitions: unknown,
+    _instructions: string
+  ) => {
+    recordedModel = (engine as any).model.getSettings(sessionId).model;
+  };
+  t.after(() => {
+    (engine as any).model.runTurn = originalRunTurn;
+  });
+
+  const timestamp = nowIso();
+  const experimentSessionId = (engine as any).experimentManager.getExperimentSessionId(
+    'exp-model-default'
+  );
+  (engine as any).options.notebook.createSession(
+    experimentSessionId,
+    path.join(repoDir, '.harness2', 'worktrees', 'exp-model-default')
+  );
+  await (engine as any).runExperimentSubagent({
+    id: 'exp-model-default',
+    sessionId: engine.snapshot.session.id,
+    studyDebtId: null,
+    hypothesis: 'inspect the repo in isolation',
+    command: 'subagent',
+    context: '',
+    baseCommitSha: 'abc123',
+    branchName: 'h2-exp-model-default',
+    worktreePath: path.join(repoDir, '.harness2', 'worktrees', 'exp-model-default'),
+    status: 'running',
+    budget: 1000,
+    tokensUsed: 0,
+    contextTokensUsed: 0,
+    toolOutputTokensUsed: 0,
+    observationTokensUsed: 0,
+    preserve: false,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    resolvedAt: null,
+    finalVerdict: null,
+    finalSummary: null,
+    discovered: [],
+    artifacts: [],
+    constraints: [],
+    confidenceNote: null,
+    lowSignalWarningEmitted: false,
+    promote: false
+  });
+
+  assert.equal(recordedModel, 'gpt-5.4-mini');
+  assert.equal((engine as any).model.getSettings(experimentSessionId).reasoningEffort, 'high');
+});
+
+test('HeadlessEngine requires questionId when spawning an experiment with an open question', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const notebook = (engine as any).options.notebook;
+  const debt = notebook.openStudyDebt({
+    sessionId: engine.snapshot.session.id,
+    summary: 'runtime continuity is unproven',
+    whyItMatters: 'Being wrong would materially change the implementation choice.',
+    kind: 'runtime'
+  });
+
+  await assert.rejects(
+    () =>
+      (engine as any).spawnExperiment({
+        hypothesis: 'probe continuity handling',
+        budgetTokens: 1200,
+        preserve: false
+      }),
+    /must be tied to a question/
+  );
+
+  await assert.doesNotReject(() =>
+    (engine as any).spawnExperiment({
+      questionId: debt.id,
+      hypothesis: 'probe continuity handling',
+      budgetTokens: 1200,
+      preserve: false
+    })
+  );
+});
+
+test('HeadlessEngine rejects spawn_experiment pinned to an unknown or closed question', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const notebook = (engine as any).options.notebook;
+  const debt = notebook.openStudyDebt({
+    sessionId: engine.snapshot.session.id,
+    summary: 'runtime continuity is unproven',
+    whyItMatters: 'Being wrong would materially change the implementation choice.',
+    kind: 'runtime'
+  });
+
+  await assert.rejects(
+    () =>
+      (engine as any).spawnExperiment({
+        questionId: 'question-missing',
+        hypothesis: 'probe continuity handling',
+        budgetTokens: 1200,
+        preserve: false
+      }),
+    /Unknown question/
+  );
+
+  await (engine as any).resolveStudyDebt({
+    questionId: debt.id,
+    resolution: 'static_evidence_sufficient',
+    note: 'Resolved directly from repo evidence.'
+  });
+
+  await assert.rejects(
+    () =>
+      (engine as any).spawnExperiment({
+        questionId: debt.id,
+        hypothesis: 'probe continuity handling',
+        budgetTokens: 1200,
+        preserve: false
+      }),
+    /already closed/
+  );
+});
+
+test('HeadlessEngine rejects resolving an open question as static evidence after a linked invalidation', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const notebook = (engine as any).options.notebook;
+  const question = notebook.openStudyDebt({
+    sessionId: engine.snapshot.session.id,
+    summary: 'fallback retry semantics are unproven',
+    whyItMatters: 'Being wrong would materially change the implementation path.',
+    kind: 'runtime',
+    affectedPaths: ['README.md']
+  });
+  const timestamp = nowIso();
+  notebook.upsertExperiment({
+    id: 'exp-invalidated',
+    sessionId: engine.snapshot.session.id,
+    studyDebtId: question.id,
+    hypothesis: 'the failed partial can stay in canonical state during retry',
+    command: 'subagent',
+    context: '',
+    baseCommitSha: 'abc123',
+    branchName: 'h2-exp-invalidated',
+    worktreePath: path.join(repoDir, '.harness2', 'worktrees', 'exp-invalidated'),
+    status: 'invalidated',
+    budget: 5000,
+    tokensUsed: 250,
+    contextTokensUsed: 10,
+    toolOutputTokensUsed: 220,
+    observationTokensUsed: 20,
+    preserve: false,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    resolvedAt: timestamp,
+    finalVerdict: 'invalidated',
+    finalSummary: 'Retaining the partial assistant corrupts the retry path.',
+    discovered: [],
+    artifacts: [],
+    constraints: [],
+    confidenceNote: null,
+    lowSignalWarningEmitted: false,
+    promote: false
+  });
+
+  await assert.rejects(
+    () =>
+      (engine as any).resolveStudyDebt({
+        questionId: question.id,
+        resolution: 'static_evidence_sufficient',
+        note: 'I think static repo evidence is enough now.'
+      }),
+    /linked to invalidated experiment/
+  );
+
+  await assert.doesNotReject(() =>
+    (engine as any).resolveStudyDebt({
+      questionId: question.id,
+      resolution: 'scope_narrowed',
+      note: 'Narrow to a path that removes the failed partial before retry.'
+    })
+  );
+});
+
+test('HeadlessEngine surfaces linked invalidations in open-question mutation blocks', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const notebook = (engine as any).options.notebook;
+  const question = notebook.openStudyDebt({
+    sessionId: engine.snapshot.session.id,
+    summary: 'fallback retry semantics are unproven',
+    whyItMatters: 'Being wrong would materially change the implementation path.',
+    kind: 'runtime',
+    affectedPaths: ['README.md']
+  });
+  const timestamp = nowIso();
+  notebook.upsertExperiment({
+    id: 'exp-invalidated',
+    sessionId: engine.snapshot.session.id,
+    studyDebtId: question.id,
+    hypothesis: 'the failed partial can stay in canonical state during retry',
+    command: 'subagent',
+    context: '',
+    baseCommitSha: 'abc123',
+    branchName: 'h2-exp-invalidated',
+    worktreePath: path.join(repoDir, '.harness2', 'worktrees', 'exp-invalidated'),
+    status: 'invalidated',
+    budget: 5000,
+    tokensUsed: 250,
+    contextTokensUsed: 10,
+    toolOutputTokensUsed: 220,
+    observationTokensUsed: 20,
+    preserve: false,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    resolvedAt: timestamp,
+    finalVerdict: 'invalidated',
+    finalSummary: 'Retaining the partial assistant corrupts the retry path.',
+    discovered: [],
+    artifacts: [],
+    constraints: [],
+    confidenceNote: null,
+    lowSignalWarningEmitted: false,
+    promote: false
+  });
+
+  await assert.rejects(
+    () => (engine as any).runWrite('README.md', '# blocked\n'),
+    /linked_invalidated_experiments=exp-invalidated:Retaining the partial assistant corrupts the retry path\./
+  );
 });
 
 test('HeadlessEngine exports the current session to markdown via /export', async (t) => {

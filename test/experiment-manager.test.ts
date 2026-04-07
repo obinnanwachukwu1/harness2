@@ -39,6 +39,12 @@ test('ExperimentManager spawn creates worktree and persists a running record', a
   const notebook = new Notebook(path.join(repoDir, '.h2', 'test.sqlite'));
   t.after(() => notebook.close());
   notebook.createSession('session-test', repoDir);
+  const debt = notebook.openStudyDebt({
+    sessionId: 'session-test',
+    summary: 'repo safety is unproven',
+    whyItMatters: 'Being wrong would change whether the experiment should run.',
+    kind: 'architecture'
+  });
 
   let started = false;
   const manager = createManager(repoDir, notebook, async () => {
@@ -48,6 +54,7 @@ test('ExperimentManager spawn creates worktree and persists a running record', a
 
   const experiment = await manager.spawn({
     sessionId: 'session-test',
+    studyDebtId: debt.id,
     hypothesis: 'investigate the repo safely',
     budgetTokens: 1200,
     preserve: false
@@ -56,6 +63,7 @@ test('ExperimentManager spawn creates worktree and persists a running record', a
   assert.equal(started, true);
   assert.equal(await pathExists(experiment.worktreePath), true);
   assert.equal(manager.read(experiment.id).status, 'running');
+  assert.equal(manager.read(experiment.id).studyDebtId, debt.id);
   assert.equal(notebook.getExperiment(experiment.id)?.hypothesis, 'investigate the repo safely');
 });
 

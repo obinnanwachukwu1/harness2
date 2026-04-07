@@ -11,10 +11,10 @@ const HELP_TEXT = [
   '/help',
   '/bash <command...>',
   '/read <path> [startLine] [endLine]',
-  '/write <path> :: <content>',
+  '/ls [path] [--recursive]',
   '/edit <path> :: <find> => <replace>',
   '/glob <pattern>',
-  '/grep <pattern> [path]',
+  '/rg <pattern> [path]',
   `/spawn --hypothesis "..." [--budget ${DEFAULT_EXPERIMENT_BUDGET_TOKENS}] [--context "..."] [--preserve]`,
   '/experiment <experimentId>',
   '/adopt <experimentId> [--apply]',
@@ -90,11 +90,29 @@ export class PrototypeRunner {
         return;
       }
 
+      case 'ls': {
+        if (!context.tools.ls) {
+          await context.emit('assistant', 'ls is not available in this session.');
+          return;
+        }
+
+        const recursive = rawArgs.includes('--recursive');
+        const filePath = rawArgs.find((arg) => arg !== '--recursive');
+        const output = await context.tools.ls(filePath, recursive);
+        await context.emit('tool', output);
+        return;
+      }
+
       case 'write': {
         const payload = trimmed.replace(/^\/write\s+/, '');
         const divider = payload.indexOf('::');
         if (divider === -1) {
           await context.emit('assistant', 'Usage: /write <path> :: <content>');
+          return;
+        }
+
+        if (!context.tools.write) {
+          await context.emit('assistant', 'Write is not available in this session.');
           return;
         }
 
@@ -143,6 +161,24 @@ export class PrototypeRunner {
         return;
       }
 
+      case 'rg': {
+        if (!context.tools.rg) {
+          await context.emit('assistant', 'rg is not available in this session.');
+          return;
+        }
+
+        const pattern = rawArgs[0];
+        const target = rawArgs[1];
+        if (!pattern) {
+          await context.emit('assistant', 'Usage: /rg <pattern> [path]');
+          return;
+        }
+
+        const output = await context.tools.rg(pattern, target);
+        await context.emit('tool', output);
+        return;
+      }
+
       case 'grep': {
         const pattern = rawArgs[0];
         const target = rawArgs[1];
@@ -151,7 +187,9 @@ export class PrototypeRunner {
           return;
         }
 
-        const output = await context.tools.grep(pattern, target);
+        const output = context.tools.grep
+          ? await context.tools.grep(pattern, target)
+          : await context.tools.rg!(pattern, target);
         await context.emit('tool', output);
         return;
       }

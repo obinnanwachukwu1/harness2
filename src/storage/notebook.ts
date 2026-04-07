@@ -42,6 +42,7 @@ interface TranscriptRow {
 interface ExperimentRow {
   id: string;
   session_id: string;
+  study_debt_id: string | null;
   hypothesis: string;
   command: string;
   context: string;
@@ -182,6 +183,7 @@ export class Notebook {
       CREATE TABLE IF NOT EXISTS experiments (
         id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        study_debt_id TEXT REFERENCES study_debts(id) ON DELETE SET NULL,
         hypothesis TEXT NOT NULL,
         command TEXT NOT NULL,
         context TEXT NOT NULL,
@@ -336,6 +338,12 @@ export class Notebook {
       this.db.exec(`ALTER TABLE experiments ADD COLUMN promote INTEGER NOT NULL DEFAULT 0`);
     }
 
+    if (!experimentColumns.some((column) => column.name === 'study_debt_id')) {
+      this.db.exec(
+        `ALTER TABLE experiments ADD COLUMN study_debt_id TEXT REFERENCES study_debts(id) ON DELETE SET NULL`
+      );
+    }
+
     if (!experimentColumns.some((column) => column.name === 'context_tokens_used')) {
       this.db.exec(`ALTER TABLE experiments ADD COLUMN context_tokens_used INTEGER NOT NULL DEFAULT 0`);
     }
@@ -439,6 +447,7 @@ export class Notebook {
           INSERT INTO experiments (
             id,
             session_id,
+            study_debt_id,
             hypothesis,
             command,
             context,
@@ -464,9 +473,10 @@ export class Notebook {
             low_signal_warning_emitted,
             promote
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(id) DO UPDATE SET
             session_id = excluded.session_id,
+            study_debt_id = excluded.study_debt_id,
             hypothesis = excluded.hypothesis,
             command = excluded.command,
             context = excluded.context,
@@ -496,6 +506,7 @@ export class Notebook {
       .run(
         experiment.id,
         experiment.sessionId,
+        experiment.studyDebtId,
         experiment.hypothesis,
         experiment.command,
         experiment.context,
@@ -532,6 +543,7 @@ export class Notebook {
           SELECT
             id,
             session_id,
+            study_debt_id,
             hypothesis,
             command,
             context,
@@ -572,6 +584,7 @@ export class Notebook {
           SELECT
             id,
             session_id,
+            study_debt_id,
             hypothesis,
             command,
             context,
@@ -602,6 +615,49 @@ export class Notebook {
         `
       )
       .all(sessionId) as unknown as ExperimentRow[];
+
+    return rows.map(mapExperiment);
+  }
+
+  listInvalidatedExperimentsForStudyDebt(questionId: string): ExperimentRecord[] {
+    const rows = this.db
+      .prepare(
+        `
+          SELECT
+            id,
+            session_id,
+            study_debt_id,
+            hypothesis,
+            command,
+            context,
+            base_commit_sha,
+            branch_name,
+            worktree_path,
+            status,
+            budget,
+            tokens_used,
+            context_tokens_used,
+            tool_output_tokens_used,
+            observation_tokens_used,
+            preserve,
+            created_at,
+            updated_at,
+            resolved_at,
+            final_verdict,
+            final_summary,
+            discovered_json,
+            artifacts_json,
+            constraints_json,
+            confidence_note,
+            low_signal_warning_emitted,
+            promote
+          FROM experiments
+          WHERE study_debt_id = ?
+            AND (final_verdict = 'invalidated' OR status = 'invalidated')
+          ORDER BY updated_at DESC, id DESC
+        `
+      )
+      .all(questionId) as unknown as ExperimentRow[];
 
     return rows.map(mapExperiment);
   }
@@ -719,6 +775,7 @@ export class Notebook {
           SELECT DISTINCT
             e.id,
             e.session_id,
+            e.study_debt_id,
             e.hypothesis,
             e.command,
             e.context,
@@ -1071,7 +1128,7 @@ export class Notebook {
     recommendedStudy?: string;
   }): StudyDebtRecord {
     const timestamp = nowIso();
-    const id = `debt-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const id = `question-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
     const affectedPaths =
       input.affectedPaths && input.affectedPaths.length > 0
         ? input.affectedPaths.map((item) => item.trim()).filter(Boolean)
@@ -1115,13 +1172,30 @@ export class Notebook {
   }
 
   resolveStudyDebt(input: {
-    debtId: string;
+    questionId: string;
     resolution: StudyDebtResolution;
     note: string;
   }): StudyDebtRecord {
-    const existing = this.getStudyDebt(input.debtId);
+    const existing = this.getStudyDebt(input.questionId);
     if (!existing) {
-      throw new Error(`Unknown study debt: ${input.debtId}`);
+      throw new Error(`Unknown question: ${input.questionId}`);
+    }
+
+    const invalidatedExperiments = this.listInvalidatedExperimentsForStudyDebt(existing.id);
+    if (
+      invalidatedExperiments.length > 0 &&
+      input.resolution !== 'scope_narrowed' &&
+      input.resolution !== 'user_override'
+    ) {
+      throw new Error(
+        [
+          `Question ${input.questionId} is linked to invalidated experiment ${invalidatedExperiments
+            .map((experiment) => experiment.id)
+            .join(', ')}.`,
+          'Do not resolve this question as study_run or static_evidence_sufficient.',
+          'Narrow the claim with scope_narrowed, open a new question for a different path, or record a user override.'
+        ].join('\n')
+      );
     }
 
     const timestamp = nowIso();
@@ -1137,10 +1211,10 @@ export class Notebook {
           WHERE id = ?
         `
       )
-      .run(timestamp, timestamp, input.resolution, input.note.trim(), input.debtId);
+      .run(timestamp, timestamp, input.resolution, input.note.trim(), input.questionId);
 
     this.touchSession(existing.sessionId);
-    return this.getStudyDebt(input.debtId) as StudyDebtRecord;
+    return this.getStudyDebt(input.questionId) as StudyDebtRecord;
   }
 
   listOpenStudyDebts(sessionId: string): StudyDebtRecord[] {
@@ -1284,14 +1358,21 @@ export class Notebook {
     }
 
     return [
-      'Open study debt:',
+      'Open questions:',
       ...openDebts.map((debt) => {
+        const invalidated = this.listInvalidatedExperimentsForStudyDebt(debt.id);
         const scope =
           debt.affectedPaths && debt.affectedPaths.length > 0
             ? ` scope=${debt.affectedPaths.join(', ')}`
             : ' scope=all main-workspace edits';
         const study = debt.recommendedStudy ? ` study=${debt.recommendedStudy}` : '';
-        return `- ${debt.id} [${debt.kind}]: ${debt.summary}; why=${debt.whyItMatters}; discharge via study, static evidence, scope narrowing, or user override before dependent edits.${scope}${study}`;
+        const invalidation =
+          invalidated.length > 0
+            ? ` linked_invalidated_experiments=${invalidated
+                .map((experiment) => experiment.id)
+                .join(', ')}; do not continue on the invalidated path without narrowing scope or opening a new question.`
+            : '';
+        return `- ${debt.id} [${debt.kind}]: ${debt.summary}; why=${debt.whyItMatters}; resolve via study, static evidence, scope narrowing, or user override before dependent edits. Tie any related experiment to this question.${scope}${study}${invalidation}`;
       })
     ].join('\n');
   }
@@ -1412,6 +1493,7 @@ export class Notebook {
     statusText: string,
     estimatedContextTokens = 0,
     contextWindowTokens = 0,
+    standardRateContextTokens: number | null = null,
     liveAssistantText: string | null = null,
     liveReasoningSummary: string | null = null,
     thinkingEnabled = true
@@ -1431,6 +1513,7 @@ export class Notebook {
       reasoningEffort: this.getModelSession(sessionId)?.reasoningEffort ?? 'medium',
       estimatedContextTokens,
       contextWindowTokens,
+      standardRateContextTokens,
       liveAssistantText,
       liveReasoningSummary,
       thinkingEnabled
@@ -1465,6 +1548,7 @@ function mapExperiment(row: ExperimentRow): ExperimentRecord {
   return {
     id: row.id,
     sessionId: row.session_id,
+    studyDebtId: row.study_debt_id,
     hypothesis: row.hypothesis,
     command: row.command,
     context: row.context,

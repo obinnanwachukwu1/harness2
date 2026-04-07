@@ -52,6 +52,7 @@ export type ModelHistoryItem =
 export interface ExperimentRecord {
   id: string;
   sessionId: string;
+  studyDebtId: string | null;
   hypothesis: string;
   command: string;
   context: string;
@@ -269,6 +270,7 @@ export interface EngineSnapshot {
   reasoningEffort: 'low' | 'medium' | 'high' | null;
   estimatedContextTokens: number;
   contextWindowTokens: number;
+  standardRateContextTokens: number | null;
   liveAssistantText: string | null;
   liveReasoningSummary: string | null;
   thinkingEnabled: boolean;
@@ -276,6 +278,7 @@ export interface EngineSnapshot {
 
 export interface SpawnExperimentInput {
   sessionId: string;
+  studyDebtId?: string;
   hypothesis: string;
   context?: string;
   budgetTokens: number;
@@ -285,10 +288,12 @@ export interface SpawnExperimentInput {
 export interface AgentTools {
   bash(command: string): Promise<string>;
   read(filePath: string, startLine?: number, endLine?: number): Promise<string>;
-  write(filePath: string, content: string): Promise<string>;
+  ls?(filePath?: string, recursive?: boolean): Promise<string>;
+  write?(filePath: string, content: string): Promise<string>;
   edit(filePath: string, findText: string, replaceText: string): Promise<string>;
   glob(pattern: string): Promise<string[]>;
-  grep(pattern: string, target?: string): Promise<string>;
+  rg?(pattern: string, target?: string | string[]): Promise<string>;
+  grep?(pattern: string, target?: string | string[]): Promise<string>;
   spawnExperiment(input: Omit<SpawnExperimentInput, 'sessionId'>): Promise<ExperimentRecord>;
   extendExperimentBudget?(
     experimentId: string,
@@ -318,12 +323,12 @@ export interface AgentTools {
     kind?: StudyDebtKind;
     affectedPaths?: string[];
     recommendedStudy?: string;
-  }): Promise<{ debtId: string; status: 'open' }>;
+  }): Promise<{ questionId: string; status: 'open' }>;
   resolveStudyDebt?(input: {
-    debtId: string;
+    questionId: string;
     resolution: StudyDebtResolution;
     note: string;
-  }): Promise<{ debtId: string; status: 'closed' }>;
+  }): Promise<{ questionId: string; status: 'closed' }>;
   exportSession?(sessionId?: string): Promise<SessionExportResult>;
   clearExperimentJournal?(
     force?: boolean

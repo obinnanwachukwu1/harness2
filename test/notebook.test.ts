@@ -38,6 +38,7 @@ test('Notebook persists transcript and experiment details', async (t) => {
   const experiment: ExperimentRecord = {
     id: 'exp-test',
     sessionId: session.id,
+    studyDebtId: null,
     hypothesis: 'writing observations is durable',
     command: 'subagent',
     context: 'test context',
@@ -139,6 +140,7 @@ test('Notebook searchExperimentSummaries finds durable experiment summaries with
   notebook.upsertExperiment({
     id: 'exp-alpha',
     sessionId: session.id,
+    studyDebtId: null,
     hypothesis: 'check oauth callback behavior',
     command: 'subagent',
     context: '',
@@ -169,6 +171,7 @@ test('Notebook searchExperimentSummaries finds durable experiment summaries with
   notebook.upsertExperiment({
     id: 'exp-beta',
     sessionId: session.id,
+    studyDebtId: null,
     hypothesis: 'measure token budgeting',
     command: 'subagent',
     context: '',
@@ -240,6 +243,7 @@ test('Notebook clearExperimentJournal removes persisted experiment history and b
   notebook.upsertExperiment({
     id: 'exp-running',
     sessionId: session.id,
+    studyDebtId: null,
     hypothesis: 'still running',
     command: 'subagent',
     context: '',
@@ -387,14 +391,14 @@ test('Notebook persists checkpoints and rebuilds compacted request history from 
   ]);
 });
 
-test('Notebook persists study debt and injects open debt reminders into request history', async (t) => {
-  const tempDir = await createTempDir('h2-notebook-study-debt-');
+test('Notebook persists open questions and injects question reminders into request history', async (t) => {
+  const tempDir = await createTempDir('h2-notebook-open-question-');
   t.after(async () => cleanupDir(tempDir));
 
   const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
   t.after(() => notebook.close());
 
-  const session = notebook.createSession('session-study-debt', tempDir);
+  const session = notebook.createSession('session-open-question', tempDir);
   notebook.appendModelHistoryItem(session.id, {
     type: 'message',
     role: 'user',
@@ -416,8 +420,44 @@ test('Notebook persists study debt and injects open debt reminders into request 
   const requestHistory = notebook.buildModelRequestHistory(session.id);
   assert.equal(requestHistory[0]?.type, 'message');
   assert.equal(requestHistory[0]?.role, 'developer');
-  assert.match((requestHistory[0] as any).content, /Open study debt:/);
+  assert.match((requestHistory[0] as any).content, /Open questions:/);
   assert.match((requestHistory[0] as any).content, /guest-to-login chat continuity is unproven/);
+
+  const timestamp = nowIso();
+  notebook.upsertExperiment({
+    id: 'exp-invalidated',
+    sessionId: session.id,
+    studyDebtId: debt.id,
+    hypothesis: 'the current path is safe',
+    command: 'subagent',
+    context: '',
+    baseCommitSha: 'abc123',
+    branchName: 'h2-exp-invalidated',
+    worktreePath: path.join(tempDir, 'worktree'),
+    status: 'invalidated',
+    budget: 5000,
+    tokensUsed: 200,
+    contextTokensUsed: 20,
+    toolOutputTokensUsed: 160,
+    observationTokensUsed: 20,
+    preserve: false,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    resolvedAt: timestamp,
+    finalVerdict: 'invalidated',
+    finalSummary: 'The original path is unsafe.',
+    discovered: [],
+    artifacts: [],
+    constraints: [],
+    confidenceNote: null,
+    lowSignalWarningEmitted: false,
+    promote: false
+  });
+
+  assert.match(
+    notebook.buildOpenStudyDebtReminder(session.id) ?? '',
+    /linked_invalidated_experiments=exp-invalidated/
+  );
 
   notebook.createSessionCheckpoint({
     sessionId: session.id,
@@ -447,7 +487,7 @@ test('Notebook persists study debt and injects open debt reminders into request 
   ]);
 
   const resolved = notebook.resolveStudyDebt({
-    debtId: debt.id,
+    questionId: debt.id,
     resolution: 'scope_narrowed',
     note: 'Limited the feature to preserve continuity only on the same chat route.'
   });

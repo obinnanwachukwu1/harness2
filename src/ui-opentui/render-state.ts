@@ -199,6 +199,8 @@ function summarizeToolTranscript(
     case 'resolve_experiment':
     case 'extend_experiment_budget':
       return summarizeExperimentTool(toolName, body, explicitLabel);
+    case 'open_question':
+    case 'resolve_question':
     case 'open_study_debt':
     case 'resolve_study_debt':
       return summarizeStudyDebtTool(toolName, body, explicitLabel);
@@ -327,8 +329,10 @@ function summarizeStudyDebtTool(
   const label =
     explicitLabel ||
     {
-      open_study_debt: 'study debt open',
-      resolve_study_debt: 'study debt resolve'
+      open_question: 'open question',
+      resolve_question: 'resolve question',
+      open_study_debt: 'open question',
+      resolve_study_debt: 'resolve question'
     }[toolName] ||
     toolName;
 
@@ -339,7 +343,9 @@ function summarizeStudyDebtTool(
   const previewLines: string[] = [];
   const maybeObject = parsed as Record<string, unknown>;
 
-  if (typeof maybeObject.debtId === 'string') {
+  if (typeof maybeObject.questionId === 'string') {
+    previewLines.push(maybeObject.questionId);
+  } else if (typeof maybeObject.debtId === 'string') {
     previewLines.push(maybeObject.debtId);
   } else if (typeof maybeObject.id === 'string') {
     previewLines.push(maybeObject.id);
@@ -383,7 +389,7 @@ function isExperimentTool(toolName: string): boolean {
 }
 
 function isStudyDebtTool(toolName: string): boolean {
-  return toolName.includes('study_debt');
+  return toolName.includes('study_debt') || toolName.includes('question');
 }
 
 function getToolTone(toolName: string): ToolTone {
@@ -474,11 +480,16 @@ function formatTokenCount(value: number): string {
 }
 
 function formatStatus(snapshot: EngineSnapshot): string {
+  const ctxText = `ctx ${formatTokenCount(snapshot.estimatedContextTokens)}/${formatTokenCount(snapshot.contextWindowTokens)}`;
+  const pricingText = snapshot.standardRateContextTokens
+    ? `std ${formatTokenCount(snapshot.standardRateContextTokens)}`
+    : null;
+
   return [
     snapshot.statusText,
     `session ${snapshot.session.id}`,
     `model ${snapshot.model}`,
-    `ctx ${formatTokenCount(snapshot.estimatedContextTokens)}/${formatTokenCount(snapshot.contextWindowTokens)}`,
+    pricingText ? `${ctxText} (${pricingText})` : ctxText,
     `thinking ${snapshot.thinkingEnabled ? 'on' : 'off'}`,
     `experiments ${snapshot.experiments.filter((experiment) => experiment.status === 'running').length}/${snapshot.experiments.length}`
   ].join('  ');

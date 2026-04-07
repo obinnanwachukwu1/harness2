@@ -68,6 +68,7 @@ export class ExperimentManager {
     const record: ExperimentRecord = {
       id,
       sessionId: input.sessionId,
+      studyDebtId: input.studyDebtId ?? null,
       hypothesis: input.hypothesis,
       command: 'subagent',
       context: input.context ?? '',
