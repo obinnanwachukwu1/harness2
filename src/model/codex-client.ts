@@ -130,6 +130,7 @@ export class CodexModelClient {
         shouldInjectExperimentHint(inputText, requestItems, toolDefinitions)
           ? buildExperimentHint()
           : null,
+        shouldInjectPreEditGuardHint(requestItems) ? buildPreEditGuardHint() : null,
         shouldInjectPostSpawnWaitHint(requestItems) ? buildPostSpawnWaitHint() : null,
         shouldInjectObservationHint(requestItems, toolDefinitions)
           ? buildObservationHint()
@@ -1284,7 +1285,7 @@ function shouldInjectExperimentHint(
     ['bash', 'read', 'glob', 'grep'].includes(item.name)
   ).length;
 
-  if (inlineProbeCount < 4) {
+  if (inlineProbeCount < 8) {
     return false;
   }
 
@@ -1307,6 +1308,28 @@ function shouldInjectExperimentHint(
     );
 
   return experimentFriendly && !externalObserver;
+}
+
+function shouldInjectPreEditGuardHint(requestItems: ModelHistoryItem[]): boolean {
+  const currentTurnItems = getCurrentTurnItems(requestItems);
+  const functionCalls = currentTurnItems.filter(
+    (item): item is Extract<ModelHistoryItem, { type: 'function_call' }> => item.type === 'function_call'
+  );
+
+  const lastCall = functionCalls.at(-1);
+  if (!lastCall || !['write', 'edit'].includes(lastCall.name)) {
+    return false;
+  }
+
+  if (functionCalls.some((item) => item.name === 'spawn_experiment')) {
+    return false;
+  }
+
+  const investigationCalls = functionCalls.slice(0, -1).filter((item) =>
+    ['bash', 'read', 'glob', 'grep'].includes(item.name)
+  ).length;
+
+  return investigationCalls >= 8;
 }
 
 function shouldInjectPostSpawnWaitHint(requestItems: ModelHistoryItem[]): boolean {
@@ -1372,10 +1395,20 @@ function getCurrentTurnItems(requestItems: ModelHistoryItem[]): ModelHistoryItem
 function buildExperimentHint(): string {
   return [
     'Harness hint:',
-    'You have spent several inline tool calls gathering evidence without yet running an experiment.',
+    'You have spent a while gathering evidence inline without yet running an experiment.',
     'If you already have enough context to state one concrete falsifiable experiment, stop gathering background and run it now.',
     "If the open question is inside the isolated worktree/subagent boundary, prefer one narrow spawn_experiment over continued bash/read/grep probing.",
     'If the question requires an external observer outside the side-task lifecycle, continue with direct probing instead.'
+  ].join(' ');
+}
+
+function buildPreEditGuardHint(): string {
+  return [
+    'Harness hint:',
+    'You investigated this plan for a while and are now moving toward implementation.',
+    'If the remaining design still depends on an unverified assumption, do not edit yet.',
+    'Either gather decisive evidence, choose a better observer, or narrow the claim and explain the reduced scope.',
+    'If the path is already clearly safe and supported by the code or tests you inspected, proceed.'
   ].join(' ');
 }
 

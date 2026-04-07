@@ -296,7 +296,7 @@ test('CodexModelClient injects a harness hint after extended inline probing', as
             type: 'response.completed',
             response: {
               id: 'resp_1',
-              output: Array.from({ length: 6 }, (_, index) => ({
+              output: Array.from({ length: 8 }, (_, index) => ({
                 type: 'function_call',
                 call_id: `call_${index + 1}`,
                 name: 'read',
@@ -510,6 +510,142 @@ test('CodexModelClient injects a post-spawn wait hint after repeated probing', a
   const thirdInput = requests[2]?.input as Array<Record<string, unknown>>;
   assert.equal(thirdInput[0]?.role, 'system');
   assert.match(String(thirdInput[0]?.content ?? ''), /You already have a live experiment/);
+});
+
+test('CodexModelClient injects a pre-edit guard hint after long investigation without an experiment', async (t) => {
+  const tempDir = await createTempDir('h2-model-pre-edit-hint-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-test', tempDir);
+
+  const now = 1_700_000_000_000;
+  notebook.upsertOpenAICodexAuth({
+    provider: 'openai-codex',
+    type: 'oauth',
+    accessToken: createUnsignedJwt({
+      exp: Math.floor((now + 3600_000) / 1000)
+    }),
+    refreshToken: 'refresh-token',
+    idToken: createUnsignedJwt({
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: 'acct_123'
+      }
+    }),
+    accountId: 'acct_123',
+    expiresAt: now + 3600_000,
+    createdAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString()
+  });
+
+  const requests: Array<Record<string, unknown>> = [];
+  let responseCount = 0;
+  const auth = new OpenAICodexAuth(notebook, { now: () => now });
+  const client = new CodexModelClient(notebook, auth, {
+    fetchImpl: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      requests.push(body);
+      responseCount += 1;
+
+      if (responseCount === 1) {
+        return new Response(
+          `data: ${JSON.stringify({
+            type: 'response.completed',
+            response: {
+              id: 'resp_1',
+              output: Array.from({ length: 8 }, (_, index) => ({
+                type: 'function_call',
+                call_id: `call_probe_${index + 1}`,
+                name: index % 2 === 0 ? 'read' : 'grep',
+                arguments:
+                  index % 2 === 0
+                    ? JSON.stringify({ path: `file-${index + 1}.ts` })
+                    : JSON.stringify({ pattern: 'resume', target: 'src' })
+              }))
+            }
+          })}\n\n`,
+          { headers: { 'content-type': 'text/event-stream' } }
+        );
+      }
+
+      if (responseCount === 2) {
+        return new Response(
+          `data: ${JSON.stringify({
+            type: 'response.completed',
+            response: {
+              id: 'resp_2',
+              output: [
+                {
+                  type: 'function_call',
+                  call_id: 'call_edit',
+                  name: 'edit',
+                  arguments: JSON.stringify({
+                    path: 'src/example.ts',
+                    findText: 'old',
+                    replaceText: 'new'
+                  })
+                }
+              ]
+            }
+          })}\n\n`,
+          { headers: { 'content-type': 'text/event-stream' } }
+        );
+      }
+
+      return new Response(
+        `data: ${JSON.stringify({
+          type: 'response.completed',
+          response: {
+            id: 'resp_3',
+            output: [
+              {
+                type: 'message',
+                content: [{ type: 'output_text', text: 'Done.' }]
+              }
+            ]
+          }
+        })}\n\n`,
+        { headers: { 'content-type': 'text/event-stream' } }
+      );
+    }
+  });
+
+  const tools: AgentTools = {
+    bash: async () => '',
+    read: async () => 'read result',
+    write: async () => '',
+    edit: async () => '',
+    glob: async () => [],
+    grep: async () => 'grep result',
+    spawnExperiment: async () => {
+      throw new Error('not used');
+    },
+    readExperiment: async () => {
+      throw new Error('not used');
+    },
+    authLogin: async () => '',
+    authStatus: async () => '',
+    authLogout: async () => '',
+    getModelSettings: async () => '',
+    setModel: async () => '',
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
+  };
+
+  await client.runTurn(
+    'session-test',
+    'Implement automatic resume after interruptions with the fastest path that works.',
+    tools,
+    async () => {},
+    async () => {}
+  );
+
+  assert.equal(requests.length, 3);
+  const thirdInput = requests[2]?.input as Array<Record<string, unknown>>;
+  assert.equal(thirdInput[0]?.role, 'system');
+  assert.match(String(thirdInput[0]?.content ?? ''), /moving toward implementation/i);
 });
 
 test('CodexModelClient injects an observation hint for experiment subagents after several tool calls without logging', async (t) => {
