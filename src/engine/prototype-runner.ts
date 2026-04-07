@@ -26,6 +26,7 @@ const HELP_TEXT = [
   '/model',
   '/model <name>',
   '/reasoning <off|low|medium|high>',
+  '/thinking [on|off]',
   '/quit'
 ].join('\n');
 
@@ -314,6 +315,24 @@ export class PrototypeRunner {
         const output = await context.tools.setReasoningEffort(
           effort as 'off' | 'low' | 'medium' | 'high'
         );
+        await context.emit('assistant', output);
+        return;
+      }
+
+      case 'thinking': {
+        const value = rawArgs[0];
+        if (!value) {
+          const output = await context.tools.getThinkingMode();
+          await context.emit('assistant', output);
+          return;
+        }
+
+        if (!['on', 'off'].includes(value)) {
+          await context.emit('assistant', 'Usage: /thinking [on|off]');
+          return;
+        }
+
+        const output = await context.tools.setThinkingMode(value === 'on');
         await context.emit('assistant', output);
         return;
       }

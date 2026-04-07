@@ -1,32 +1,34 @@
 #!/usr/bin/env node
+import path from 'node:path';
 import { stdout as output } from 'node:process';
+import { fileURLToPath } from 'node:url';
 
-import React from 'react';
-import { render } from 'ink';
+import { execa } from 'execa';
 
-import { OpenAICodexAuth } from './auth/openai-codex.js';
-import { runDoctor } from './commands/doctor.js';
-import { HeadlessEngine } from './engine/headless-engine.js';
-import { Notebook } from './storage/notebook.js';
-import { HarnessApp } from './ui/app.js';
 import type { ExperimentRecord, ModelHistoryItem, TranscriptEntry } from './types.js';
 
 async function main(): Promise<void> {
   const [, , ...args] = process.argv;
   const printRequest = parsePrintRequest(args);
   if (printRequest) {
-    await runPrintMode(printRequest.prompt, printRequest.sessionId);
+    await runPrintMode(printRequest.prompt, printRequest.sessionId, printRequest.thinking);
     return;
   }
 
   const command = args[0];
 
   if (command === 'doctor') {
+    const { runDoctor } = await import('./commands/doctor.js');
     const report = await runDoctor(process.cwd());
     printDoctor(report);
     if (!report.healthy) {
       process.exitCode = 1;
     }
+    return;
+  }
+
+  if (command === 'opentui') {
+    await runOpenTui(args[1]);
     return;
   }
 
@@ -43,27 +45,38 @@ async function main(): Promise<void> {
   if (command && command !== 'resume') {
     throw new Error(`Unknown command: ${command}`);
   }
-
-  const engine = await HeadlessEngine.open({
-    cwd: process.cwd(),
-    sessionId
-  });
-
-  const app = render(React.createElement(HarnessApp, { engine }));
-  try {
-    await app.waitUntilExit();
-  } finally {
-    await engine.dispose();
-  }
+  await runOpenTui(sessionId);
 }
 
-async function runPrintMode(prompt: string, sessionId?: string): Promise<void> {
+async function runOpenTui(sessionId?: string): Promise<void> {
+  const repoRoot = path.resolve(fileURLToPath(new URL('../', import.meta.url)));
+  const entryPath = path.join(repoRoot, 'packages/ui-opentui-spike/src/index.ts');
+  const args = ['run', entryPath, '--cwd', process.cwd()];
+  if (sessionId) {
+    args.push('--session', sessionId);
+  }
+
+  await execa('bun', args, {
+    cwd: repoRoot,
+    stdio: 'inherit'
+  });
+}
+
+async function runPrintMode(
+  prompt: string,
+  sessionId?: string,
+  thinking = false
+): Promise<void> {
+  const { HeadlessEngine } = await import('./engine/headless-engine.js');
+  const { Notebook } = await import('./storage/notebook.js');
   const engine = await HeadlessEngine.open({
     cwd: process.cwd(),
     sessionId
   });
+  engine.setThinkingEnabled(thinking);
 
   let streamedAssistant = '';
+  let pendingThinking = '';
   const maxWidth = Math.max(20, output.columns ?? 100);
   const activeSessionId = engine.snapshot.session.id;
   const initialTranscriptLength = engine.snapshot.transcript.length;
@@ -81,9 +94,17 @@ async function runPrintMode(prompt: string, sessionId?: string): Promise<void> {
         }
         streamedAssistant = text;
       },
+      onReasoningSummaryStream: async (text) => {
+        pendingThinking = `[thinking] ${normalizeReasoningSummaryText(text)}`;
+      },
       onTranscriptEntry: async (role, text) => {
         if (role === 'user') {
           return;
+        }
+
+        if (role !== 'system' && pendingThinking) {
+          output.write(`${truncatePrintLines(pendingThinking, maxWidth)}\n`);
+          pendingThinking = '';
         }
 
         if (role === 'assistant') {
@@ -111,12 +132,15 @@ async function runPrintMode(prompt: string, sessionId?: string): Promise<void> {
           streamedAssistant = '';
         }
 
-        output.write(`${truncatePrintLines(`[${role}] ${text}`, maxWidth)}\n`);
+        output.write(`${truncatePrintLines(formatTranscriptEntry(role, text), maxWidth)}\n`);
       }
     });
   } finally {
     if (streamedAssistant) {
       output.write('\n');
+    }
+    if (pendingThinking) {
+      output.write(`${truncatePrintLines(pendingThinking, maxWidth)}\n`);
     }
     const finalTranscript = engine.snapshot.transcript.slice(initialTranscriptLength);
     await engine.dispose();
@@ -132,6 +156,8 @@ async function runPrintMode(prompt: string, sessionId?: string): Promise<void> {
 }
 
 async function runAuthCommand(args: string[]): Promise<void> {
+  const { Notebook } = await import('./storage/notebook.js');
+  const { OpenAICodexAuth } = await import('./auth/openai-codex.js');
   const action = args[0];
   if (!action || !['login', 'status', 'access', 'logout'].includes(action)) {
     throw new Error('Usage: h2 auth <login|status|access|logout>');
@@ -178,7 +204,11 @@ async function runAuthCommand(args: string[]): Promise<void> {
   }
 }
 
-function printDoctor(report: Awaited<ReturnType<typeof runDoctor>>): void {
+function printDoctor(report: {
+  cwd: string;
+  healthy: boolean;
+  checks: Array<{ ok: boolean; label: string; detail: string }>;
+}): void {
   console.log(`h2 doctor`);
   console.log(`cwd: ${report.cwd}`);
   console.log('');
@@ -190,23 +220,32 @@ function printDoctor(report: Awaited<ReturnType<typeof runDoctor>>): void {
 
 function parsePrintRequest(
   args: string[]
-): { prompt: string; sessionId?: string } | null {
-  if (args[0] === '-p' || args[0] === '--print') {
-    const prompt = args.slice(1).join(' ').trim();
-    if (!prompt) {
-      throw new Error('Usage: h2 -p "<prompt>"');
+): { prompt: string; sessionId?: string; thinking: boolean } | null {
+  if (args[0] === '-p' || args[0] === '--print' || args[0] === '-thinking') {
+    const thinking = args.includes('-thinking');
+    const printIndex = args.findIndex((arg) => arg === '-p' || arg === '--print');
+    if (printIndex === -1) {
+      throw new Error('Usage: h2 [-thinking] -p "<prompt>"');
     }
-    return { prompt };
+
+    const prompt = args.slice(printIndex + 1).join(' ').trim();
+    if (!prompt) {
+      throw new Error('Usage: h2 [-thinking] -p "<prompt>"');
+    }
+    return { prompt, thinking };
   }
 
-  if (args[0] === 'resume' && args[1] && (args[2] === '-p' || args[2] === '--print')) {
-    const prompt = args.slice(3).join(' ').trim();
+  if (args[0] === 'resume' && args[1] && args.slice(2).some((arg) => arg === '-p' || arg === '--print')) {
+    const thinking = args.slice(2).includes('-thinking');
+    const printIndex = args.findIndex((arg, index) => index >= 2 && (arg === '-p' || arg === '--print'));
+    const prompt = args.slice(printIndex + 1).join(' ').trim();
     if (!prompt) {
-      throw new Error('Usage: h2 resume <sessionId> -p "<prompt>"');
+      throw new Error('Usage: h2 resume <sessionId> [-thinking] -p "<prompt>"');
     }
     return {
       sessionId: args[1],
-      prompt
+      prompt,
+      thinking
     };
   }
 
@@ -218,6 +257,14 @@ function truncatePrintLines(text: string, width: number): string {
     .split(/\r?\n/)
     .map((line) => truncateLine(line, width))
     .join('\n');
+}
+
+function normalizeReasoningSummaryText(text: string): string {
+  return text
+    .split(/\n{2,}/)
+    .map((paragraph) => paragraph.replace(/\s+/g, ' ').trim())
+    .filter(Boolean)
+    .join('\n\n');
 }
 
 function truncateLine(line: string, width: number): string {
@@ -233,6 +280,9 @@ function truncateLine(line: string, width: number): string {
 }
 
 function formatTranscriptEntry(role: 'user' | 'assistant' | 'tool' | 'system', text: string): string {
+  if (role === 'system' && text.startsWith('@@thinking\t')) {
+    return `[thinking] ${text.slice('@@thinking\t'.length)}`;
+  }
   const label =
     role === 'user'
       ? 'user'

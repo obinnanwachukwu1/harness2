@@ -1126,7 +1126,9 @@ export class Notebook {
     statusText: string,
     estimatedContextTokens = 0,
     contextWindowTokens = 0,
-    liveAssistantText: string | null = null
+    liveAssistantText: string | null = null,
+    liveReasoningSummary: string | null = null,
+    thinkingEnabled = false
   ): EngineSnapshot {
     const session = this.getSession(sessionId);
     if (!session) {
@@ -1143,7 +1145,9 @@ export class Notebook {
       reasoningEffort: this.getModelSession(sessionId)?.reasoningEffort ?? 'medium',
       estimatedContextTokens,
       contextWindowTokens,
-      liveAssistantText
+      liveAssistantText,
+      liveReasoningSummary,
+      thinkingEnabled
     };
   }
 

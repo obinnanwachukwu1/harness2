@@ -110,7 +110,9 @@ test('CodexModelClient performs tool round-trips and persists previous_response_
     authLogout: async () => '',
     getModelSettings: async () => '',
     setModel: async () => '',
-    setReasoningEffort: async () => ''
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
   };
 
   await client.runTurn(
@@ -230,7 +232,9 @@ test('CodexModelClient surfaces streaming assistant deltas before completion', a
     authLogout: async () => '',
     getModelSettings: async () => '',
     setModel: async () => '',
-    setReasoningEffort: async () => ''
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
   };
 
   await client.runTurn(
@@ -344,7 +348,9 @@ test('CodexModelClient injects a harness hint after extended inline probing', as
     authLogout: async () => '',
     getModelSettings: async () => '',
     setModel: async () => '',
-    setReasoningEffort: async () => ''
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
   };
 
   await client.runTurn(
@@ -487,7 +493,9 @@ test('CodexModelClient injects a post-spawn wait hint after repeated probing', a
     authLogout: async () => '',
     getModelSettings: async () => '',
     setModel: async () => '',
-    setReasoningEffort: async () => ''
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
   };
 
   await client.runTurn(
@@ -577,7 +585,9 @@ test('CodexModelClient surfaces streaming content-part events before completion'
     authLogout: async () => '',
     getModelSettings: async () => '',
     setModel: async () => '',
-    setReasoningEffort: async () => ''
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
   };
 
   await client.runTurn(
@@ -685,7 +695,9 @@ test('CodexModelClient does not duplicate live assistant text when delta and sna
     authLogout: async () => '',
     getModelSettings: async () => '',
     setModel: async () => '',
-    setReasoningEffort: async () => ''
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
   };
 
   await client.runTurn(
@@ -826,7 +838,9 @@ test('CodexModelClient rebuilds requests from latest checkpoint plus recent tail
     authLogout: async () => '',
     getModelSettings: async () => '',
     setModel: async () => '',
-    setReasoningEffort: async () => ''
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
   };
 
   await client.runTurn('session-test', 'ignored because history exists', tools, async () => undefined);
@@ -989,7 +1003,9 @@ test('CodexModelClient turns tool-call failures into tool outputs so the loop ca
     authLogout: async () => '',
     getModelSettings: async () => '',
     setModel: async () => '',
-    setReasoningEffort: async () => ''
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
   };
 
   await client.runTurn(
@@ -1113,7 +1129,9 @@ test('CodexModelClient retries transient 500 responses before succeeding', async
     authLogout: async () => '',
     getModelSettings: async () => '',
     setModel: async () => '',
-    setReasoningEffort: async () => ''
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
   };
 
   await client.runTurn(
@@ -1209,7 +1227,9 @@ test('CodexModelClient preserves streamed visible text when completed payload om
     authLogout: async () => '',
     getModelSettings: async () => '',
     setModel: async () => '',
-    setReasoningEffort: async () => ''
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
   };
 
   await client.runTurn(
@@ -1343,7 +1363,9 @@ test('CodexModelClient reconstructs streamed tool calls when completed payload o
     authLogout: async () => '',
     getModelSettings: async () => '',
     setModel: async () => '',
-    setReasoningEffort: async () => ''
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
   };
 
   await client.runTurn(
@@ -1454,7 +1476,9 @@ test('CodexModelClient formats ranged read tool headers', async (t) => {
     authLogout: async () => '',
     getModelSettings: async () => '',
     setModel: async () => '',
-    setReasoningEffort: async () => ''
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
   };
 
   await client.runTurn(

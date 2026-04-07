@@ -129,6 +129,52 @@ test('HeadlessEngine submit can stream transcript callbacks for noninteractive c
   assert.ok(emitted.some((entry) => entry.text.includes('README.md')));
 });
 
+test('HeadlessEngine persists a thinking summary once and clears the live overlay when it is appended', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+  engine.setThinkingEnabled(true);
+
+  const originalRunTurn = (engine as any).model.runTurn;
+  (engine as any).model.runTurn = async (
+    _sessionId: string,
+    _input: string,
+    _tools: unknown,
+    emit: (role: string, text: string) => Promise<void>,
+    _onAssistantStream: (text: string) => Promise<void>,
+    onReasoningSummaryStream: (text: string) => Promise<void>
+  ) => {
+    await onReasoningSummaryStream('Need to inspect the adoption path first.');
+    await emit('system', '@@thinking\tNeed to inspect the adoption path first.');
+    await emit('tool', '@@tool\tread\tRead(src/engine/headless-engine.ts)\nsrc/engine/headless-engine.ts');
+  };
+  t.after(() => {
+    (engine as any).model.runTurn = originalRunTurn;
+  });
+
+  const snapshots: Array<{ role: string; liveReasoningSummary: string | null }> = [];
+  await engine.submit('inspect it', {
+    onTranscriptEntry: async (role) => {
+      snapshots.push({
+        role,
+        liveReasoningSummary: engine.snapshot.liveReasoningSummary
+      });
+    }
+  });
+
+  const thinkingEntries = engine.snapshot.transcript.filter(
+    (entry) => entry.role === 'system' && entry.text.startsWith('@@thinking\t')
+  );
+  assert.equal(thinkingEntries.length, 1);
+  assert.equal(engine.snapshot.liveReasoningSummary, null);
+  assert.equal(
+    snapshots.find((entry) => entry.role === 'system')?.liveReasoningSummary,
+    null
+  );
+});
+
 test('HeadlessEngine can preview and apply a preserved experiment back into the main workspace', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));

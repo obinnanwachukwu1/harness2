@@ -236,6 +236,8 @@ export interface EngineSnapshot {
   estimatedContextTokens: number;
   contextWindowTokens: number;
   liveAssistantText: string | null;
+  liveReasoningSummary: string | null;
+  thinkingEnabled: boolean;
 }
 
 export interface SpawnExperimentInput {
@@ -307,6 +309,8 @@ export interface AgentTools {
   getModelSettings(): Promise<string>;
   setModel(model: string): Promise<string>;
   setReasoningEffort(effort: 'low' | 'medium' | 'high' | 'off'): Promise<string>;
+  getThinkingMode(): Promise<string>;
+  setThinkingMode(enabled: boolean): Promise<string>;
 }
 
 export interface AgentRunContext {

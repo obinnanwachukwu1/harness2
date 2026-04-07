@@ -5,10 +5,10 @@
 - a headless main engine owns transcript state and tool execution
 - a scoped experiment runs in an isolated `git worktree`
 - experiment state is persisted in SQLite
-- an Ink terminal UI renders the transcript, experiments, status bar, and composer
+- an OpenTUI terminal UI renders the transcript, experiments, status bar, and composer
 - normal user text can now route to a Codex model over OAuth and call the local tool surface
 
-This is intentionally v0.1. There is no model backend yet, no plugins, and no parallel experiments.
+This is still intentionally v0.1. The core vertical slice works, but the harness is still evolving and some UX and tooling edges remain rough.
 
 ## Requirements
 
@@ -22,6 +22,8 @@ npm install
 npm run dev
 ```
 
+`npm run dev` now launches the OpenTUI frontend by default.
+
 Useful commands:
 
 ```bash
@@ -31,8 +33,12 @@ npm run dev -- auth status
 npm run dev -- auth access
 npm run dev -- auth logout
 npm run dev -- -p "inspect the repo"
+npm run dev -- -thinking -p "inspect the repo"
 npm run dev -- resume <sessionId> -p "continue from here"
+npm run dev -- resume <sessionId> -thinking -p "continue from here"
 npm run dev -- resume <sessionId>
+npm run dev -- opentui
+npm run dev -- opentui <sessionId>
 ```
 
 Build and test:
@@ -61,6 +67,8 @@ Inside the terminal UI, use slash commands:
 /auth login
 /auth status
 /auth logout
+/thinking on
+/thinking off
 /quit
 ```
 
@@ -72,7 +80,9 @@ For a noninteractive one-shot mode with streamed output, use:
 
 ```bash
 npm run dev -- -p "what does this project do?"
+npm run dev -- -thinking -p "what does this project do?"
 npm run dev -- resume <sessionId> -p "continue the previous investigation"
+npm run dev -- resume <sessionId> -thinking -p "continue the previous investigation"
 ```
 
 This runs a single turn through the normal engine path and prints streamed assistant text and tool outputs directly to stdout.
@@ -126,7 +136,7 @@ The prototype now includes a direct OpenAI Codex OAuth flow for local testing.
 - `h2 auth login` starts a browser-based PKCE flow against `https://auth.openai.com`
 - tokens are stored in `.h2/notebook.sqlite`
 - `h2 auth access` prints a refreshed bearer token to stdout for manual API testing
-- `/auth login`, `/auth status`, and `/auth logout` are also available inside the Ink UI
+- `/auth login`, `/auth status`, and `/auth logout` are also available inside the OpenTUI UI
 - once logged in, plain text in the interactive app is sent to the Codex backend using the stored OAuth token
 
 Notes:
@@ -145,7 +155,9 @@ src/
   engine/
   experiments/
   storage/
-  ui/
+  ui-opentui/
+packages/
+  ui-opentui-spike/
 test/
 ```
 

@@ -71,6 +71,8 @@ export class HeadlessEngine {
   private processingTurn = false;
   private statusText = 'idle';
   private liveAssistantText: string | null = null;
+  private liveReasoningSummary: string | null = null;
+  private thinkingEnabled = false;
   private turnQueue: Promise<void> = Promise.resolve();
   private lastTestStatus: string | null = null;
 
@@ -120,7 +122,9 @@ export class HeadlessEngine {
       authLogout: () => this.runAuthLogout(),
       getModelSettings: () => this.runGetModelSettings(),
       setModel: (model) => this.runSetModel(model),
-      setReasoningEffort: (effort) => this.runSetReasoningEffort(effort)
+      setReasoningEffort: (effort) => this.runSetReasoningEffort(effort),
+      getThinkingMode: () => this.runGetThinkingMode(),
+      setThinkingMode: (enabled) => this.runSetThinkingMode(enabled)
     };
   }
 
@@ -132,7 +136,9 @@ export class HeadlessEngine {
       this.statusText,
       contextWindow.usedTokens,
       contextWindow.totalTokens,
-      this.liveAssistantText
+      this.liveAssistantText,
+      this.liveReasoningSummary,
+      this.thinkingEnabled
     );
   }
 
@@ -143,11 +149,21 @@ export class HeadlessEngine {
     };
   }
 
+  setThinkingEnabled(enabled: boolean): void {
+    this.thinkingEnabled = enabled;
+    this.emitChange();
+  }
+
+  getThinkingEnabled(): boolean {
+    return this.thinkingEnabled;
+  }
+
   submit(
     input: string,
     options: {
       onTranscriptEntry?: (role: TranscriptRole, text: string) => Promise<void> | void;
       onAssistantStream?: (text: string) => Promise<void> | void;
+      onReasoningSummaryStream?: (text: string) => Promise<void> | void;
     } = {}
   ): Promise<void> {
     const work = this.turnQueue.then(async () => {
@@ -159,6 +175,7 @@ export class HeadlessEngine {
       this.processingTurn = true;
       this.statusText = 'running turn';
       this.liveAssistantText = null;
+      this.liveReasoningSummary = null;
       this.appendTranscript('user', trimmed);
       this.appendModelHistory({
         type: 'message',
@@ -170,9 +187,7 @@ export class HeadlessEngine {
         await this.options.runner.runTurn(trimmed, {
           tools: this.tools,
           emit: async (role, text) => {
-            if (role === 'assistant') {
-              this.liveAssistantText = null;
-            }
+            this.resetLiveStreamsForTranscriptEntry(role, text);
             this.appendTranscript(role, text);
             this.appendLocalReplayOutput(role, text);
             await options.onTranscriptEntry?.(role, text);
@@ -183,9 +198,7 @@ export class HeadlessEngine {
               input,
               this.tools,
               async (role, text) => {
-                if (role === 'assistant') {
-                  this.liveAssistantText = null;
-                }
+                this.resetLiveStreamsForTranscriptEntry(role, text);
                 this.appendTranscript(role, text);
                 await options.onTranscriptEntry?.(role, text);
               },
@@ -193,7 +206,13 @@ export class HeadlessEngine {
                 this.liveAssistantText = text;
                 this.emitChange();
                 await options.onAssistantStream?.(text);
-              }
+              },
+              async (text) => {
+                this.liveReasoningSummary = text;
+                this.emitChange();
+                await options.onReasoningSummaryStream?.(text);
+              },
+              this.thinkingEnabled
             );
           }
         });
@@ -212,6 +231,7 @@ export class HeadlessEngine {
       } finally {
         this.processingTurn = false;
         this.liveAssistantText = null;
+        this.liveReasoningSummary = null;
         this.emitChange();
       }
     });
@@ -234,8 +254,20 @@ export class HeadlessEngine {
     this.options.notebook.appendModelHistoryItem(this.options.sessionId, item);
   }
 
+  private resetLiveStreamsForTranscriptEntry(role: TranscriptRole, text: string): void {
+    if (role !== 'system' || text.startsWith('@@thinking\t')) {
+      this.liveReasoningSummary = null;
+    }
+    if (role === 'assistant') {
+      this.liveAssistantText = null;
+    }
+  }
+
   private appendLocalReplayOutput(role: TranscriptRole, text: string): void {
     if (role === 'assistant' || role === 'system') {
+      if (role === 'system' && text.startsWith('@@thinking\t')) {
+        return;
+      }
       this.appendModelHistory({
         type: 'message',
         role,
@@ -575,6 +607,16 @@ export class HeadlessEngine {
     ].join('\n');
   }
 
+  private async runGetThinkingMode(): Promise<string> {
+    return `thinking ${this.thinkingEnabled ? 'on' : 'off'}`;
+  }
+
+  private async runSetThinkingMode(enabled: boolean): Promise<string> {
+    this.thinkingEnabled = enabled;
+    this.emitChange();
+    return `thinking ${enabled ? 'on' : 'off'}`;
+  }
+
   private async runExperimentSubagent(experiment: ExperimentRecord): Promise<void> {
     const experimentSessionId = this.experimentManager.getExperimentSessionId(experiment.id);
     const prompt = [
@@ -661,6 +703,12 @@ export class HeadlessEngine {
       setReasoningEffort: async () => {
         throw new Error('Reasoning controls are not available in experiment subagents.');
       },
+      getThinkingMode: async () => {
+        throw new Error('Thinking mode is not available in experiment subagents.');
+      },
+      setThinkingMode: async () => {
+        throw new Error('Thinking mode is not available in experiment subagents.');
+      },
       compact: async () => {
         throw new Error('compact is not available in experiment subagents.');
       }
@@ -672,6 +720,8 @@ export class HeadlessEngine {
       tools,
       async () => undefined,
       undefined,
+      undefined,
+      false,
       EXPERIMENT_TOOL_DEFINITIONS,
       EXPERIMENT_SUBAGENT_PROMPT
     );

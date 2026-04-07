@@ -39,12 +39,14 @@ interface ResponseItem {
   name?: string;
   arguments?: string;
   content?: Array<{ type?: string; text?: string | { value?: string } }>;
+  summary?: Array<{ type?: string; text?: string | { value?: string }; summary_text?: string }>;
 }
 
 interface ResponsePayload {
   id?: string;
   output?: ResponseItem[];
   output_text?: string;
+  reasoning_summary?: string;
 }
 
 interface ToolDefinition {
@@ -85,6 +87,8 @@ export class CodexModelClient {
     tools: AgentTools,
     emit: (role: TranscriptRole, text: string) => Promise<void>,
     onAssistantStream?: (text: string) => Promise<void>,
+    onReasoningSummaryStream?: (text: string) => Promise<void>,
+    thinkingEnabled = false,
     toolDefinitions: readonly ToolDefinition[] = MAIN_TOOL_DEFINITIONS,
     instructions = MAIN_AGENT_PROMPT
   ): Promise<void> {
@@ -141,6 +145,8 @@ export class CodexModelClient {
           ...requestItems.map(toResponseInputItem)
         ],
         onAssistantStream,
+        onReasoningSummaryStream,
+        thinkingEnabled,
         toolDefinitions,
         instructions
       });
@@ -157,6 +163,12 @@ export class CodexModelClient {
 
       const toolCalls = extractToolCalls(response);
       const assistantText = extractAssistantText(response);
+      const reasoningSummary = thinkingEnabled ? extractReasoningSummary(response) : '';
+
+      if (reasoningSummary) {
+        await onReasoningSummaryStream?.(reasoningSummary);
+        await emit('system', `@@thinking\t${reasoningSummary}`);
+      }
 
       if (assistantText) {
         this.persistHistoryItem(sessionId, {
@@ -270,6 +282,8 @@ export class CodexModelClient {
     settings: ModelSessionRecord;
     input: unknown;
     onAssistantStream?: (text: string) => Promise<void>;
+    onReasoningSummaryStream?: (text: string) => Promise<void>;
+    thinkingEnabled: boolean;
     toolDefinitions: readonly ToolDefinition[];
     instructions: string;
   }): Promise<ResponsePayload> {
@@ -294,10 +308,15 @@ export class CodexModelClient {
       stream: true
     };
 
+    const reasoning: Record<string, unknown> = {};
     if (input.settings.reasoningEffort) {
-      body.reasoning = {
-        effort: input.settings.reasoningEffort
-      };
+      reasoning.effort = input.settings.reasoningEffort;
+    }
+    if (input.thinkingEnabled) {
+      reasoning.summary = 'auto';
+    }
+    if (Object.keys(reasoning).length > 0) {
+      body.reasoning = reasoning;
     }
 
     await debugResponseShape(input.sessionId, 'request', {
@@ -329,7 +348,12 @@ export class CodexModelClient {
       return payload;
     }
 
-    return readStreamingResponse(response, input.sessionId, input.onAssistantStream);
+    return readStreamingResponse(
+      response,
+      input.sessionId,
+      input.onAssistantStream,
+      input.onReasoningSummaryStream
+    );
   }
 
   private persistSession(record: ModelSessionRecord): void {
@@ -609,6 +633,26 @@ function extractAssistantText(response: ResponsePayload): string {
   return pieces.join('\n').trim();
 }
 
+function extractReasoningSummary(response: ResponsePayload): string {
+  if (typeof response.reasoning_summary === 'string' && response.reasoning_summary.trim()) {
+    return response.reasoning_summary.trim();
+  }
+
+  const pieces: string[] = [];
+  for (const item of response.output ?? []) {
+    if (item.type !== 'reasoning') {
+      continue;
+    }
+
+    const summary = extractReasoningItemSummary(item);
+    if (summary) {
+      pieces.push(summary);
+    }
+  }
+
+  return pieces.join('\n').trim();
+}
+
 function toResponseInputItem(item: ModelHistoryItem):
   | { role: 'user' | 'assistant' | 'system'; content: string }
   | { type: 'function_call'; call_id: string; name: string; arguments: string }
@@ -791,7 +835,8 @@ async function safeReadText(response: Response): Promise<string> {
 async function readStreamingResponse(
   response: Response,
   sessionId: string,
-  onAssistantStream?: (text: string) => Promise<void>
+  onAssistantStream?: (text: string) => Promise<void>,
+  onReasoningSummaryStream?: (text: string) => Promise<void>
 ): Promise<ResponsePayload> {
   const reader = response.body?.getReader();
   if (!reader) {
@@ -802,6 +847,7 @@ async function readStreamingResponse(
   let buffer = '';
   let completed: ResponsePayload | null = null;
   let liveAssistantText = '';
+  let liveReasoningSummary = '';
   const streamedOutputItems = new Map<string, ResponseItem>();
 
   while (true) {
@@ -846,6 +892,12 @@ async function readStreamingResponse(
         await onAssistantStream?.(liveAssistantText);
       }
 
+      const reasoningUpdate = extractStreamingReasoningSummaryUpdate(event);
+      if (reasoningUpdate) {
+        liveReasoningSummary = mergeStreamingText(liveReasoningSummary, reasoningUpdate);
+        await onReasoningSummaryStream?.(liveReasoningSummary);
+      }
+
       collectStreamingOutputItem(event, streamedOutputItems);
 
       if (event?.type === 'response.completed' && event.response) {
@@ -866,6 +918,10 @@ async function readStreamingResponse(
 
   if (!extractAssistantText(completed) && liveAssistantText.trim()) {
     completed.output_text = liveAssistantText.trim();
+  }
+
+  if (!extractReasoningSummary(completed) && liveReasoningSummary.trim()) {
+    completed.reasoning_summary = liveReasoningSummary.trim();
   }
 
   await debugResponseShape(sessionId, 'completed_response', completed);
@@ -893,6 +949,42 @@ function extractStreamingTextUpdate(
 
   if (event.type === 'response.output_item.added' || event.type === 'response.output_item.done') {
     const text = extractOutputItemText(event.item);
+    return text ? { mode: 'replace', text } : null;
+  }
+
+  return null;
+}
+
+function extractStreamingReasoningSummaryUpdate(
+  event: Record<string, unknown> | null
+): { mode: 'append' | 'replace'; text: string } | null {
+  if (!event || typeof event.type !== 'string') {
+    return null;
+  }
+
+  if (event.type === 'response.reasoning_summary_text.delta') {
+    return typeof event.delta === 'string' && event.delta.length > 0
+      ? { mode: 'append', text: event.delta }
+      : null;
+  }
+
+  if (event.type === 'response.reasoning_summary_text.done') {
+    const text =
+      typeof event.text === 'string'
+        ? event.text
+        : typeof event.delta === 'string'
+          ? event.delta
+          : '';
+    return text ? { mode: 'replace', text } : null;
+  }
+
+  if (event.type === 'response.reasoning_summary_part.added' || event.type === 'response.reasoning_summary_part.done') {
+    const text = extractReasoningSummaryPartText(event.part) || extractReasoningSummaryPartText(event.summary_part);
+    return text ? { mode: 'replace', text } : null;
+  }
+
+  if (event.type === 'response.output_item.added' || event.type === 'response.output_item.done') {
+    const text = extractReasoningItemSummary(event.item);
     return text ? { mode: 'replace', text } : null;
   }
 
@@ -969,6 +1061,49 @@ function extractOutputItemText(item: unknown): string {
   return pieces.join('');
 }
 
+function extractReasoningItemSummary(item: unknown): string {
+  if (!item || typeof item !== 'object') {
+    return '';
+  }
+
+  const outputItem = item as { type?: unknown; summary?: unknown };
+  if (outputItem.type !== 'reasoning' || !Array.isArray(outputItem.summary)) {
+    return '';
+  }
+
+  const pieces = outputItem.summary
+    .map((part) => extractReasoningSummaryPartText(part))
+    .filter((part) => part.length > 0);
+
+  return pieces.join('\n').trim();
+}
+
+function extractReasoningSummaryPartText(part: unknown): string {
+  if (!part || typeof part !== 'object') {
+    return '';
+  }
+
+  const record = part as { type?: unknown; text?: unknown; summary_text?: unknown };
+  if (typeof record.text === 'string') {
+    return record.text;
+  }
+
+  if (typeof record.summary_text === 'string') {
+    return record.summary_text;
+  }
+
+  if (
+    record.text &&
+    typeof record.text === 'object' &&
+    'value' in record.text &&
+    typeof (record.text as { value?: unknown }).value === 'string'
+  ) {
+    return (record.text as { value: string }).value;
+  }
+
+  return '';
+}
+
 function collectStreamingOutputItem(
   event: Record<string, unknown> | null,
   streamedOutputItems: Map<string, ResponseItem>
@@ -1010,6 +1145,15 @@ function normalizeResponseItem(item: unknown): ResponseItem | null {
       .filter((part): part is { type?: string; text?: string | { value?: string } } => Boolean(part));
   }
 
+  if (Array.isArray(record.summary)) {
+    normalized.summary = record.summary
+      .map((part) => normalizeReasoningSummaryPart(part))
+      .filter(
+        (part): part is { type?: string; text?: string | { value?: string }; summary_text?: string } =>
+          Boolean(part)
+      );
+  }
+
   return normalized;
 }
 
@@ -1032,6 +1176,34 @@ function normalizeContentPart(
     if (typeof textRecord.value === 'string') {
       normalized.text = { value: textRecord.value };
     }
+  }
+
+  return normalized;
+}
+
+function normalizeReasoningSummaryPart(
+  part: unknown
+): { type?: string; text?: string | { value?: string }; summary_text?: string } | null {
+  if (!part || typeof part !== 'object') {
+    return null;
+  }
+
+  const record = part as Record<string, unknown>;
+  const normalized: { type?: string; text?: string | { value?: string }; summary_text?: string } = {
+    type: typeof record.type === 'string' ? record.type : undefined
+  };
+
+  if (typeof record.text === 'string') {
+    normalized.text = record.text;
+  } else if (record.text && typeof record.text === 'object') {
+    const textRecord = record.text as Record<string, unknown>;
+    if (typeof textRecord.value === 'string') {
+      normalized.text = { value: textRecord.value };
+    }
+  }
+
+  if (typeof record.summary_text === 'string') {
+    normalized.summary_text = record.summary_text;
   }
 
   return normalized;
