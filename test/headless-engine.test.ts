@@ -9,11 +9,26 @@ import { HeadlessEngine } from '../src/engine/headless-engine.js';
 import { DEFAULT_EXPERIMENT_BUDGET_TOKENS, nowIso } from '../src/lib/utils.js';
 import { cleanupDir, createGitRepo, waitFor } from '../test-support/helpers.js';
 
+test('HeadlessEngine migrates legacy .harness2 worktrees into .h2/worktrees', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const legacyWorktreeDir = path.join(repoDir, '.harness2', 'worktrees', 'exp-legacy');
+  await mkdir(legacyWorktreeDir, { recursive: true });
+  await writeFile(path.join(legacyWorktreeDir, 'notes.txt'), 'legacy\n', 'utf8');
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  await assert.doesNotReject(() => access(path.join(repoDir, '.h2', 'worktrees', 'exp-legacy', 'notes.txt')));
+  await assert.rejects(() => access(path.join(repoDir, '.harness2', 'worktrees', 'exp-legacy', 'notes.txt')));
+});
+
 test('HeadlessEngine routes slash commands through the prototype runner', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));
 
-  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  const engine = await HeadlessEngine.open({ cwd: repoDir, revealExportsInFinder: false });
   t.after(async () => engine.dispose());
 
   await engine.submit('/write notes.txt :: hello from harness2');
@@ -60,7 +75,7 @@ test('HeadlessEngine read defaults to 100 lines and supports explicit line range
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));
 
-  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  const engine = await HeadlessEngine.open({ cwd: repoDir, revealExportsInFinder: false });
   t.after(async () => engine.dispose());
 
   const largeFile = Array.from({ length: 150 }, (_, index) => `line ${index + 1}`).join('\n');
@@ -130,7 +145,7 @@ test('HeadlessEngine compact persists harness checkpoint with git state and acti
     context: '',
     baseCommitSha: 'abc123',
     branchName: 'h2-exp-running',
-    worktreePath: path.join(repoDir, '.harness2', 'worktrees', 'exp-running'),
+    worktreePath: path.join(repoDir, '.h2', 'worktrees', 'exp-running'),
     status: 'running',
     budget: 5000,
     tokensUsed: 10,
@@ -251,7 +266,7 @@ test('HeadlessEngine can preview and apply a preserved experiment back into the 
       cwd: repoDir
     })
   ).stdout.trim();
-  const worktreePath = path.join(repoDir, '.harness2', 'worktrees', 'exp-adopt');
+  const worktreePath = path.join(repoDir, '.h2', 'worktrees', 'exp-adopt');
   await execa('git', ['worktree', 'add', '-b', 'h2-exp-adopt', worktreePath, 'HEAD'], {
     cwd: repoDir
   });
@@ -429,7 +444,7 @@ test('HeadlessEngine does not apply main-session open questions to experiment wo
     kind: 'architecture'
   });
 
-  const worktreeDir = path.join(repoDir, '.harness2', 'worktrees', 'exp-test');
+  const worktreeDir = path.join(repoDir, '.h2', 'worktrees', 'exp-test');
   await assert.doesNotReject(() =>
     (engine as any).runWriteAtRoot(worktreeDir, 'notes.txt', 'experiment-safe\n')
   );
@@ -468,7 +483,7 @@ test('HeadlessEngine defaults experiment subagents to gpt-5.4-mini with high rea
   );
   (engine as any).options.notebook.createSession(
     experimentSessionId,
-    path.join(repoDir, '.harness2', 'worktrees', 'exp-model-default')
+    path.join(repoDir, '.h2', 'worktrees', 'exp-model-default')
   );
   await (engine as any).runExperimentSubagent({
     id: 'exp-model-default',
@@ -479,7 +494,7 @@ test('HeadlessEngine defaults experiment subagents to gpt-5.4-mini with high rea
     context: '',
     baseCommitSha: 'abc123',
     branchName: 'h2-exp-model-default',
-    worktreePath: path.join(repoDir, '.harness2', 'worktrees', 'exp-model-default'),
+    worktreePath: path.join(repoDir, '.h2', 'worktrees', 'exp-model-default'),
     status: 'running',
     budget: 1000,
     tokensUsed: 0,
@@ -608,7 +623,7 @@ test('HeadlessEngine rejects resolving an open question as static evidence after
     context: '',
     baseCommitSha: 'abc123',
     branchName: 'h2-exp-invalidated',
-    worktreePath: path.join(repoDir, '.harness2', 'worktrees', 'exp-invalidated'),
+    worktreePath: path.join(repoDir, '.h2', 'worktrees', 'exp-invalidated'),
     status: 'invalidated',
     budget: 5000,
     tokensUsed: 250,
@@ -673,7 +688,7 @@ test('HeadlessEngine surfaces linked invalidations in open-question mutation blo
     context: '',
     baseCommitSha: 'abc123',
     branchName: 'h2-exp-invalidated',
-    worktreePath: path.join(repoDir, '.harness2', 'worktrees', 'exp-invalidated'),
+    worktreePath: path.join(repoDir, '.h2', 'worktrees', 'exp-invalidated'),
     status: 'invalidated',
     budget: 5000,
     tokensUsed: 250,
@@ -704,7 +719,7 @@ test('HeadlessEngine exports the current session to markdown via /export', async
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));
 
-  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  const engine = await HeadlessEngine.open({ cwd: repoDir, revealExportsInFinder: false });
   t.after(async () => engine.dispose());
 
   await engine.submit('/read README.md');

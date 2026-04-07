@@ -17,7 +17,7 @@ function createManager(
   let manager: ExperimentManager;
   manager = new ExperimentManager({
     cwd: repoDir,
-    stateDir: path.join(repoDir, '.harness2'),
+    stateDir: path.join(repoDir, '.h2', 'worktrees'),
     notebook,
     onChange() {},
     onBudgetExceeded(notification) {
@@ -274,7 +274,7 @@ test('ExperimentManager emits a low-signal warning after heavy tool output witho
   const qualityNotifications: string[] = [];
   const manager = new ExperimentManager({
     cwd: repoDir,
-    stateDir: path.join(repoDir, '.harness2'),
+    stateDir: path.join(repoDir, '.h2', 'worktrees'),
     notebook,
     onChange() {},
     onBudgetExceeded() {},

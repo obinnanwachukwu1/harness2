@@ -1,4 +1,4 @@
-import { access, glob, mkdir, readFile, writeFile } from 'node:fs/promises';
+import { access, glob, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 
@@ -36,6 +36,7 @@ import { PrototypeRunner } from './prototype-runner.js';
 interface OpenEngineOptions {
   cwd: string;
   sessionId?: string;
+  revealExportsInFinder?: boolean;
 }
 
 const DEFAULT_EXPERIMENT_MODEL = process.env.H2_EXPERIMENT_MODEL ?? 'gpt-5.4-mini';
@@ -48,7 +49,8 @@ export class HeadlessEngine {
   static async open(options: OpenEngineOptions): Promise<HeadlessEngine> {
     const sessionId = options.sessionId ?? createSessionId();
     const stateDir = path.join(options.cwd, '.h2');
-    const experimentStateDir = path.join(options.cwd, '.harness2');
+    const experimentStateDir = path.join(stateDir, 'worktrees');
+    await migrateLegacyExperimentState(options.cwd, experimentStateDir);
     const dbPath = path.join(stateDir, 'notebook.sqlite');
     const notebook = new Notebook(dbPath);
 
@@ -67,6 +69,7 @@ export class HeadlessEngine {
       sessionId,
       stateDir,
       experimentStateDir,
+      revealExportsInFinder: options.revealExportsInFinder ?? true,
       notebook,
       runner: new PrototypeRunner()
     });
@@ -93,6 +96,7 @@ export class HeadlessEngine {
       sessionId: string;
       stateDir: string;
       experimentStateDir: string;
+      revealExportsInFinder: boolean;
       notebook: Notebook;
       runner: AgentRunner;
     }
@@ -396,7 +400,7 @@ export class HeadlessEngine {
     }
 
     return matches
-      .filter((entry) => !entry.startsWith('.git/') && !entry.startsWith('.h2/') && !entry.startsWith('.harness2/'))
+      .filter((entry) => !entry.startsWith('.git/') && !entry.startsWith('.h2/'))
       .sort();
   }
 
@@ -441,8 +445,6 @@ export class HeadlessEngine {
           '!.git',
           '--glob',
           '!.h2',
-          '--glob',
-          '!.harness2',
           patternText,
           ...targets
         ],
@@ -602,15 +604,17 @@ export class HeadlessEngine {
       'utf8'
     );
 
-    const reveal = await execa('open', ['-R', exportPath], {
-      cwd: session.cwd,
-      reject: false
-    });
-
     return {
       sessionId,
       exportPath,
-      revealedInFinder: reveal.exitCode === 0
+      revealedInFinder: this.options.revealExportsInFinder
+        ? (
+            await execa('open', ['-R', exportPath], {
+              cwd: session.cwd,
+              reject: false
+            })
+          ).exitCode === 0
+        : false
     };
   }
 
@@ -696,8 +700,7 @@ export class HeadlessEngine {
     const blockingStatus = lines(rootStatus.stdout ?? '').filter(
       (line) =>
         line.trim().length > 0 &&
-        !line.includes('.h2/') &&
-        !line.includes('.harness2/')
+        !line.includes('.h2/')
     );
     if (blockingStatus.length > 0) {
       throw new Error('Main workspace is dirty. Adoption requires a clean working tree.');
@@ -1264,6 +1267,29 @@ export class HeadlessEngine {
 
     const patch = [trackedDiff.trimEnd(), ...untrackedDiffs].filter(Boolean).join('\n\n');
     return patch ? `${patch}\n` : '';
+  }
+}
+
+async function migrateLegacyExperimentState(cwd: string, experimentStateDir: string): Promise<void> {
+  const legacyStateDir = path.join(cwd, '.harness2');
+  const legacyWorktreeDir = path.join(legacyStateDir, 'worktrees');
+  if (await directPathExists(experimentStateDir)) {
+    return;
+  }
+  if (!(await directPathExists(legacyWorktreeDir))) {
+    return;
+  }
+
+  await mkdir(path.dirname(experimentStateDir), { recursive: true });
+  await rename(legacyWorktreeDir, experimentStateDir);
+}
+
+async function directPathExists(targetPath: string): Promise<boolean> {
+  try {
+    await access(targetPath);
+    return true;
+  } catch {
+    return false;
   }
 }
 

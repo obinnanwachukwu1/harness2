@@ -164,7 +164,7 @@ test/
 ## Notes
 
 - State lives under `.h2/notebook.sqlite`.
-- Experiment worktrees live under `.harness2/worktrees/<experimentId>`.
+- Experiment worktrees live under `.h2/worktrees/<experimentId>`.
 - Adoption previews and patches live under `.h2/adoptions/<experimentId>.patch`.
 - Resolved experiments remove their worktree unless `--preserve` is set.
 - Token usage is currently a simple estimated counter based on emitted observation text.
