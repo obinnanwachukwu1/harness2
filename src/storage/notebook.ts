@@ -1128,7 +1128,7 @@ export class Notebook {
     contextWindowTokens = 0,
     liveAssistantText: string | null = null,
     liveReasoningSummary: string | null = null,
-    thinkingEnabled = false
+    thinkingEnabled = true
   ): EngineSnapshot {
     const session = this.getSession(sessionId);
     if (!session) {

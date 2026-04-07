@@ -65,7 +65,7 @@ async function runOpenTui(sessionId?: string): Promise<void> {
 async function runPrintMode(
   prompt: string,
   sessionId?: string,
-  thinking = false
+  thinking = true
 ): Promise<void> {
   const { HeadlessEngine } = await import('./engine/headless-engine.js');
   const { Notebook } = await import('./storage/notebook.js');
@@ -221,26 +221,26 @@ function printDoctor(report: {
 function parsePrintRequest(
   args: string[]
 ): { prompt: string; sessionId?: string; thinking: boolean } | null {
-  if (args[0] === '-p' || args[0] === '--print' || args[0] === '-thinking') {
-    const thinking = args.includes('-thinking');
+  if (args[0] === '-p' || args[0] === '--print' || args[0] === '-thinking' || args[0] === '-no-thinking') {
+    const thinking = !args.includes('-no-thinking');
     const printIndex = args.findIndex((arg) => arg === '-p' || arg === '--print');
     if (printIndex === -1) {
-      throw new Error('Usage: h2 [-thinking] -p "<prompt>"');
+      throw new Error('Usage: h2 [-thinking|-no-thinking] -p "<prompt>"');
     }
 
     const prompt = args.slice(printIndex + 1).join(' ').trim();
     if (!prompt) {
-      throw new Error('Usage: h2 [-thinking] -p "<prompt>"');
+      throw new Error('Usage: h2 [-thinking|-no-thinking] -p "<prompt>"');
     }
     return { prompt, thinking };
   }
 
   if (args[0] === 'resume' && args[1] && args.slice(2).some((arg) => arg === '-p' || arg === '--print')) {
-    const thinking = args.slice(2).includes('-thinking');
+    const thinking = !args.slice(2).includes('-no-thinking');
     const printIndex = args.findIndex((arg, index) => index >= 2 && (arg === '-p' || arg === '--print'));
     const prompt = args.slice(printIndex + 1).join(' ').trim();
     if (!prompt) {
-      throw new Error('Usage: h2 resume <sessionId> [-thinking] -p "<prompt>"');
+      throw new Error('Usage: h2 resume <sessionId> [-thinking|-no-thinking] -p "<prompt>"');
     }
     return {
       sessionId: args[1],

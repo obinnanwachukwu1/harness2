@@ -72,7 +72,7 @@ export class HeadlessEngine {
   private statusText = 'idle';
   private liveAssistantText: string | null = null;
   private liveReasoningSummary: string | null = null;
-  private thinkingEnabled = false;
+  private thinkingEnabled = true;
   private turnQueue: Promise<void> = Promise.resolve();
   private lastTestStatus: string | null = null;
 
