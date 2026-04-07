@@ -227,6 +227,63 @@ test('Notebook searchExperimentSummaries finds durable experiment summaries with
   assert.deepEqual(notebook.searchExperimentSummaries(session.id, 'does-not-exist'), []);
 });
 
+test('Notebook clearExperimentJournal removes persisted experiment history and blocks active experiments by default', async (t) => {
+  const tempDir = await createTempDir('h2-notebook-clear-journal-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+
+  const session = notebook.createSession('session-clear', tempDir);
+  const timestamp = nowIso();
+
+  notebook.upsertExperiment({
+    id: 'exp-running',
+    sessionId: session.id,
+    hypothesis: 'still running',
+    command: 'subagent',
+    context: '',
+    baseCommitSha: 'abc123',
+    branchName: 'h2-exp-running',
+    worktreePath: path.join(tempDir, 'running'),
+    status: 'running',
+    budget: 100,
+    tokensUsed: 10,
+    contextTokensUsed: 2,
+    toolOutputTokensUsed: 4,
+    observationTokensUsed: 4,
+    preserve: false,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    resolvedAt: null,
+    finalVerdict: null,
+    finalSummary: null,
+    discovered: [],
+    artifacts: [],
+    constraints: [],
+    confidenceNote: null,
+    lowSignalWarningEmitted: false,
+    promote: false
+  });
+  notebook.appendObservation('exp-running', 'still active', ['question']);
+
+  const blocked = notebook.clearExperimentJournal(session.id);
+  assert.deepEqual(blocked, {
+    clearedExperiments: 0,
+    clearedObservations: 0,
+    blockedActive: 1
+  });
+  assert.equal(notebook.listExperiments(session.id).length, 1);
+
+  const forced = notebook.clearExperimentJournal(session.id, { force: true });
+  assert.deepEqual(forced, {
+    clearedExperiments: 1,
+    clearedObservations: 1,
+    blockedActive: 0
+  });
+  assert.equal(notebook.listExperiments(session.id).length, 0);
+});
+
 test('Notebook persists checkpoints and rebuilds compacted request history from latest checkpoint', async (t) => {
   const tempDir = await createTempDir('h2-notebook-compact-');
   t.after(async () => cleanupDir(tempDir));

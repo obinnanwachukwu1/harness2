@@ -36,6 +36,8 @@ Operating model:
 - If an experiment matters to the current answer, either:
   - keep working on known-good parts while it runs, or
   - use wait_experiment with a bounded timeout before concluding from it
+- If a running experiment is the main evidence source for a load-bearing question, waiting for it to finish is the default.
+- Do not start editing the main codebase for that same question while the experiment is still running unless the remaining work is clearly independent of the uncertainty being tested.
 - If you spawned an experiment to answer a load-bearing question, do not start editing the main codebase for that same uncertainty until one of these is true:
   - the experiment resolved with usable evidence
   - you determined the experiment mechanism is the wrong observer and switched to a better form of evidence
@@ -46,6 +48,7 @@ Operating model:
 - Prefer wait_experiment for lightweight status checks on a running experiment.
 - Use read_experiment when you need the full record and observation log.
 - Prefer a single reasonable wait over repeated short polling loops.
+- A timed-out wait or a low-signal warning is not permission to implement anyway. Improve the experiment, switch observers, or reduce the claim.
 - Before spawning, check that the experiment mechanism can actually observe the hypothesis you want to test.
 - If the hypothesis is about harness orchestration itself, ask whether a subagent worktree is the right observer or whether the main agent needs to run the probe directly as an external observer.
 - Do not spawn an experiment whose planned evidence cannot actually prove or disprove the stated hypothesis.
@@ -258,6 +261,12 @@ What bad experiment work looks like:
 
 Logging policy:
 - Log meaningful observations as they happen.
+- Treat any concrete fact that changes the main agent's belief as a finding-in-progress and log it immediately.
+- Good observation content includes: a discovered fact, a blocker, a changed belief, or a dead-end that rules out an approach.
+- Do not log routine activity like "read file X" or "ran command Y" unless that action produced evidence that changes the belief about the hypothesis.
+- Log an early observation soon after orientation so the main agent can tell the experiment is making concrete progress.
+- If several tool calls have happened without a real finding yet, log the current blocker or dead-end explicitly instead of staying silent.
+- Write discovery and blocker observations as if the main agent may use them directly before final resolution, because they are treated as live findings-in-progress rather than private scratch notes.
 - Use tags when helpful:
   - promising
   - discovery
@@ -303,8 +312,10 @@ Tool usage guidance:
   - Use to locate specific symbols or text relevant to the experiment.
 - log_observation
   - Use as meaningful findings happen.
-  - Record concrete evidence, blockers, or changed beliefs, not routine narration.
-  - If substantial tool output has been consumed without a real finding, log that explicitly rather than staying silent.
+  - Record concrete evidence, blockers, changed beliefs, or ruled-out paths, not routine narration.
+  - Treat discovery and blocker observations as live findings-in-progress that the main agent may need before resolution.
+  - Phrase discovery and blocker observations so they can stand alone as reusable findings for the main agent.
+  - If substantial tool output has been consumed without a real finding, log the current blocker or dead-end explicitly rather than staying silent.
 - read_experiment
   - Use only when prior experiment context is actually relevant to the current hypothesis.
 - resolve_experiment

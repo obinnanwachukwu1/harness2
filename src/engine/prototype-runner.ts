@@ -20,6 +20,7 @@ const HELP_TEXT = [
   '/adopt <experimentId> [--apply]',
   '/experiment-budget <experimentId> <additionalTokens>',
   '/experiments [query]',
+  '/clear-journal [--force]',
   '/auth login',
   '/auth status',
   '/auth logout',
@@ -268,6 +269,28 @@ export class PrototypeRunner {
           return `${experiment.experimentId}  ${experiment.status}  ${summary}`;
         });
         await context.emit('assistant', lines.join('\n'));
+        return;
+      }
+
+      case 'clear-journal': {
+        if (!context.tools.clearExperimentJournal) {
+          await context.emit('assistant', 'Experiment journal clearing is not available.');
+          return;
+        }
+
+        const result = await context.tools.clearExperimentJournal(rawArgs.includes('--force'));
+        if (result.blockedActive > 0) {
+          await context.emit(
+            'assistant',
+            `Refusing to clear the journal because ${result.blockedActive} active experiment(s) still exist. Re-run /clear-journal --force if you really want to remove them.`
+          );
+          return;
+        }
+
+        await context.emit(
+          'assistant',
+          `Cleared ${result.clearedExperiments} experiment(s) and ${result.clearedObservations} observation(s) from the current session journal.`
+        );
         return;
       }
 

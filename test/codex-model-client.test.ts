@@ -3,7 +3,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { OpenAICodexAuth } from '../src/auth/openai-codex.js';
-import { CodexModelClient } from '../src/model/codex-client.js';
+import { CodexModelClient, EXPERIMENT_TOOL_DEFINITIONS } from '../src/model/codex-client.js';
 import { Notebook } from '../src/storage/notebook.js';
 import type { AgentTools, TranscriptRole } from '../src/types.js';
 import { cleanupDir, createTempDir, createUnsignedJwt } from '../test-support/helpers.js';
@@ -510,6 +510,155 @@ test('CodexModelClient injects a post-spawn wait hint after repeated probing', a
   const thirdInput = requests[2]?.input as Array<Record<string, unknown>>;
   assert.equal(thirdInput[0]?.role, 'system');
   assert.match(String(thirdInput[0]?.content ?? ''), /You already have a live experiment/);
+});
+
+test('CodexModelClient injects an observation hint for experiment subagents after several tool calls without logging', async (t) => {
+  const tempDir = await createTempDir('h2-model-observation-hint-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-test', tempDir);
+
+  const now = 1_700_000_000_000;
+  notebook.upsertOpenAICodexAuth({
+    provider: 'openai-codex',
+    type: 'oauth',
+    accessToken: createUnsignedJwt({
+      exp: Math.floor((now + 3600_000) / 1000)
+    }),
+    refreshToken: 'refresh-token',
+    idToken: createUnsignedJwt({
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: 'acct_123'
+      }
+    }),
+    accountId: 'acct_123',
+    expiresAt: now + 3600_000,
+    createdAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString()
+  });
+
+  const requests: Array<Record<string, unknown>> = [];
+  let responseCount = 0;
+  const auth = new OpenAICodexAuth(notebook, { now: () => now });
+  const client = new CodexModelClient(notebook, auth, {
+    fetchImpl: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      requests.push(body);
+      responseCount += 1;
+
+      if (responseCount === 1) {
+        return new Response(
+          `data: ${JSON.stringify({
+            type: 'response.completed',
+            response: {
+              id: 'resp_1',
+              output: [
+                {
+                  type: 'function_call',
+                  call_id: 'call_read_1',
+                  name: 'read',
+                  arguments: JSON.stringify({ path: 'a.ts' })
+                },
+                {
+                  type: 'function_call',
+                  call_id: 'call_grep_1',
+                  name: 'grep',
+                  arguments: JSON.stringify({ pattern: 'foo' })
+                }
+              ]
+            }
+          })}\n\n`,
+          { headers: { 'content-type': 'text/event-stream' } }
+        );
+      }
+
+      if (responseCount === 2) {
+        return new Response(
+          `data: ${JSON.stringify({
+            type: 'response.completed',
+            response: {
+              id: 'resp_2',
+              output: [
+                {
+                  type: 'function_call',
+                  call_id: 'call_bash_1',
+                  name: 'bash',
+                  arguments: JSON.stringify({ command: 'pwd' })
+                },
+                {
+                  type: 'function_call',
+                  call_id: 'call_glob_1',
+                  name: 'glob',
+                  arguments: JSON.stringify({ pattern: '*.ts' })
+                }
+              ]
+            }
+          })}\n\n`,
+          { headers: { 'content-type': 'text/event-stream' } }
+        );
+      }
+
+      return new Response(
+        `data: ${JSON.stringify({
+          type: 'response.completed',
+          response: {
+            id: 'resp_3',
+            output: [
+              {
+                type: 'message',
+                content: [{ type: 'output_text', text: 'Done.' }]
+              }
+            ]
+          }
+        })}\n\n`,
+        { headers: { 'content-type': 'text/event-stream' } }
+      );
+    }
+  });
+
+  const tools: AgentTools = {
+    bash: async () => 'pwd',
+    read: async () => 'read result',
+    write: async () => '',
+    edit: async () => '',
+    glob: async () => ['a.ts'],
+    grep: async () => 'grep result',
+    readExperiment: async () => {
+      throw new Error('not used');
+    },
+    logObservation: async () => {
+      throw new Error('not used');
+    },
+    resolveExperiment: async () => {
+      throw new Error('not used');
+    },
+    authLogin: async () => '',
+    authStatus: async () => '',
+    authLogout: async () => '',
+    getModelSettings: async () => '',
+    setModel: async () => '',
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
+  };
+
+  await client.runTurn(
+    'session-test',
+    'Run a scoped experiment in the isolated worktree.',
+    tools,
+    async () => {},
+    undefined,
+    undefined,
+    false,
+    EXPERIMENT_TOOL_DEFINITIONS
+  );
+
+  assert.equal(requests.length, 3);
+  const thirdInput = requests[2]?.input as Array<Record<string, unknown>>;
+  assert.equal(thirdInput[0]?.role, 'system');
+  assert.match(String(thirdInput[0]?.content ?? ''), /without logging a fresh observation/);
 });
 
 test('CodexModelClient surfaces streaming content-part events before completion', async (t) => {

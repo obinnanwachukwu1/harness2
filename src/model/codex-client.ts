@@ -130,7 +130,10 @@ export class CodexModelClient {
         shouldInjectExperimentHint(inputText, requestItems, toolDefinitions)
           ? buildExperimentHint()
           : null,
-        shouldInjectPostSpawnWaitHint(requestItems) ? buildPostSpawnWaitHint() : null
+        shouldInjectPostSpawnWaitHint(requestItems) ? buildPostSpawnWaitHint() : null,
+        shouldInjectObservationHint(requestItems, toolDefinitions)
+          ? buildObservationHint()
+          : null
       ].filter((value): value is string => Boolean(value));
       const response = await this.createResponse({
         accessToken,
@@ -1328,6 +1331,33 @@ function shouldInjectPostSpawnWaitHint(requestItems: ModelHistoryItem[]): boolea
   return repeatedInlineProbing >= 3;
 }
 
+function shouldInjectObservationHint(
+  requestItems: ModelHistoryItem[],
+  toolDefinitions: readonly ToolDefinition[]
+): boolean {
+  if (!toolDefinitions.some((tool) => tool.name === 'log_observation')) {
+    return false;
+  }
+
+  const currentTurnItems = getCurrentTurnItems(requestItems);
+  const functionCalls = currentTurnItems.filter(
+    (item): item is Extract<ModelHistoryItem, { type: 'function_call' }> => item.type === 'function_call'
+  );
+  const lastObservationIndex = functionCalls.map((item) => item.name).lastIndexOf('log_observation');
+  const sinceLastObservation =
+    lastObservationIndex === -1 ? functionCalls : functionCalls.slice(lastObservationIndex + 1);
+
+  if (sinceLastObservation.some((item) => item.name === 'resolve_experiment')) {
+    return false;
+  }
+
+  const substantiveToolCalls = sinceLastObservation.filter(
+    (item) => !['log_observation', 'read_experiment'].includes(item.name)
+  ).length;
+
+  return substantiveToolCalls >= 4;
+}
+
 function getCurrentTurnItems(requestItems: ModelHistoryItem[]): ModelHistoryItem[] {
   for (let index = requestItems.length - 1; index >= 0; index -= 1) {
     const item = requestItems[index];
@@ -1353,8 +1383,18 @@ function buildPostSpawnWaitHint(): string {
   return [
     'Harness hint:',
     'You already have a live experiment on this hypothesis.',
+    'If this experiment is the main evidence source for the current question, wait for it to resolve before editing on that same question.',
     'Prefer wait_experiment or one small external-observer corroboration check over continued background reading or probing about the same question.',
     'Use read_experiment only if you need the full durable record rather than a lightweight live status check.'
+  ].join(' ');
+}
+
+function buildObservationHint(): string {
+  return [
+    'Harness hint:',
+    'You have made several tool calls in this experiment without logging a fresh observation.',
+    'Record a concrete finding, blocker, changed belief, or current dead-end now.',
+    'Do not log routine activity; log the evidence or obstacle that actually matters.'
   ].join(' ');
 }
 

@@ -8,6 +8,7 @@ import type {
   ExperimentObservation,
   ExperimentRecord,
   ExperimentObservationTag,
+  ExperimentStatus,
   ExperimentSearchResult,
   ModelHistoryItem,
   ModelSessionRecord,
@@ -564,6 +565,59 @@ export class Notebook {
       .all(sessionId) as unknown as ExperimentRow[];
 
     return rows.map(mapExperiment);
+  }
+
+  clearExperimentJournal(
+    sessionId: string,
+    options: { force?: boolean } = {}
+  ): { clearedExperiments: number; clearedObservations: number; blockedActive: number } {
+    const activeStatuses: ExperimentStatus[] = ['running', 'budget_exhausted'];
+    const activeRows = this.db
+      .prepare(
+        `
+          SELECT id
+          FROM experiments
+          WHERE session_id = ?
+            AND status IN (?, ?)
+        `
+      )
+      .all(sessionId, activeStatuses[0], activeStatuses[1]) as Array<{ id: string }>;
+
+    if (activeRows.length > 0 && !options.force) {
+      return {
+        clearedExperiments: 0,
+        clearedObservations: 0,
+        blockedActive: activeRows.length
+      };
+    }
+
+    const observationResult = this.db
+      .prepare(
+        `
+          DELETE FROM experiment_observations
+          WHERE experiment_id IN (
+            SELECT id FROM experiments WHERE session_id = ?
+          )
+        `
+      )
+      .run(sessionId);
+
+    const experimentResult = this.db
+      .prepare(
+        `
+          DELETE FROM experiments
+          WHERE session_id = ?
+        `
+      )
+      .run(sessionId);
+
+    this.touchSession(sessionId);
+
+    return {
+      clearedExperiments: Number(experimentResult.changes ?? 0),
+      clearedObservations: Number(observationResult.changes ?? 0),
+      blockedActive: 0
+    };
   }
 
   appendObservation(

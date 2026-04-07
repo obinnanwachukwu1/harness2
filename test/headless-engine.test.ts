@@ -33,6 +33,24 @@ test('HeadlessEngine routes slash commands through the prototype runner', async 
   assert.equal(engine.snapshot.experiments.length, 1);
   assert.equal(engine.snapshot.experiments[0]?.budget, DEFAULT_EXPERIMENT_BUDGET_TOKENS);
   assert.equal(engine.snapshot.experiments[0]?.finalVerdict, 'inconclusive');
+
+  const notebook = (engine as any).options.notebook;
+  const modelHistory = notebook.listModelHistory(engine.snapshot.session.id);
+  assert.ok(
+    modelHistory.some(
+      (item: any) =>
+        item.type === 'function_call' &&
+        item.name === 'experiment_resolved'
+    )
+  );
+  assert.ok(
+    modelHistory.some(
+      (item: any) =>
+        item.type === 'function_call_output' &&
+        typeof item.output === 'string' &&
+        item.output.includes('"verdict": "inconclusive"')
+    )
+  );
 });
 
 test('HeadlessEngine read defaults to 100 lines and supports explicit line ranges', async (t) => {

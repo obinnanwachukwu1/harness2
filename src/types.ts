@@ -278,6 +278,9 @@ export interface AgentTools {
     lowSignalWarningEmitted: boolean;
   }>;
   searchExperiments?(query?: string): Promise<ExperimentSearchResult[]>;
+  clearExperimentJournal?(
+    force?: boolean
+  ): Promise<{ clearedExperiments: number; clearedObservations: number; blockedActive: number }>;
   adoptExperiment?(
     experimentId: string,
     options?: { apply?: boolean }

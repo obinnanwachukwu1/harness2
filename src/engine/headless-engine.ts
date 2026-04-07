@@ -112,6 +112,7 @@ export class HeadlessEngine {
       readExperiment: (experimentId) => this.readExperiment(experimentId),
       waitExperiment: (experimentId, timeoutMs) => this.waitExperiment(experimentId, timeoutMs),
       searchExperiments: (query) => this.searchExperiments(query),
+      clearExperimentJournal: (force) => this.clearExperimentJournal(force),
       adoptExperiment: (experimentId, adoptionOptions) =>
         this.adoptExperiment(experimentId, adoptionOptions),
       resolveExperiment: async (input) => this.experimentManager.resolve(input),
@@ -451,6 +452,12 @@ export class HeadlessEngine {
     return this.experimentManager.search(this.options.sessionId, query);
   }
 
+  private async clearExperimentJournal(
+    force = false
+  ): Promise<{ clearedExperiments: number; clearedObservations: number; blockedActive: number }> {
+    return this.options.notebook.clearExperimentJournal(this.options.sessionId, { force });
+  }
+
   private async adoptExperiment(
     experimentId: string,
     options: { apply?: boolean } = {}
@@ -754,10 +761,26 @@ export class HeadlessEngine {
 
     const message = lines.join('\n');
     this.appendTranscript('assistant', message);
-    this.appendModelHistory({
-      type: 'message',
-      role: 'assistant',
-      content: message
+    this.appendExperimentLifecycleEvent('experiment_resolved', resolution.id, {
+      id: resolution.id,
+      hypothesis: resolution.hypothesis,
+      verdict: resolution.verdict,
+      summary: resolution.summary,
+      budget: resolution.budget,
+      tokensUsed: resolution.tokensUsed,
+      contextTokensUsed: resolution.contextTokensUsed,
+      toolOutputTokensUsed: resolution.toolOutputTokensUsed,
+      observationTokensUsed: resolution.observationTokensUsed,
+      discovered: resolution.discovered,
+      artifacts: resolution.artifacts,
+      constraints: resolution.constraints,
+      confidenceNote: resolution.confidenceNote,
+      promote: resolution.promote,
+      preserved: resolution.preserved,
+      worktreePath: resolution.worktreePath,
+      branchName: resolution.branchName,
+      baseCommitSha: resolution.baseCommitSha,
+      resolvedAt: resolution.resolvedAt
     });
   }
 
@@ -772,10 +795,13 @@ export class HeadlessEngine {
     ].join('\n');
 
     this.appendTranscript('assistant', message);
-    this.appendModelHistory({
-      type: 'message',
-      role: 'assistant',
-      content: message
+    this.appendExperimentLifecycleEvent('experiment_low_signal_warning', notification.id, {
+      id: notification.id,
+      hypothesis: notification.hypothesis,
+      message: notification.message,
+      budget: notification.budget,
+      tokensUsed: notification.tokensUsed,
+      toolOutputTokensUsed: notification.toolOutputTokensUsed
     });
   }
 
@@ -791,10 +817,34 @@ export class HeadlessEngine {
     ].join('\n');
 
     this.appendTranscript('assistant', message);
+    this.appendExperimentLifecycleEvent('experiment_budget_exhausted', notification.id, {
+      id: notification.id,
+      hypothesis: notification.hypothesis,
+      message: notification.message,
+      budget: notification.budget,
+      tokensUsed: notification.tokensUsed,
+      contextTokensUsed: notification.contextTokensUsed,
+      toolOutputTokensUsed: notification.toolOutputTokensUsed,
+      observationTokensUsed: notification.observationTokensUsed
+    });
+  }
+
+  private appendExperimentLifecycleEvent(
+    name: 'experiment_resolved' | 'experiment_low_signal_warning' | 'experiment_budget_exhausted',
+    experimentId: string,
+    payload: Record<string, unknown>
+  ): void {
+    const callId = `${name}_${experimentId}_${Date.now()}`;
     this.appendModelHistory({
-      type: 'message',
-      role: 'assistant',
-      content: message
+      type: 'function_call',
+      call_id: callId,
+      name,
+      arguments: JSON.stringify({ experimentId })
+    });
+    this.appendModelHistory({
+      type: 'function_call_output',
+      call_id: callId,
+      output: JSON.stringify(payload, null, 2)
     });
   }
 
