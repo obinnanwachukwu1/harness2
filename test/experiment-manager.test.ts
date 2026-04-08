@@ -3,6 +3,8 @@ import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 
+import { execa } from 'execa';
+
 import { ExperimentManager } from '../src/experiments/experiment-manager.js';
 import type { ExperimentRecord, ExperimentResolution } from '../src/types.js';
 import { Notebook } from '../src/storage/notebook.js';
@@ -114,6 +116,61 @@ test('ExperimentManager spawn mirrors repo-local env files into the experiment w
   assert.ok(
     details.observations.some((entry) =>
       entry.message.includes('Mirrored repo-local env files into the worktree')
+    )
+  );
+});
+
+test('ExperimentManager spawn mirrors the dirty workspace snapshot into the experiment worktree', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  await writeFile(path.join(repoDir, 'README.md'), '# temp repo\nupdated locally\n', 'utf8');
+  await writeFile(path.join(repoDir, 'tracked.txt'), 'tracked baseline\n', 'utf8');
+  await execa('git', ['add', 'tracked.txt'], { cwd: repoDir });
+  await execa('git', ['commit', '-m', 'add tracked fixture'], { cwd: repoDir });
+
+  await writeFile(path.join(repoDir, 'README.md'), '# temp repo\nupdated after commit\n', 'utf8');
+  await execa('git', ['rm', '-f', 'tracked.txt'], { cwd: repoDir });
+  await mkdir(path.join(repoDir, 'src', 'app', 'api', 'chats'), { recursive: true });
+  await writeFile(
+    path.join(repoDir, 'src', 'app', 'api', 'chats', 'route.ts'),
+    'export async function GET() { return Response.json({ ok: true }); }\n',
+    'utf8'
+  );
+  await mkdir(path.join(repoDir, '.h2'), { recursive: true });
+  await writeFile(path.join(repoDir, '.h2', 'notebook.sqlite'), 'do not mirror\n', 'utf8');
+
+  const notebook = new Notebook(path.join(repoDir, '.h2', 'test.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-test', repoDir);
+
+  const manager = createManager(repoDir, notebook, async () => {});
+  t.after(async () => manager.dispose());
+
+  const experiment = await manager.spawn({
+    sessionId: 'session-test',
+    hypothesis: 'dirty workspace snapshot is available in the experiment',
+    localEvidenceSummary: 'The main workspace has tracked edits, a tracked deletion, and an untracked route file.',
+    residualUncertainty: 'Whether the experiment worktree sees the same dirty snapshot as the main workspace.',
+    budgetTokens: 1200,
+    preserve: false
+  });
+
+  assert.equal(
+    await readFile(path.join(experiment.worktreePath, 'README.md'), 'utf8'),
+    '# temp repo\nupdated after commit\n'
+  );
+  assert.equal(await pathExists(path.join(experiment.worktreePath, 'tracked.txt')), false);
+  assert.equal(
+    await readFile(path.join(experiment.worktreePath, 'src', 'app', 'api', 'chats', 'route.ts'), 'utf8'),
+    'export async function GET() { return Response.json({ ok: true }); }\n'
+  );
+  assert.equal(await pathExists(path.join(experiment.worktreePath, '.h2', 'notebook.sqlite')), false);
+
+  const details = manager.read(experiment.id);
+  assert.ok(
+    details.observations.some((entry) =>
+      entry.message.includes('Mirrored dirty workspace snapshot into the worktree: 2 tracked, 1 untracked file(s).')
     )
   );
 });

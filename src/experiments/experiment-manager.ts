@@ -53,6 +53,7 @@ const IGNORED_ENV_SCAN_DIRS = new Set([
   '.turbo',
   '.cache'
 ]);
+const EXCLUDED_WORKSPACE_MIRROR_DIRS = new Set(IGNORED_ENV_SCAN_DIRS);
 
 export class ExperimentBudgetExceededError extends Error {
   constructor(experimentId: string) {
@@ -82,10 +83,27 @@ export class ExperimentManager {
     const createdAt = nowIso();
 
     await mkdir(worktreeRoot, { recursive: true });
-    await execa('git', ['worktree', 'add', '-b', branchName, worktreePath, baseCommitSha], {
-      cwd: this.options.cwd
-    });
-    const mirroredEnvFiles = await mirrorExperimentEnvFiles(this.options.cwd, worktreePath);
+
+    let mirroredEnvFiles: string[] = [];
+    let mirroredWorkspaceSnapshot: MirroredWorkspaceSnapshot = {
+      trackedFiles: [],
+      untrackedFiles: []
+    };
+
+    try {
+      await execa('git', ['worktree', 'add', '-b', branchName, worktreePath, baseCommitSha], {
+        cwd: this.options.cwd
+      });
+      mirroredEnvFiles = await mirrorExperimentEnvFiles(this.options.cwd, worktreePath);
+      mirroredWorkspaceSnapshot = await mirrorDirtyWorkspaceIntoWorktree(
+        this.options.cwd,
+        worktreePath,
+        baseCommitSha
+      );
+    } catch (error) {
+      await cleanupSpawnedWorktree(this.options.cwd, worktreePath, branchName);
+      throw error;
+    }
 
     this.options.notebook.createSession(this.getExperimentSessionId(id), worktreePath);
 
@@ -132,6 +150,17 @@ export class ExperimentManager {
       await this.appendObservation(
         record,
         `Mirrored repo-local env files into the worktree: ${mirroredEnvFiles.join(', ')}.`,
+        ['discovery'],
+        { countBudget: false }
+      );
+    }
+    if (
+      mirroredWorkspaceSnapshot.trackedFiles.length > 0 ||
+      mirroredWorkspaceSnapshot.untrackedFiles.length > 0
+    ) {
+      await this.appendObservation(
+        record,
+        `Mirrored dirty workspace snapshot into the worktree: ${mirroredWorkspaceSnapshot.trackedFiles.length} tracked, ${mirroredWorkspaceSnapshot.untrackedFiles.length} untracked file(s).`,
         ['discovery'],
         { countBudget: false }
       );
@@ -604,6 +633,116 @@ async function mirrorExperimentEnvFiles(repoRoot: string, worktreePath: string):
   }
 
   return mirrored;
+}
+
+interface MirroredWorkspaceSnapshot {
+  trackedFiles: string[];
+  untrackedFiles: string[];
+}
+
+async function mirrorDirtyWorkspaceIntoWorktree(
+  repoRoot: string,
+  worktreePath: string,
+  baseCommitSha: string
+): Promise<MirroredWorkspaceSnapshot> {
+  const trackedFiles = await listRelativeGitPaths(repoRoot, ['diff', '--name-only', '-z', baseCommitSha]);
+  const untrackedFiles = await listRelativeGitPaths(repoRoot, ['ls-files', '--others', '--exclude-standard', '-z']);
+
+  const filteredTrackedFiles = trackedFiles.filter((relativePath) =>
+    shouldMirrorWorkspacePath(relativePath)
+  );
+  const filteredUntrackedFiles = untrackedFiles.filter((relativePath) =>
+    shouldMirrorWorkspacePath(relativePath)
+  );
+  const patch = await buildWorkspaceSnapshotPatch(repoRoot, baseCommitSha, filteredTrackedFiles, filteredUntrackedFiles);
+
+  if (patch) {
+    const apply = await execa(
+      'git',
+      ['apply', '--binary', '--3way', '--whitespace=nowarn'],
+      {
+        cwd: worktreePath,
+        input: patch,
+        reject: false
+      }
+    );
+    if (apply.exitCode !== 0) {
+      const detail = clampText((apply.stderr || apply.stdout || '').trim() || 'git apply failed', 2000);
+      throw new Error(`Failed to mirror dirty workspace snapshot into experiment worktree: ${detail}`);
+    }
+  }
+
+  return {
+    trackedFiles: filteredTrackedFiles,
+    untrackedFiles: filteredUntrackedFiles
+  };
+}
+
+async function buildWorkspaceSnapshotPatch(
+  repoRoot: string,
+  baseCommitSha: string,
+  trackedFiles: string[],
+  untrackedFiles: string[]
+): Promise<string> {
+  const patchParts: string[] = [];
+
+  if (trackedFiles.length > 0) {
+    const trackedDiff = await execa(
+      'git',
+      ['diff', '--binary', baseCommitSha, '--', ...trackedFiles],
+      { cwd: repoRoot }
+    );
+    if (trackedDiff.stdout.trim()) {
+      patchParts.push(trackedDiff.stdout.trimEnd());
+    }
+  }
+
+  for (const relativePath of untrackedFiles) {
+    const untrackedDiff = await execa(
+      'git',
+      ['diff', '--binary', '--no-index', '--', '/dev/null', relativePath],
+      {
+        cwd: repoRoot,
+        reject: false
+      }
+    );
+    if (untrackedDiff.stdout.trim()) {
+      patchParts.push(untrackedDiff.stdout.trimEnd());
+    }
+  }
+
+  return patchParts.length > 0 ? `${patchParts.join('\n\n')}\n` : '';
+}
+
+async function listRelativeGitPaths(repoRoot: string, args: string[]): Promise<string[]> {
+  const result = await execa('git', args, { cwd: repoRoot });
+  return result.stdout
+    .split('\0')
+    .map((entry) => entry.trim())
+    .filter(Boolean);
+}
+
+function shouldMirrorWorkspacePath(relativePath: string): boolean {
+  const normalized = relativePath.replace(/\\/g, '/');
+  const segments = normalized.split('/');
+  const firstSegment = segments[0] ?? '';
+  const basename = segments.at(-1) ?? '';
+  return !EXCLUDED_WORKSPACE_MIRROR_DIRS.has(firstSegment) && !MIRRORED_ENV_BASENAMES.has(basename);
+}
+
+async function cleanupSpawnedWorktree(
+  repoRoot: string,
+  worktreePath: string,
+  branchName: string
+): Promise<void> {
+  await execa('git', ['worktree', 'remove', '--force', worktreePath], {
+    cwd: repoRoot,
+    reject: false
+  });
+  await execa('git', ['branch', '-D', branchName], {
+    cwd: repoRoot,
+    reject: false
+  });
 }
 
 async function collectMirroredEnvRelativePaths(
