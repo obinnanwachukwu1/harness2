@@ -1,5 +1,5 @@
 {
-  "name": "ui-opentui-spike",
+  "name": "ui-opentui",
   "module": "src/index.ts",
   "type": "module",
   "private": true,

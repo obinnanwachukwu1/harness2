@@ -3,7 +3,7 @@
   "configVersion": 1,
   "workspaces": {
     "": {
-      "name": "ui-opentui-spike",
+      "name": "ui-opentui",
       "dependencies": {
         "@opentui/core": "^0.1.97",
       },

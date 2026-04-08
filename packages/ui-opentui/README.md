@@ -1,4 +1,4 @@
-# ui-opentui-spike
+# ui-opentui
 
 OpenTUI frontend for `harness2`.
 
@@ -9,7 +9,7 @@ dedicated transcript viewport and experiment rail.
 Run it directly:
 
 ```bash
-cd /Users/obinnanwachukwu/Code/harness2/packages/ui-opentui-spike
+cd /Users/obinnanwachukwu/Code/harness2/packages/ui-opentui
 bun run dev -- --cwd /Users/obinnanwachukwu/Code/harness2
 ```
 

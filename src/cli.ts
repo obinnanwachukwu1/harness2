@@ -54,7 +54,7 @@ async function main(): Promise<void> {
 
 async function runOpenTui(sessionId?: string): Promise<void> {
   const repoRoot = path.resolve(fileURLToPath(new URL('../', import.meta.url)));
-  const entryPath = path.join(repoRoot, 'packages/ui-opentui-spike/src/index.ts');
+  const entryPath = path.join(repoRoot, 'packages/ui-opentui/src/index.ts');
   const args = ['run', entryPath, '--cwd', process.cwd()];
   if (sessionId) {
     args.push('--session', sessionId);

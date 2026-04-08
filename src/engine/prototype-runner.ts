@@ -12,7 +12,7 @@ const HELP_TEXT = [
   '/bash <command...>',
   '/read <path> [startLine] [endLine]',
   '/ls [path] [--recursive]',
-  '/edit <path> :: <find> => <replace>',
+  '/edit <patch>',
   '/glob <pattern>',
   '/rg <pattern> [path]',
   `/spawn --hypothesis "..." [--budget ${DEFAULT_EXPERIMENT_BUDGET_TOKENS}] [--context "..."] [--preserve]`,
@@ -132,7 +132,7 @@ export class PrototypeRunner {
           if (divider === -1) {
             await context.emit(
               'assistant',
-              'Usage: /edit <patch> or /edit <path> :: <find> => <replace>'
+              'Usage: /edit <patch>'
             );
             return;
           }
@@ -143,7 +143,7 @@ export class PrototypeRunner {
           if (replacementDivider === -1) {
             await context.emit(
               'assistant',
-              'Usage: /edit <patch> or /edit <path> :: <find> => <replace>'
+              'Usage: /edit <patch>'
             );
             return;
           }

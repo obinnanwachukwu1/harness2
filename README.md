@@ -58,7 +58,7 @@ Inside the terminal UI, use slash commands:
 /read package.json
 /read package.json 120 180
 /write scratch.txt :: hello
-/edit scratch.txt :: hello => hello world
+/edit <patch>
 /glob "src/**/*.ts"
 /grep HeadlessEngine src
 /spawn --hypothesis "node is available in isolation"
@@ -70,6 +70,17 @@ Inside the terminal UI, use slash commands:
 /thinking on
 /thinking off
 /quit
+```
+
+`/edit` expects the same patch grammar the model uses:
+
+```text
+*** Begin Patch
+*** Update File: scratch.txt
+@@
+-hello
++hello world
+*** End Patch
 ```
 
 Any non-slash input is sent to the Codex model when OAuth is configured. The model can use the built-in local tools (`bash`, `read`, `write`, `edit`, `glob`, `grep`, `spawn_experiment`, `read_experiment`, `wait_experiment`, `search_experiments`, `compact`) through the headless engine.
@@ -158,7 +169,7 @@ src/
   storage/
   ui-opentui/
 packages/
-  ui-opentui-spike/
+  ui-opentui/
 test/
 ```
 

@@ -2,3 +2,5 @@ dist
 node_modules
 .DS_Store
 .h2
+.harness2
+pnpm-lock.yaml
