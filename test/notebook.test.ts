@@ -497,3 +497,60 @@ test('Notebook persists open questions and injects question reminders into reque
   assert.equal(notebook.listOpenStudyDebts(session.id).length, 0);
   assert.equal(notebook.buildOpenStudyDebtReminder(session.id), null);
 });
+
+test('Notebook rejects resolving a question while a linked experiment is still active', async (t) => {
+  const tempDir = await createTempDir('h2-notebook-active-experiment-question-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+
+  const session = notebook.createSession('session-active-question', tempDir);
+  const debt = notebook.openStudyDebt({
+    sessionId: session.id,
+    summary: 'recovery semantics are still under study',
+    whyItMatters: 'Being wrong would materially change the durable behavior.',
+    kind: 'runtime'
+  });
+
+  const timestamp = nowIso();
+  notebook.upsertExperiment({
+    id: 'exp-running-linked',
+    sessionId: session.id,
+    studyDebtId: debt.id,
+    hypothesis: 'completed work can survive restart without duplication',
+    command: 'subagent',
+    context: '',
+    baseCommitSha: 'abc123',
+    branchName: 'h2-exp-running-linked',
+    worktreePath: path.join(tempDir, 'running'),
+    status: 'running',
+    budget: 100,
+    tokensUsed: 10,
+    contextTokensUsed: 2,
+    toolOutputTokensUsed: 4,
+    observationTokensUsed: 4,
+    preserve: false,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    resolvedAt: null,
+    finalVerdict: null,
+    finalSummary: null,
+    discovered: [],
+    artifacts: [],
+    constraints: [],
+    confidenceNote: null,
+    lowSignalWarningEmitted: false,
+    promote: false
+  });
+
+  assert.throws(
+    () =>
+      notebook.resolveStudyDebt({
+        questionId: debt.id,
+        resolution: 'study_run',
+        note: 'Looks answered.'
+      }),
+    /active linked experiment/
+  );
+});

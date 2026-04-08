@@ -30,6 +30,11 @@ test('HeadlessEngine routes slash commands through the prototype runner', async 
 
   const engine = await HeadlessEngine.open({ cwd: repoDir, revealExportsInFinder: false });
   t.after(async () => engine.dispose());
+  const originalRunTurn = (engine as any).model.runTurn;
+  (engine as any).model.runTurn = async () => {};
+  t.after(() => {
+    (engine as any).model.runTurn = originalRunTurn;
+  });
 
   await engine.submit('/write notes.txt :: hello from harness2');
   await engine.submit('/read notes.txt');
@@ -647,6 +652,40 @@ test('HeadlessEngine requires questionId when spawning an experiment with an ope
   t.after(async () => engine.dispose());
 
   const notebook = (engine as any).options.notebook;
+  const experimentManager = (engine as any).experimentManager;
+  const originalSpawn = experimentManager.spawn.bind(experimentManager);
+  experimentManager.spawn = async (input: any) => ({
+    id: 'exp-stubbed',
+    sessionId: input.sessionId,
+    studyDebtId: input.studyDebtId ?? null,
+    hypothesis: input.hypothesis,
+    command: 'subagent',
+    context: input.context ?? '',
+    baseCommitSha: 'abc123',
+    branchName: 'h2-exp-stubbed',
+    worktreePath: path.join(repoDir, '.h2', 'worktrees', 'exp-stubbed'),
+    status: 'running',
+    budget: input.budgetTokens,
+    tokensUsed: 0,
+    contextTokensUsed: 0,
+    toolOutputTokensUsed: 0,
+    observationTokensUsed: 0,
+    preserve: input.preserve,
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+    resolvedAt: null,
+    finalVerdict: null,
+    finalSummary: null,
+    discovered: [],
+    artifacts: [],
+    constraints: [],
+    confidenceNote: null,
+    lowSignalWarningEmitted: false,
+    promote: false
+  });
+  t.after(() => {
+    experimentManager.spawn = originalSpawn;
+  });
   const debt = notebook.openStudyDebt({
     sessionId: engine.snapshot.session.id,
     summary: 'runtime continuity is unproven',
@@ -723,6 +762,120 @@ test('HeadlessEngine rejects spawn_experiment pinned to an unknown or closed que
         preserve: false
       }),
     /already closed/
+  );
+});
+
+test('HeadlessEngine rejects spawning a second active experiment on the same question', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const notebook = (engine as any).options.notebook;
+  const experimentManager = (engine as any).experimentManager;
+  const originalSpawn = experimentManager.spawn.bind(experimentManager);
+  experimentManager.spawn = async (input: any) => ({
+    id: 'exp-stubbed-next',
+    sessionId: input.sessionId,
+    studyDebtId: input.studyDebtId ?? null,
+    hypothesis: input.hypothesis,
+    command: 'subagent',
+    context: input.context ?? '',
+    baseCommitSha: 'abc123',
+    branchName: 'h2-exp-stubbed-next',
+    worktreePath: path.join(repoDir, '.h2', 'worktrees', 'exp-stubbed-next'),
+    status: 'running',
+    budget: input.budgetTokens,
+    tokensUsed: 0,
+    contextTokensUsed: 0,
+    toolOutputTokensUsed: 0,
+    observationTokensUsed: 0,
+    preserve: input.preserve,
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
+    resolvedAt: null,
+    finalVerdict: null,
+    finalSummary: null,
+    discovered: [],
+    artifacts: [],
+    constraints: [],
+    confidenceNote: null,
+    lowSignalWarningEmitted: false,
+    promote: false
+  });
+  t.after(() => {
+    experimentManager.spawn = originalSpawn;
+  });
+  const debt = notebook.openStudyDebt({
+    sessionId: engine.snapshot.session.id,
+    summary: 'queue ownership is still under study',
+    whyItMatters: 'Being wrong would materially change the execution model.',
+    kind: 'runtime'
+  });
+
+  const timestamp = nowIso();
+  notebook.upsertExperiment({
+    id: 'exp-running-linked',
+    sessionId: engine.snapshot.session.id,
+    studyDebtId: debt.id,
+    hypothesis: 'one worker can claim jobs without duplicate processing',
+    command: 'subagent',
+    context: '',
+    baseCommitSha: 'abc123',
+    branchName: 'h2-exp-running-linked',
+    worktreePath: path.join(repoDir, '.h2', 'worktrees', 'exp-running-linked'),
+    status: 'running',
+    budget: 1200,
+    tokensUsed: 0,
+    contextTokensUsed: 0,
+    toolOutputTokensUsed: 0,
+    observationTokensUsed: 0,
+    preserve: false,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    resolvedAt: null,
+    finalVerdict: null,
+    finalSummary: null,
+    discovered: [],
+    artifacts: [],
+    constraints: [],
+    confidenceNote: null,
+    lowSignalWarningEmitted: false,
+    promote: false
+  });
+
+  await assert.rejects(
+    () =>
+      (engine as any).spawnExperiment({
+        questionId: debt.id,
+        hypothesis: 'sqlite locking will tolerate two workers',
+        localEvidenceSummary: 'One experiment is already running against this same ownership claim.',
+        residualUncertainty: 'Whether another variant should run in parallel.',
+        budgetTokens: 1200,
+        preserve: false
+    }),
+    /already has an active linked experiment/
+  );
+
+  notebook.upsertExperiment({
+    ...(notebook.getExperiment('exp-running-linked') as any),
+    status: 'inconclusive',
+    finalVerdict: 'inconclusive',
+    finalSummary: 'Closed the first study so a new linked experiment can start later.',
+    resolvedAt: nowIso(),
+    updatedAt: nowIso()
+  });
+
+  await assert.doesNotReject(() =>
+    (engine as any).spawnExperiment({
+      questionId: debt.id,
+      hypothesis: 'sqlite locking will tolerate two workers',
+      localEvidenceSummary: 'The earlier study resolved and no linked experiment is still active.',
+      residualUncertainty: 'Whether the alternative claim/update sequence is safer.',
+      budgetTokens: 1200,
+      preserve: false
+    })
   );
 });
 
@@ -808,6 +961,63 @@ test('HeadlessEngine rejects resolving an open question as static evidence after
       resolution: 'scope_narrowed',
       note: 'Narrow to a path that removes the failed partial before retry.'
     })
+  );
+});
+
+test('HeadlessEngine rejects resolving a question while a linked experiment is still active', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const notebook = (engine as any).options.notebook;
+  const question = notebook.openStudyDebt({
+    sessionId: engine.snapshot.session.id,
+    summary: 'provider contract is still under study',
+    whyItMatters: 'Being wrong would materially change the implementation path.',
+    kind: 'runtime'
+  });
+
+  const timestamp = nowIso();
+  notebook.upsertExperiment({
+    id: 'exp-running-question',
+    sessionId: engine.snapshot.session.id,
+    studyDebtId: question.id,
+    hypothesis: 'responses API emits the needed stream shape',
+    command: 'subagent',
+    context: '',
+    baseCommitSha: 'abc123',
+    branchName: 'h2-exp-running-question',
+    worktreePath: path.join(repoDir, '.h2', 'worktrees', 'exp-running-question'),
+    status: 'running',
+    budget: 1200,
+    tokensUsed: 0,
+    contextTokensUsed: 0,
+    toolOutputTokensUsed: 0,
+    observationTokensUsed: 0,
+    preserve: false,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    resolvedAt: null,
+    finalVerdict: null,
+    finalSummary: null,
+    discovered: [],
+    artifacts: [],
+    constraints: [],
+    confidenceNote: null,
+    lowSignalWarningEmitted: false,
+    promote: false
+  });
+
+  await assert.rejects(
+    () =>
+      (engine as any).resolveStudyDebt({
+        questionId: question.id,
+        resolution: 'study_run',
+        note: 'Resolved before the study finished.'
+      }),
+    /active linked experiment/
   );
 });
 

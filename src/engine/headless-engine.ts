@@ -692,6 +692,20 @@ export class HeadlessEngine {
       if (studyDebt.status !== 'open') {
         throw new Error(`Question ${questionId} is already closed.`);
       }
+
+      const activeLinkedExperiments =
+        this.options.notebook.listActiveExperimentsForStudyDebt(questionId);
+      if (activeLinkedExperiments.length > 0) {
+        throw new Error(
+          [
+            `Question ${questionId} already has an active linked experiment ${activeLinkedExperiments
+              .map((experiment) => experiment.id)
+              .join(', ')}.`,
+            'Wait for that experiment to resolve before spawning another on the same question.',
+            'If you discovered a different orthogonal risk, open a separate question for it first.'
+          ].join('\n')
+        );
+      }
     }
 
     return this.experimentManager.spawn({

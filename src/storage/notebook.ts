@@ -663,6 +663,49 @@ export class Notebook {
     return rows.map(mapExperiment);
   }
 
+  listActiveExperimentsForStudyDebt(questionId: string): ExperimentRecord[] {
+    const rows = this.db
+      .prepare(
+        `
+          SELECT
+            id,
+            session_id,
+            study_debt_id,
+            hypothesis,
+            command,
+            context,
+            base_commit_sha,
+            branch_name,
+            worktree_path,
+            status,
+            budget,
+            tokens_used,
+            context_tokens_used,
+            tool_output_tokens_used,
+            observation_tokens_used,
+            preserve,
+            created_at,
+            updated_at,
+            resolved_at,
+            final_verdict,
+            final_summary,
+            discovered_json,
+            artifacts_json,
+            constraints_json,
+            confidence_note,
+            low_signal_warning_emitted,
+            promote
+          FROM experiments
+          WHERE study_debt_id = ?
+            AND status IN ('running', 'budget_exhausted')
+          ORDER BY updated_at DESC, id DESC
+        `
+      )
+      .all(questionId) as unknown as ExperimentRow[];
+
+    return rows.map(mapExperiment);
+  }
+
   clearExperimentJournal(
     sessionId: string,
     options: { force?: boolean } = {}
@@ -1180,6 +1223,18 @@ export class Notebook {
     const existing = this.getStudyDebt(input.questionId);
     if (!existing) {
       throw new Error(`Unknown question: ${input.questionId}`);
+    }
+
+    const activeExperiments = this.listActiveExperimentsForStudyDebt(existing.id);
+    if (activeExperiments.length > 0) {
+      throw new Error(
+        [
+          `Question ${input.questionId} still has an active linked experiment ${activeExperiments
+            .map((experiment) => experiment.id)
+            .join(', ')}.`,
+          'Wait for that experiment to resolve, or explicitly cancel/close it before resolving the question.'
+        ].join('\n')
+      );
     }
 
     const invalidatedExperiments = this.listInvalidatedExperimentsForStudyDebt(existing.id);
