@@ -10,7 +10,7 @@ Run it directly:
 
 ```bash
 cd /Users/obinnanwachukwu/Code/harness2/packages/ui-opentui
-bun run dev -- --cwd /Users/obinnanwachukwu/Code/harness2
+node --import tsx src/index.ts -- --cwd /Users/obinnanwachukwu/Code/harness2
 ```
 
 Or launch it from the main CLI:

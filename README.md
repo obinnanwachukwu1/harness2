@@ -14,6 +14,9 @@ This is still intentionally v0.1. The core vertical slice works, but the harness
 
 - Node 22+
 - a Git repository with at least one commit in the current working directory
+- project dependencies installed with `npm install`
+
+`h2` runs on the Node + `tsx` toolchain. `bun` is not required.
 
 ## Run
 
@@ -28,6 +31,8 @@ Useful commands:
 
 ```bash
 npm run dev -- doctor
+npm run dev -- help
+npm run dev -- paths
 npm run dev -- auth login
 npm run dev -- auth status
 npm run dev -- auth access
@@ -45,8 +50,11 @@ Build and test:
 
 ```bash
 npm run build
+npm run typecheck
 npm test
 ```
+
+`npm run typecheck` covers both the core CLI/engine code and `packages/ui-opentui`.
 
 ## Interactive commands
 
@@ -158,6 +166,12 @@ Notes:
 - the interactive UI does not print the raw bearer token into the transcript
 - older repo-local auth tokens in `.h2/notebook.sqlite` are migrated into the global auth store automatically
 
+To inspect the active repo/global state locations:
+
+```bash
+npm run dev -- paths
+```
+
 ## Layout
 
 ```text
@@ -176,6 +190,8 @@ test/
 ## Notes
 
 - State lives under `.h2/notebook.sqlite`.
+- Global auth state lives under `~/.h2/auth.sqlite` unless `H2_HOME` or `H2_AUTH_DB_PATH` overrides it.
+- `h2 paths` prints the repo state dir, repo notebook, legacy `.harness2` dir, and global auth paths.
 - Experiment worktrees live under `.h2/worktrees/<experimentId>`.
 - Adoption previews and patches live under `.h2/adoptions/<experimentId>.patch`.
 - Resolved experiments remove their worktree unless `--preserve` is set.

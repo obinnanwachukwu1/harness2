@@ -420,9 +420,11 @@ test('Notebook persists open questions without injecting reminder developer mess
   assert.equal(notebook.listOpenStudyDebts(session.id).length, 1);
 
   const requestHistory = notebook.buildModelRequestHistory(session.id);
-  assert.equal(requestHistory[0]?.type, 'message');
-  assert.equal(requestHistory[0]?.role, 'user');
-  assert.match((requestHistory[0] as any).content, /investigate auth continuity/);
+  const firstHistoryItem = requestHistory[0];
+  assert.equal(firstHistoryItem?.type, 'message');
+  assert.equal(firstHistoryItem?.role, 'user');
+  assert.equal(typeof firstHistoryItem?.content, 'string');
+  assert.match(firstHistoryItem.content, /investigate auth continuity/);
 
   const timestamp = nowIso();
   notebook.upsertExperiment({

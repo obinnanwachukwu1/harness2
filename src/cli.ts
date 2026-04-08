@@ -1,20 +1,27 @@
 #!/usr/bin/env node
+import { existsSync } from 'node:fs';
 import path from 'node:path';
-import { stdout as output } from 'node:process';
+import process, { stdout as output } from 'node:process';
 import { fileURLToPath } from 'node:url';
 
 import { execa } from 'execa';
 
 import type { ExperimentRecord, ModelHistoryItem, TranscriptEntry } from './types.js';
-import {
-  migrateLegacyRepoLocalAuth,
-  openGlobalAuthNotebook
-} from './auth/storage.js';
+import { describeStatePaths, getRepoNotebookPath } from './state-paths.js';
+
+class CliUsageError extends Error {}
 
 async function main(): Promise<void> {
   const [, , ...args] = process.argv;
+  if (args[0] === 'help' || args[0] === '--help' || args[0] === '-h') {
+    printUsage();
+    return;
+  }
+
   const printRequest = parsePrintRequest(args);
   if (printRequest) {
+    assertSupportedNodeRuntime();
+    await assertInsideGitRepository(process.cwd());
     await runPrintMode(printRequest.prompt, printRequest.sessionId, printRequest.thinking);
     return;
   }
@@ -32,6 +39,8 @@ async function main(): Promise<void> {
   }
 
   if (command === 'opentui') {
+    assertSupportedNodeRuntime();
+    await assertInsideGitRepository(process.cwd());
     await runOpenTui(args[1]);
     return;
   }
@@ -41,26 +50,33 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === 'paths') {
+    printStatePaths(process.cwd());
+    return;
+  }
+
   const sessionId = command === 'resume' ? args[1] : undefined;
   if (command === 'resume' && !sessionId) {
-    throw new Error('Usage: h2 resume <sessionId>');
+    throw new CliUsageError('Usage: h2 resume <sessionId>');
   }
 
   if (command && command !== 'resume') {
-    throw new Error(`Unknown command: ${command}`);
+    throw new CliUsageError(`Unknown command: ${command}`);
   }
+  assertSupportedNodeRuntime();
+  await assertInsideGitRepository(process.cwd());
   await runOpenTui(sessionId);
 }
 
 async function runOpenTui(sessionId?: string): Promise<void> {
-  const repoRoot = path.resolve(fileURLToPath(new URL('../', import.meta.url)));
+  const repoRoot = resolveHarnessRoot();
   const entryPath = path.join(repoRoot, 'packages/ui-opentui/src/index.ts');
-  const args = ['run', entryPath, '--cwd', process.cwd()];
+  const args = ['--import', 'tsx', entryPath, '--cwd', process.cwd()];
   if (sessionId) {
     args.push('--session', sessionId);
   }
 
-  await execa('bun', args, {
+  await execa(process.execPath, args, {
     cwd: repoRoot,
     stdio: 'inherit'
   });
@@ -159,12 +175,16 @@ async function runPrintMode(
 async function runAuthCommand(args: string[]): Promise<void> {
   const { Notebook } = await import('./storage/notebook.js');
   const { OpenAICodexAuth } = await import('./auth/openai-codex.js');
+  const {
+    migrateLegacyRepoLocalAuth,
+    openGlobalAuthNotebook
+  } = await import('./auth/storage.js');
   const action = args[0];
   if (!action || !['login', 'status', 'access', 'logout'].includes(action)) {
-    throw new Error('Usage: h2 auth <login|status|access|logout>');
+    throw new CliUsageError('Usage: h2 auth <login|status|access|logout>');
   }
 
-  const repoNotebook = new Notebook(`${process.cwd()}/.h2/notebook.sqlite`);
+  const repoNotebook = new Notebook(getRepoNotebookPath(process.cwd()));
   const authNotebook = openGlobalAuthNotebook();
   migrateLegacyRepoLocalAuth(repoNotebook, authNotebook);
   const auth = new OpenAICodexAuth(authNotebook, {
@@ -185,13 +205,15 @@ async function runAuthCommand(args: string[]): Promise<void> {
 
     if (action === 'status') {
       console.log(auth.formatStatus());
+      console.log('');
+      printStatePaths(process.cwd());
       return;
     }
 
     if (action === 'access') {
       const token = await auth.access();
       if (!token) {
-        throw new Error('No active OpenAI Codex OAuth token is available.');
+        throw new Error('No active OpenAI Codex OAuth token is available. Run `h2 auth login` first.');
       }
       console.log(token);
       return;
@@ -220,6 +242,26 @@ function printDoctor(report: {
   for (const check of report.checks) {
     console.log(`${check.ok ? 'ok ' : 'no '} ${check.label}: ${check.detail}`);
   }
+
+  console.log('');
+  printStatePaths(report.cwd);
+}
+
+function printUsage(): void {
+  console.log('Usage: h2 [resume <sessionId>] [opentui] | h2 auth <login|status|access|logout> | h2 doctor | h2 paths');
+  console.log('');
+  console.log('Examples:');
+  console.log('h2');
+  console.log('h2 -p "inspect the repo"');
+  console.log('h2 resume <sessionId>');
+  console.log('h2 auth login');
+  console.log('h2 doctor');
+}
+
+function printStatePaths(cwd: string): void {
+  for (const entry of describeStatePaths(cwd)) {
+    console.log(`${entry.label}: ${entry.path}`);
+  }
 }
 
 function parsePrintRequest(
@@ -229,12 +271,12 @@ function parsePrintRequest(
     const thinking = !args.includes('-no-thinking');
     const printIndex = args.findIndex((arg) => arg === '-p' || arg === '--print');
     if (printIndex === -1) {
-      throw new Error('Usage: h2 [-thinking|-no-thinking] -p "<prompt>"');
+      throw new CliUsageError('Usage: h2 [-thinking|-no-thinking] -p "<prompt>"');
     }
 
     const prompt = args.slice(printIndex + 1).join(' ').trim();
     if (!prompt) {
-      throw new Error('Usage: h2 [-thinking|-no-thinking] -p "<prompt>"');
+      throw new CliUsageError('Usage: h2 [-thinking|-no-thinking] -p "<prompt>"');
     }
     return { prompt, thinking };
   }
@@ -244,7 +286,7 @@ function parsePrintRequest(
     const printIndex = args.findIndex((arg, index) => index >= 2 && (arg === '-p' || arg === '--print'));
     const prompt = args.slice(printIndex + 1).join(' ').trim();
     if (!prompt) {
-      throw new Error('Usage: h2 resume <sessionId> [-thinking|-no-thinking] -p "<prompt>"');
+      throw new CliUsageError('Usage: h2 resume <sessionId> [-thinking|-no-thinking] -p "<prompt>"');
     }
     return {
       sessionId: args[1],
@@ -350,8 +392,63 @@ function printPromptEvalSummary(input: {
   output.write(`${truncatePrintLines(lines.join('\n'), input.width)}\n`);
 }
 
+function assertSupportedNodeRuntime(): void {
+  const nodeMajor = Number.parseInt(process.versions.node.split('.')[0] ?? '0', 10);
+  if (nodeMajor < 22) {
+    throw new Error(`Node ${process.version} is not supported. Use Node 22 or newer.`);
+  }
+}
+
+async function assertInsideGitRepository(cwd: string): Promise<void> {
+  const repoResult = await execa('git', ['rev-parse', '--is-inside-work-tree'], {
+    cwd,
+    reject: false
+  });
+
+  if (repoResult.exitCode !== 0 || repoResult.stdout.trim() !== 'true') {
+    throw new Error(
+      'h2 must run inside a Git repository with at least one commit. Run `git init` and make an initial commit, or change into an existing repo.'
+    );
+  }
+
+  const headResult = await execa('git', ['rev-parse', 'HEAD'], {
+    cwd,
+    reject: false
+  });
+  if (headResult.exitCode === 0) {
+    return;
+  }
+
+  throw new Error(
+    'h2 requires a Git repository with at least one commit. Create an initial commit, then retry.'
+  );
+}
+
+function resolveHarnessRoot(): string {
+  const candidates = [
+    path.resolve(fileURLToPath(new URL('../', import.meta.url))),
+    path.resolve(fileURLToPath(new URL('../../', import.meta.url)))
+  ];
+
+  for (const candidate of candidates) {
+    const uiEntry = path.join(candidate, 'packages/ui-opentui/src/index.ts');
+    if (existsSync(uiEntry)) {
+      return candidate;
+    }
+  }
+
+  return candidates[0]!;
+}
+
 main().catch((error) => {
   const message = error instanceof Error ? error.message : String(error);
-  console.error(message);
+  if (error instanceof CliUsageError) {
+    console.error(message);
+    console.error('');
+    printUsage();
+  } else {
+    console.error(`error: ${message}`);
+    console.error('Run `h2 help` for usage or `h2 doctor` to check the local setup.');
+  }
   process.exitCode = 1;
 });

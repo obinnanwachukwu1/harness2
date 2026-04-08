@@ -7,21 +7,23 @@
     "h2": "./dist/cli.js"
   },
   "scripts": {
-    "build": "tsc -p tsconfig.json",
+    "build": "npm run typecheck && tsc -p tsconfig.json",
     "dev": "tsx src/cli.ts",
     "test": "node --no-warnings --import tsx --test",
-    "typecheck": "tsc -p tsconfig.json --noEmit"
+    "typecheck": "npm run typecheck:core && npm run typecheck:ui",
+    "typecheck:core": "tsc -p tsconfig.json --noEmit",
+    "typecheck:ui": "tsc -p packages/ui-opentui/tsconfig.json --noEmit"
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.51",
     "ai": "^6.0.149",
     "diff": "^8.0.4",
     "execa": "^9.6.0",
+    "tsx": "^4.19.4",
     "zod": "^4.3.6"
   },
   "devDependencies": {
     "@types/node": "^22.15.0",
-    "tsx": "^4.19.4",
     "typescript": "^5.8.3"
   }
 }
