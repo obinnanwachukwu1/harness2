@@ -119,22 +119,79 @@ test('HeadlessEngine edit applies patch-style file creation and updates', async 
   );
 });
 
-test('HeadlessEngine bash supports multiline heredocs', async (t) => {
+test('HeadlessEngine exec_command supports multiline heredocs', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));
 
   const engine = await HeadlessEngine.open({ cwd: repoDir });
   t.after(async () => engine.dispose());
 
-  const output = await engine.runBash(`python3 - <<'PY'
+  const output = JSON.parse(
+    await engine.runExecCommand({
+      command: `python3 - <<'PY'
 print("hello")
 for i in range(2):
     print(i)
-PY`);
+PY`
+    })
+  ) as {
+    exitCode: number | null;
+    stdout: string;
+  };
 
-  assert.match(output, /exit: 0/);
-  assert.match(output, /hello/);
-  assert.match(output, /\n0\n1/);
+  assert.equal(output.exitCode, 0);
+  assert.match(output.stdout, /hello/);
+  assert.match(output.stdout, /\n0\n1/);
+});
+
+test('HeadlessEngine exec_command can keep a background process alive across polls', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const started = JSON.parse(
+    await engine.runExecCommand({
+      command: 'echo ready; sleep 30',
+      yieldTimeMs: 200
+    })
+  ) as {
+    processId: number | null;
+    running: boolean;
+    stdout: string;
+  };
+
+  assert.equal(started.running, true);
+  assert.equal(typeof started.processId, 'number');
+
+  const polled = JSON.parse(
+    await engine.runWriteStdin({
+      processId: started.processId!,
+      yieldTimeMs: 200
+    })
+  ) as {
+    processId: number | null;
+    stdout: string;
+  };
+
+  assert.equal(polled.processId, started.processId);
+
+  const finished = JSON.parse(
+    await engine.runWriteStdin({
+      processId: started.processId!,
+      terminate: true,
+      yieldTimeMs: 200
+    })
+  ) as {
+    processId: number | null;
+    running: boolean;
+    exitCode: number | null;
+  };
+
+  assert.equal(finished.running, false);
+  assert.equal(finished.processId, null);
+  assert.equal(typeof finished.exitCode, 'number');
 });
 
 test('HeadlessEngine rg accepts whitespace-separated multi-target strings', async (t) => {
@@ -317,17 +374,18 @@ test('HeadlessEngine preserves completed tool events until the next turn starts'
     onToolCallFinish: ((toolCallId: string, transcriptText?: string) => Promise<void>) | undefined
   ) => {
     await onToolCallStart?.({
-      toolCallId: 'call_bash_1',
-      toolName: 'bash',
-      label: 'Bash(pwd)',
+      toolCallId: 'call_exec_1',
+      toolName: 'exec_command',
+      label: 'Exec(pwd)',
       detail: 'running…',
       body: ['command: pwd'],
       providerExecuted: false
     });
     await toolFinished;
-    const transcriptText = '@@tool\tbash\tBash(pwd)\nexit: 0\nstdout:\n/tmp/repo';
+    const transcriptText =
+      '@@tool\texec_command\tExec(pwd)\n{\n  "processId": null,\n  "exitCode": 0,\n  "stdout": "/tmp/repo\\n",\n  "stderr": "",\n  "running": false,\n  "command": "pwd",\n  "cwd": "."\n}';
     await emit('tool', transcriptText);
-    await onToolCallFinish?.('call_bash_1', transcriptText);
+    await onToolCallFinish?.('call_exec_1', transcriptText);
   };
   t.after(() => {
     engine.modelClient.runTurn = originalRunTurn;
@@ -345,9 +403,9 @@ test('HeadlessEngine preserves completed tool events until the next turn starts'
     kind: 'tool',
     transcriptText: null,
     live: true,
-    callId: 'call_bash_1',
-    toolName: 'bash',
-    label: 'Bash(pwd)',
+    callId: 'call_exec_1',
+    toolName: 'exec_command',
+    label: 'Exec(pwd)',
     detail: 'running…',
     body: ['command: pwd'],
     providerExecuted: false
@@ -359,9 +417,10 @@ test('HeadlessEngine preserves completed tool events until the next turn starts'
     {
       id: 'live-tool-1',
       kind: 'tool',
-      transcriptText: '@@tool\tbash\tBash(pwd)\nexit: 0\nstdout:\n/tmp/repo',
+      transcriptText:
+        '@@tool\texec_command\tExec(pwd)\n{\n  "processId": null,\n  "exitCode": 0,\n  "stdout": "/tmp/repo\\n",\n  "stderr": "",\n  "running": false,\n  "command": "pwd",\n  "cwd": "."\n}',
       live: false,
-      callId: 'call_bash_1',
+      callId: 'call_exec_1',
       toolName: null,
       label: null,
       detail: null,
@@ -373,7 +432,7 @@ test('HeadlessEngine preserves completed tool events until the next turn starts'
   await engine.submit('/read README.md');
   assert.equal(
     engine.snapshot.liveTurnEvents.some(
-      (event) => event.kind === 'tool' && event.callId === 'call_bash_1'
+      (event) => event.kind === 'tool' && event.callId === 'call_exec_1'
     ),
     false
   );

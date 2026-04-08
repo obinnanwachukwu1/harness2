@@ -63,7 +63,9 @@ Inside the terminal UI, use slash commands:
 
 ```text
 /help
-/bash git status --short
+/exec git status --short
+/stdin 3
+/stdin 3 --terminate
 /read package.json
 /read package.json 120 180
 /write scratch.txt :: hello
@@ -92,7 +94,7 @@ Inside the terminal UI, use slash commands:
 *** End Patch
 ```
 
-Any non-slash input is sent to the Codex model when OAuth is configured. The model can use the built-in local tools (`bash`, `read`, `write`, `edit`, `glob`, `grep`, `spawn_experiment`, `read_experiment`, `wait_experiment`, `search_experiments`, `compact`) through the headless engine.
+Any non-slash input is sent to the Codex model when OAuth is configured. The model can use the built-in local tools (`exec_command`, `write_stdin`, `read`, `write`, `edit`, `glob`, `grep`, `spawn_experiment`, `read_experiment`, `wait_experiment`, `search_experiments`, `compact`) through the headless engine.
 
 ## Prompt Mode
 

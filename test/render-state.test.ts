@@ -90,8 +90,8 @@ test('buildOpenTuiState includes live tool argument previews', () => {
           transcriptText: null,
           live: true,
           callId: 'call-1',
-          toolName: 'bash',
-          label: 'Bash(pwd)',
+          toolName: 'exec_command',
+          label: 'Exec(pwd)',
           detail: 'running…',
           body: ['command: pwd'],
           providerExecuted: false
@@ -104,6 +104,27 @@ test('buildOpenTuiState includes live tool argument previews', () => {
   assert.ok(toolBlock && toolBlock.kind === 'tool');
   assert.deepEqual(toolBlock.body, ['running…', 'command: pwd']);
   assert.equal(toolBlock.live, true);
+});
+
+test('buildOpenTuiState summarizes exec output rows', () => {
+  const state = buildOpenTuiState(
+    createSnapshot({
+      transcript: [
+        {
+          id: 1,
+          sessionId: 'session-test',
+          role: 'tool',
+          text: '@@tool\texec_command\tExec(pwd)\n{\n  "processId": 4,\n  "exitCode": null,\n  "stdout": "ready\\n",\n  "stderr": "",\n  "running": true,\n  "command": "npm run dev",\n  "cwd": "."\n}',
+          createdAt: '2026-04-07T00:00:03.000Z'
+        }
+      ]
+    })
+  );
+
+  const toolBlock = state.blocks[0];
+  assert.ok(toolBlock && toolBlock.kind === 'tool');
+  assert.equal(toolBlock.header, 'Exec(pwd)');
+  assert.deepEqual(toolBlock.body, ['process  4', 'status  running', 'ready']);
 });
 
 test('buildOpenTuiState shows question ids in headers and summaries in the body', () => {

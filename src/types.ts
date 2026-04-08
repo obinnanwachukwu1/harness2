@@ -320,8 +320,43 @@ export interface SpawnExperimentInput {
   preserve: boolean;
 }
 
+export interface ExecCommandInput {
+  command: string;
+  cwd?: string;
+  yieldTimeMs?: number;
+  maxOutputChars?: number;
+}
+
+export interface ExecCommandResult {
+  processId: number | null;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  running: boolean;
+  command: string;
+  cwd: string;
+}
+
+export interface WriteStdinInput {
+  processId: number;
+  input?: string;
+  yieldTimeMs?: number;
+  maxOutputChars?: number;
+  closeStdin?: boolean;
+  terminate?: boolean;
+}
+
+export interface WriteStdinResult {
+  processId: number | null;
+  exitCode: number | null;
+  stdout: string;
+  stderr: string;
+  running: boolean;
+}
+
 export interface AgentTools {
-  bash(command: string): Promise<string>;
+  execCommand(input: ExecCommandInput): Promise<string>;
+  writeStdin(input: WriteStdinInput): Promise<string>;
   read(filePath: string, startLine?: number, endLine?: number): Promise<string>;
   ls?(filePath?: string, recursive?: boolean): Promise<string>;
   write?(filePath: string, content: string): Promise<string>;

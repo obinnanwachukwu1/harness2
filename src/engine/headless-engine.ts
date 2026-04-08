@@ -1,6 +1,9 @@
 import { access, glob, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
+import type { ChildProcessWithoutNullStreams } from 'node:child_process';
+import { spawn } from 'node:child_process';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import { execa, execaCommand } from 'execa';
 
@@ -21,6 +24,8 @@ import type {
   ExperimentDetails,
   ExperimentObservationTag,
   ExperimentQualityNotification,
+  ExecCommandInput,
+  ExecCommandResult,
   ExperimentRecord,
   ExperimentResolution,
   ExperimentSearchGuardrail,
@@ -32,7 +37,9 @@ import type {
   SpawnExperimentInput,
   StudyDebtKind,
   StudyDebtResolution,
-  TranscriptRole
+  TranscriptRole,
+  WriteStdinInput,
+  WriteStdinResult
 } from '../types.js';
 import { executeEditPatch } from './edit-patch.js';
 import { PrototypeRunner } from './prototype-runner.js';
@@ -48,6 +55,30 @@ const DEFAULT_EXPERIMENT_REASONING_EFFORT =
   (process.env.H2_EXPERIMENT_REASONING_EFFORT as 'low' | 'medium' | 'high' | 'off' | undefined) ??
   'high';
 const DEFAULT_COMMAND_SHELL = process.env.H2_COMMAND_SHELL ?? process.env.SHELL ?? 'zsh';
+const DEFAULT_EXEC_YIELD_MS = 1_000;
+const DEFAULT_EXEC_MAX_OUTPUT_CHARS = 12_000;
+const MAX_EXEC_PENDING_OUTPUT_CHARS = 200_000;
+const MAX_EXEC_CAPTURED_OUTPUT_CHARS = 64_000;
+
+interface ExecSession {
+  id: number;
+  command: string;
+  cwd: string;
+  root: string;
+  child: ChildProcessWithoutNullStreams;
+  pendingStdout: string;
+  pendingStderr: string;
+  droppedStdoutChars: number;
+  droppedStderrChars: number;
+  capturedStdout: string;
+  capturedStderr: string;
+  exitCode: number | null;
+  running: boolean;
+  stdinOpen: boolean;
+  updateLastTestStatus: boolean;
+  waitForExit: Promise<void>;
+  resolveWaitForExit: () => void;
+}
 
 export class HeadlessEngine {
   static async open(options: OpenEngineOptions): Promise<HeadlessEngine> {
@@ -92,9 +123,11 @@ export class HeadlessEngine {
   private statusText = 'idle';
   private readonly liveTurnEvents: LiveTurnEvent[] = [];
   private readonly liveToolEventIds = new Map<string, string>();
+  private readonly execSessions = new Map<number, ExecSession>();
   private lastLiveAssistantText = '';
   private lastLiveThinkingText = '';
   private liveEventCounter = 0;
+  private nextExecSessionId = 1;
   private thinkingEnabled = true;
   private turnQueue: Promise<void> = Promise.resolve();
   private lastTestStatus: string | null = null;
@@ -127,7 +160,8 @@ export class HeadlessEngine {
     this.model = new CodexModelClient(options.notebook, this.auth);
 
     this.tools = {
-      bash: (command) => this.runBash(command),
+      execCommand: (input) => this.runExecCommand(input),
+      writeStdin: (input) => this.runWriteStdin(input),
       read: (filePath, startLine, endLine) => this.runRead(filePath, startLine, endLine),
       ls: (filePath, recursive) => this.runLs(filePath, recursive),
       write: (filePath, content) => this.runWrite(filePath, content),
@@ -292,6 +326,7 @@ export class HeadlessEngine {
   }
 
   async dispose(): Promise<void> {
+    await this.disposeExecSessions();
     await this.experimentManager.dispose();
     this.options.notebook.close();
     this.options.authNotebook.close();
@@ -488,8 +523,12 @@ export class HeadlessEngine {
     return `live-${kind}-${this.liveEventCounter}`;
   }
 
-  async runBash(command: string): Promise<string> {
-    return this.runBashAtRoot(this.options.cwd, command);
+  async runExecCommand(input: ExecCommandInput): Promise<string> {
+    return this.runExecCommandAtRoot(this.options.cwd, input);
+  }
+
+  async runWriteStdin(input: WriteStdinInput): Promise<string> {
+    return this.runWriteStdinAtRoot(this.options.cwd, input);
   }
 
   async runRead(filePath: string, startLine?: number, endLine?: number): Promise<string> {
@@ -516,18 +555,51 @@ export class HeadlessEngine {
     return this.runRgAtRoot(this.options.cwd, patternText, target);
   }
 
-  private async runBashAtRoot(root: string, command: string): Promise<string> {
-    this.assertExperimentAllowsInlineProbe(root, 'bash');
-    const result = await execa(DEFAULT_COMMAND_SHELL, ['-lc', command], {
-      cwd: root,
-      reject: false
-    });
-
-    const output = formatCommandResult(command, result.exitCode ?? 1, result.stdout, result.stderr);
-    if (root === this.options.cwd) {
-      this.updateLastTestStatus(command, result.exitCode ?? 1, result.stdout, result.stderr);
+  private async runExecCommandAtRoot(root: string, input: ExecCommandInput): Promise<string> {
+    const command = input.command.trim();
+    if (!command) {
+      throw new Error('exec_command requires a non-empty command.');
     }
-    return output;
+
+    const cwd = input.cwd ? this.resolveRootedPath(root, input.cwd) : root;
+    this.assertExperimentAllowsInlineProbe(root, 'exec_command', [cwd]);
+
+    const session = this.startExecSession(root, cwd, command);
+    await this.waitForExecSession(session, normalizeExecYieldTime(input.yieldTimeMs));
+
+    const result = this.collectExecCommandResult(session, command, cwd, input.maxOutputChars);
+    return JSON.stringify(result, null, 2);
+  }
+
+  private async runWriteStdinAtRoot(root: string, input: WriteStdinInput): Promise<string> {
+    const session = this.execSessions.get(input.processId);
+    if (!session || session.root !== root) {
+      throw new Error(`Unknown process: ${input.processId}`);
+    }
+
+    if (input.terminate) {
+      await this.terminateExecSession(session);
+    } else {
+      if (input.input) {
+        if (!session.running) {
+          throw new Error(`Process ${input.processId} is no longer running.`);
+        }
+        if (!session.stdinOpen || session.child.stdin.destroyed || !session.child.stdin.writable) {
+          throw new Error(`stdin is closed for process ${input.processId}.`);
+        }
+        session.child.stdin.write(input.input);
+      }
+
+      if (input.closeStdin && session.stdinOpen && !session.child.stdin.destroyed) {
+        session.stdinOpen = false;
+        session.child.stdin.end();
+      }
+
+      await this.waitForExecSession(session, normalizeExecYieldTime(input.yieldTimeMs));
+    }
+
+    const result = this.collectWriteStdinResult(session, input.maxOutputChars);
+    return JSON.stringify(result, null, 2);
   }
 
   private async runReadAtRoot(
@@ -655,6 +727,208 @@ export class HeadlessEngine {
         result.stderr
       );
     }
+  }
+
+  private startExecSession(root: string, cwd: string, command: string): ExecSession {
+    const child = spawn(DEFAULT_COMMAND_SHELL, ['-lc', command], {
+      cwd,
+      detached: process.platform !== 'win32',
+      stdio: ['pipe', 'pipe', 'pipe']
+    });
+
+    let resolveWaitForExit: () => void = () => {};
+    const waitForExit = new Promise<void>((resolve) => {
+      resolveWaitForExit = resolve;
+    });
+
+    const session: ExecSession = {
+      id: this.nextExecSessionId++,
+      command,
+      cwd,
+      root,
+      child,
+      pendingStdout: '',
+      pendingStderr: '',
+      droppedStdoutChars: 0,
+      droppedStderrChars: 0,
+      capturedStdout: '',
+      capturedStderr: '',
+      exitCode: null,
+      running: true,
+      stdinOpen: true,
+      updateLastTestStatus: root === this.options.cwd,
+      waitForExit,
+      resolveWaitForExit
+    };
+
+    child.stdout.on('data', (chunk: Buffer | string) => {
+      this.appendExecSessionOutput(session, 'stdout', String(chunk));
+    });
+    child.stderr.on('data', (chunk: Buffer | string) => {
+      this.appendExecSessionOutput(session, 'stderr', String(chunk));
+    });
+    child.on('error', (error) => {
+      this.appendExecSessionOutput(session, 'stderr', `${error.message}\n`);
+    });
+    child.on('close', (exitCode) => {
+      session.running = false;
+      session.stdinOpen = false;
+      session.exitCode = exitCode ?? 1;
+      session.resolveWaitForExit();
+    });
+
+    this.execSessions.set(session.id, session);
+    return session;
+  }
+
+  private appendExecSessionOutput(
+    session: ExecSession,
+    stream: 'stdout' | 'stderr',
+    chunk: string
+  ): void {
+    if (!chunk) {
+      return;
+    }
+
+    if (stream === 'stdout') {
+      const pending = appendCappedText(
+        session.pendingStdout,
+        chunk,
+        MAX_EXEC_PENDING_OUTPUT_CHARS
+      );
+      session.pendingStdout = pending.text;
+      session.droppedStdoutChars += pending.droppedChars;
+      session.capturedStdout = appendCappedTail(
+        session.capturedStdout,
+        chunk,
+        MAX_EXEC_CAPTURED_OUTPUT_CHARS
+      );
+      return;
+    }
+
+    const pending = appendCappedText(session.pendingStderr, chunk, MAX_EXEC_PENDING_OUTPUT_CHARS);
+    session.pendingStderr = pending.text;
+    session.droppedStderrChars += pending.droppedChars;
+    session.capturedStderr = appendCappedTail(
+      session.capturedStderr,
+      chunk,
+      MAX_EXEC_CAPTURED_OUTPUT_CHARS
+    );
+  }
+
+  private async waitForExecSession(session: ExecSession, yieldTimeMs: number): Promise<void> {
+    if (!session.running) {
+      return;
+    }
+
+    await Promise.race([session.waitForExit, delay(yieldTimeMs)]);
+  }
+
+  private collectExecCommandResult(
+    session: ExecSession,
+    command: string,
+    cwd: string,
+    maxOutputChars?: number
+  ): ExecCommandResult {
+    const outputLimit = normalizeExecOutputChars(maxOutputChars);
+    const stdout = drainExecOutput(session, 'stdout', outputLimit);
+    const stderr = drainExecOutput(session, 'stderr', outputLimit);
+    const processId = this.maybeFinalizeExecSession(session);
+
+    return {
+      processId,
+      exitCode: session.running ? null : session.exitCode,
+      stdout,
+      stderr,
+      running: session.running,
+      command,
+      cwd: relativeToWorkspace(session.root, cwd)
+    };
+  }
+
+  private collectWriteStdinResult(
+    session: ExecSession,
+    maxOutputChars?: number
+  ): WriteStdinResult {
+    const outputLimit = normalizeExecOutputChars(maxOutputChars);
+    const stdout = drainExecOutput(session, 'stdout', outputLimit);
+    const stderr = drainExecOutput(session, 'stderr', outputLimit);
+    const processId = this.maybeFinalizeExecSession(session);
+
+    return {
+      processId,
+      exitCode: session.running ? null : session.exitCode,
+      stdout,
+      stderr,
+      running: session.running
+    };
+  }
+
+  private maybeFinalizeExecSession(session: ExecSession): number | null {
+    if (session.running || session.pendingStdout.length > 0 || session.pendingStderr.length > 0) {
+      return session.id;
+    }
+
+    this.execSessions.delete(session.id);
+    if (session.updateLastTestStatus) {
+      this.updateLastTestStatus(
+        session.command,
+        session.exitCode ?? 1,
+        session.capturedStdout,
+        session.capturedStderr
+      );
+    }
+    return null;
+  }
+
+  private async terminateExecSession(session: ExecSession): Promise<void> {
+    if (!session.running) {
+      return;
+    }
+
+    if (process.platform === 'win32') {
+      if (typeof session.child.pid === 'number') {
+        await execa('taskkill', ['/PID', String(session.child.pid), '/T', '/F'], {
+          reject: false
+        });
+      } else {
+        session.child.kill('SIGTERM');
+      }
+      await Promise.race([session.waitForExit, delay(1_500)]);
+      return;
+    }
+
+    const processId = session.child.pid;
+    try {
+      if (typeof processId === 'number') {
+        process.kill(-processId, 'SIGTERM');
+      } else {
+        session.child.kill('SIGTERM');
+      }
+    } catch {}
+
+    const exited = await Promise.race([
+      session.waitForExit.then(() => true),
+      delay(1_500).then(() => false)
+    ]);
+    if (exited) {
+      return;
+    }
+
+    try {
+      if (typeof processId === 'number') {
+        process.kill(-processId, 'SIGKILL');
+      } else {
+        session.child.kill('SIGKILL');
+      }
+    } catch {}
+    await Promise.race([session.waitForExit, delay(1_500)]);
+  }
+
+  private async disposeExecSessions(): Promise<void> {
+    const sessions = [...this.execSessions.values()];
+    await Promise.all(sessions.map((session) => this.terminateExecSession(session)));
+    this.execSessions.clear();
   }
 
   async spawnExperiment(
@@ -1024,8 +1298,13 @@ export class HeadlessEngine {
       .join('\n');
 
     const tools: AgentTools = {
-      bash: async (command) => {
-        const output = await this.runBashAtRoot(experiment.worktreePath, command);
+      execCommand: async (input) => {
+        const output = await this.runExecCommandAtRoot(experiment.worktreePath, input);
+        await this.experimentManager.recordToolUsage(experiment.id, output);
+        return output;
+      },
+      writeStdin: async (input) => {
+        const output = await this.runWriteStdinAtRoot(experiment.worktreePath, input);
         await this.experimentManager.recordToolUsage(experiment.id, output);
         return output;
       },
@@ -1306,7 +1585,7 @@ export class HeadlessEngine {
 
   private assertExperimentAllowsInlineProbe(
     root: string,
-    toolName: 'bash' | 'read' | 'ls' | 'glob' | 'rg',
+    toolName: 'exec_command' | 'read' | 'ls' | 'glob' | 'rg',
     resolvedTargets: string[] = []
   ): void {
     if (root !== this.options.cwd) {
@@ -1686,6 +1965,68 @@ function formatCommandResult(
   }
 
   return sections.join('\n\n');
+}
+
+function normalizeExecYieldTime(value: number | undefined): number {
+  if (!Number.isFinite(value)) {
+    return DEFAULT_EXEC_YIELD_MS;
+  }
+
+  return Math.max(50, Math.floor(value as number));
+}
+
+function normalizeExecOutputChars(value: number | undefined): number {
+  if (!Number.isFinite(value)) {
+    return DEFAULT_EXEC_MAX_OUTPUT_CHARS;
+  }
+
+  return Math.max(256, Math.floor(value as number));
+}
+
+function appendCappedText(
+  existing: string,
+  chunk: string,
+  maxChars: number
+): { text: string; droppedChars: number } {
+  const combined = existing + chunk;
+  if (combined.length <= maxChars) {
+    return { text: combined, droppedChars: 0 };
+  }
+
+  const droppedChars = combined.length - maxChars;
+  return {
+    text: combined.slice(droppedChars),
+    droppedChars
+  };
+}
+
+function appendCappedTail(existing: string, chunk: string, maxChars: number): string {
+  const combined = existing + chunk;
+  return combined.length <= maxChars ? combined : combined.slice(combined.length - maxChars);
+}
+
+function drainExecOutput(
+  session: ExecSession,
+  stream: 'stdout' | 'stderr',
+  maxChars: number
+): string {
+  const bufferKey = stream === 'stdout' ? 'pendingStdout' : 'pendingStderr';
+  const droppedKey = stream === 'stdout' ? 'droppedStdoutChars' : 'droppedStderrChars';
+  let available = session[bufferKey];
+
+  if (session[droppedKey] > 0) {
+    const note = `[older ${stream} truncated: ${session[droppedKey]} chars]\n`;
+    available = note + available;
+    session[droppedKey] = 0;
+  }
+
+  if (available.length <= maxChars) {
+    session[bufferKey] = '';
+    return available;
+  }
+
+  session[bufferKey] = available.slice(maxChars);
+  return available.slice(0, maxChars);
 }
 
 function relativeToWorkspace(cwd: string, filePath: string): string {

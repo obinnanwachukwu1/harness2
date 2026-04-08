@@ -1,4 +1,5 @@
 import { DEFAULT_EXPERIMENT_BUDGET_TOKENS } from '../lib/utils.js';
+import { formatToolOutput } from '../model/codex-tooling.js';
 import type {
   AgentRunContext,
   ExperimentAdoptionPreview,
@@ -9,7 +10,8 @@ import type {
 const HELP_TEXT = [
   'Commands:',
   '/help',
-  '/bash <command...>',
+  '/exec <command...>',
+  '/stdin <processId> [input...] [--close] [--terminate]',
   '/read <path> [startLine] [endLine]',
   '/ls [path] [--recursive]',
   '/edit <patch>',
@@ -54,15 +56,46 @@ export class PrototypeRunner {
         return;
       }
 
-      case 'bash': {
-        const commandText = trimmed.replace(/^\/bash\s+/, '');
+      case 'exec': {
+        const commandText = trimmed.replace(/^\/exec\s+/, '');
         if (!commandText || commandText === trimmed) {
-          await context.emit('assistant', 'Usage: /bash <command...>');
+          await context.emit('assistant', 'Usage: /exec <command...>');
           return;
         }
 
-        const output = await context.tools.bash(commandText);
-        await context.emit('tool', output);
+        const rawArguments = JSON.stringify({ command: commandText });
+        const output = await context.tools.execCommand({ command: commandText });
+        await context.emit('tool', formatToolOutput('exec_command', rawArguments, output));
+        return;
+      }
+
+      case 'stdin': {
+        const processIdText = rawArgs[0];
+        if (!processIdText) {
+          await context.emit('assistant', 'Usage: /stdin <processId> [input...] [--close] [--terminate]');
+          return;
+        }
+
+        const processId = Number.parseInt(processIdText, 10);
+        if (Number.isNaN(processId) || processId < 1) {
+          await context.emit('assistant', 'Usage: /stdin <processId> [input...] [--close] [--terminate]');
+          return;
+        }
+
+        const closeStdin = rawArgs.includes('--close');
+        const terminate = rawArgs.includes('--terminate');
+        const inputText = rawArgs
+          .slice(1)
+          .filter((arg) => arg !== '--close' && arg !== '--terminate')
+          .join(' ');
+        const payload = {
+          processId,
+          ...(inputText ? { input: inputText } : {}),
+          ...(closeStdin ? { closeStdin: true } : {}),
+          ...(terminate ? { terminate: true } : {})
+        };
+        const output = await context.tools.writeStdin(payload);
+        await context.emit('tool', formatToolOutput('write_stdin', JSON.stringify(payload), output));
         return;
       }
 

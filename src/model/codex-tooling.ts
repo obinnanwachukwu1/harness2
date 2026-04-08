@@ -36,8 +36,12 @@ export function formatToolHeader(name: string, rawArguments: string, output?: st
   const parsedOutput = output ? safeJsonParse(output) : null;
 
   switch (name) {
-    case 'bash':
-      return `Bash(${compactTextForHeader(readStringArg(args, 'command'), 72)})`;
+    case 'exec_command':
+      return `Exec(${compactTextForHeader(readStringArg(args, 'command'), 72)})`;
+    case 'write_stdin': {
+      const processId = readOptionalNumberArg(args, 'processId');
+      return typeof processId === 'number' ? `Exec(${Math.floor(processId)})` : 'Exec(stdin)';
+    }
     case 'read':
       return formatReadHeader(
         readStringArg(args, 'path'),
@@ -113,8 +117,26 @@ export function formatLiveToolBody(name: string, rawArguments: string): string[]
   const args = parseArguments(rawArguments);
 
   switch (name) {
-    case 'bash':
-      return [`command: ${readStringArg(args, 'command')}`];
+    case 'exec_command': {
+      const command = readStringArg(args, 'command');
+      const cwd = readOptionalStringArg(args, 'cwd');
+      return cwd ? [`command: ${command}`, `cwd: ${cwd}`] : [`command: ${command}`];
+    }
+    case 'write_stdin': {
+      const processId = readNumberArg(args, 'processId');
+      const body = [`process: ${processId}`];
+      const input = readOptionalStringArg(args, 'input');
+      if (input) {
+        body.push(`input: ${input}`);
+      }
+      if (readOptionalBooleanArg(args, 'closeStdin')) {
+        body.push('stdin: close');
+      }
+      if (readOptionalBooleanArg(args, 'terminate')) {
+        body.push('process: terminate');
+      }
+      return body;
+    }
     case 'read': {
       const path = readStringArg(args, 'path');
       const startLine = readOptionalNumberArg(args, 'startLine');
@@ -216,15 +238,37 @@ export function buildAiSdkTools(
 export const MAIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   {
     type: 'function',
-    name: 'bash',
+    name: 'exec_command',
     description:
-      'Run a shell command in the current workspace. Prefer this for direct repo inspection, tiny inline probes, targeted tests, or other checks that are cheaper to answer inline than by spawning a bounded experiment. If the command is a live external or secret-backed runtime probe whose result could materially change the implementation, declare an open question first.',
+      'Start a shell command in the current workspace and wait briefly for output. Fast commands behave like a one-shot shell call; long-running commands return a processId that you can continue with write_stdin. Prefer this for repo inspection, targeted tests, small local probes, or launching a local process you need to poll. If the command is a live external or secret-backed runtime probe whose result could materially change the implementation, declare an open question first.',
     parameters: {
       type: 'object',
       properties: {
-        command: { type: 'string' }
+        command: { type: 'string' },
+        cwd: { type: 'string' },
+        yieldTimeMs: { type: 'number' },
+        maxOutputChars: { type: 'number' }
       },
       required: ['command'],
+      additionalProperties: false
+    }
+  },
+  {
+    type: 'function',
+    name: 'write_stdin',
+    description:
+      'Send stdin to a running exec_command process, poll for more output, close stdin, or terminate the process. Leave input empty to poll only. Use terminate when the process should be stopped.',
+    parameters: {
+      type: 'object',
+      properties: {
+        processId: { type: 'number' },
+        input: { type: 'string' },
+        yieldTimeMs: { type: 'number' },
+        maxOutputChars: { type: 'number' },
+        closeStdin: { type: 'boolean' },
+        terminate: { type: 'boolean' }
+      },
+      required: ['processId'],
       additionalProperties: false
     }
   },
@@ -474,12 +518,13 @@ export const MAIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
 ];
 
 export const EXPERIMENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
-  MAIN_TOOL_DEFINITIONS[0],
-  MAIN_TOOL_DEFINITIONS[1],
-  MAIN_TOOL_DEFINITIONS[2],
-  MAIN_TOOL_DEFINITIONS[3],
-  MAIN_TOOL_DEFINITIONS[4],
-  MAIN_TOOL_DEFINITIONS[5],
+  MAIN_TOOL_DEFINITIONS.find((definition) => definition.name === 'exec_command')!,
+  MAIN_TOOL_DEFINITIONS.find((definition) => definition.name === 'write_stdin')!,
+  MAIN_TOOL_DEFINITIONS.find((definition) => definition.name === 'read')!,
+  MAIN_TOOL_DEFINITIONS.find((definition) => definition.name === 'ls')!,
+  MAIN_TOOL_DEFINITIONS.find((definition) => definition.name === 'edit')!,
+  MAIN_TOOL_DEFINITIONS.find((definition) => definition.name === 'glob')!,
+  MAIN_TOOL_DEFINITIONS.find((definition) => definition.name === 'rg')!,
   {
     type: 'function',
     name: 'log_observation',
@@ -501,7 +546,7 @@ export const EXPERIMENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
       additionalProperties: false
     }
   },
-  MAIN_TOOL_DEFINITIONS[8],
+  MAIN_TOOL_DEFINITIONS.find((definition) => definition.name === 'read_experiment')!,
   {
     type: 'function',
     name: 'resolve_experiment',
@@ -634,8 +679,22 @@ async function executeToolCall(call: ToolCall, tools: AgentTools): Promise<strin
   const args = parseArguments(call.rawArguments);
 
   switch (call.name) {
-    case 'bash':
-      return tools.bash(readStringArg(args, 'command'));
+    case 'exec_command':
+      return tools.execCommand({
+        command: readStringArg(args, 'command'),
+        cwd: readOptionalStringArg(args, 'cwd'),
+        yieldTimeMs: readOptionalNumberArg(args, 'yieldTimeMs'),
+        maxOutputChars: readOptionalNumberArg(args, 'maxOutputChars')
+      });
+    case 'write_stdin':
+      return tools.writeStdin({
+        processId: readNumberArg(args, 'processId'),
+        input: readOptionalStringArg(args, 'input'),
+        yieldTimeMs: readOptionalNumberArg(args, 'yieldTimeMs'),
+        maxOutputChars: readOptionalNumberArg(args, 'maxOutputChars'),
+        closeStdin: readOptionalBooleanArg(args, 'closeStdin'),
+        terminate: readOptionalBooleanArg(args, 'terminate')
+      });
     case 'read':
       return tools.read(
         readStringArg(args, 'path'),
@@ -881,6 +940,14 @@ function readOptionalStringOrArrayArg(
 function readOptionalNumberArg(args: Record<string, unknown>, key: string): number | undefined {
   const value = args[key];
   return typeof value === 'number' && Number.isFinite(value) ? value : undefined;
+}
+
+function readNumberArg(args: Record<string, unknown>, key: string): number {
+  const value = readOptionalNumberArg(args, key);
+  if (value === undefined) {
+    throw new Error(`Missing number argument: ${key}`);
+  }
+  return value;
 }
 
 function readOptionalBooleanArg(args: Record<string, unknown>, key: string): boolean | undefined {

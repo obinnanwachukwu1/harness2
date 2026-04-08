@@ -90,7 +90,8 @@ Editing:
 - Use edit only when a small change is the cheapest way to test the hypothesis.
 
 Use the attached tool schemas as the source of truth for exact parameters. Your available tool surface is:
-- bash
+- exec_command
+- write_stdin
 - read
 - ls
 - edit

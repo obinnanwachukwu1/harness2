@@ -247,8 +247,9 @@ function summarizeToolTranscript(
       return summarizeGlobTool(body, explicitLabel);
     case 'read':
       return summarizeReadTool(body, explicitLabel);
-    case 'bash':
-      return summarizeBashTool(body, explicitLabel);
+    case 'exec_command':
+    case 'write_stdin':
+      return summarizeExecTool(toolName, body, explicitLabel);
     case 'compact':
       return summarizeCompactTool(body, explicitLabel);
     case 'spawn_experiment':
@@ -365,23 +366,50 @@ function summarizeReadTool(body: string, explicitLabel: string | null) {
   };
 }
 
-function summarizeBashTool(body: string, explicitLabel: string | null) {
-  const rows = body.split(/\r?\n/);
-  const command = rows.find((line) => line.startsWith('$ '))?.slice(2).trim() ?? '(command)';
-  const exitLine = rows.find((line) => line.startsWith('exit:')) ?? 'exit: ?';
-  const stdoutIndex = rows.findIndex((line) => line === 'stdout:');
-  const stderrIndex = rows.findIndex((line) => line === 'stderr:');
-  const outputStart = stdoutIndex >= 0 ? stdoutIndex + 1 : stderrIndex >= 0 ? stderrIndex + 1 : -1;
-  const outputLines =
-    outputStart >= 0
-      ? rows.slice(outputStart).filter((line) => line.trim().length > 0)
-      : rows.filter((line) => !line.startsWith('$ ') && !line.startsWith('exit:'));
-  const preview = outputLines.slice(0, 4);
+function summarizeExecTool(toolName: string, body: string, explicitLabel: string | null) {
+  const parsed = safeJsonParse(body);
+  if (!parsed || typeof parsed !== 'object') {
+    return summarizeGenericTool(toolName, body, explicitLabel, false);
+  }
+
+  const maybeObject = parsed as Record<string, unknown>;
+  const previewLines: string[] = [];
+  const command =
+    typeof maybeObject.command === 'string' && maybeObject.command.trim().length > 0
+      ? maybeObject.command
+      : null;
+  const processId =
+    typeof maybeObject.processId === 'number' && Number.isFinite(maybeObject.processId)
+      ? Math.floor(maybeObject.processId)
+      : null;
+  const exitCode =
+    typeof maybeObject.exitCode === 'number' && Number.isFinite(maybeObject.exitCode)
+      ? Math.floor(maybeObject.exitCode)
+      : maybeObject.exitCode === null
+        ? null
+        : '?';
+  const running = maybeObject.running === true;
+
+  if (processId !== null) {
+    previewLines.push(`process  ${processId}`);
+  }
+  previewLines.push(running ? 'status  running' : `exit  ${exitCode ?? '?'}`);
+
+  const stdout = typeof maybeObject.stdout === 'string' ? maybeObject.stdout : '';
+  const stderr = typeof maybeObject.stderr === 'string' ? maybeObject.stderr : '';
+  const outputLines = collapseBlankRuns(
+    [stdout, stderr]
+      .filter((value) => value.trim().length > 0)
+      .flatMap((value) => value.split(/\r?\n/))
+  );
+  previewLines.push(...outputLines.slice(0, 3).map((line) => compactText(line, 92)));
 
   return {
-    label: explicitLabel || `Bash(${compactText(command, 52)})`,
-    previewLines: [exitLine.replace(/^exit:\s*/, 'exit '), ...preview],
-    footer: outputLines.length > preview.length ? `(${outputLines.length - preview.length} more lines)` : null
+    label:
+      explicitLabel ||
+      (command ? `Exec(${compactText(command, 52)})` : processId !== null ? `Exec(${processId})` : 'Exec'),
+    previewLines: previewLines.slice(0, 4),
+    footer: outputLines.length > 3 ? `(${outputLines.length - 3} more lines)` : null
   };
 }
 

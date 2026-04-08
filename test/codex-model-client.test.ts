@@ -182,7 +182,8 @@ test('CodexModelClient performs tool round-trips and persists the latest respons
   const liveToolEvents: Array<{ phase: 'start' | 'finish'; toolCallId: string; toolName?: string; label?: string }> =
     [];
   const tools: AgentTools = {
-    bash: async () => '',
+    execCommand: async () => '',
+    writeStdin: async () => '',
     read: async (filePath) => `read ${filePath}`,
     write: async () => '',
     edit: async () => '',
@@ -332,7 +333,8 @@ test('CodexModelClient sends the built-in web_search tool when enabled', async (
   });
 
   const tools: AgentTools = {
-    bash: async () => '',
+    execCommand: async () => '',
+    writeStdin: async () => '',
     read: async () => '',
     write: async () => '',
     edit: async () => '',
@@ -422,10 +424,11 @@ test('CodexModelClient does not route provider-executed web search through the l
   const emitted: Array<{ role: TranscriptRole; text: string }> = [];
   const liveToolEvents: Array<{ phase: 'start' | 'finish'; toolCallId: string; toolName?: string }> = [];
   const tools: AgentTools = {
-    bash: async () => {
+    execCommand: async () => {
       localToolExecutions += 1;
       return '';
     },
+    writeStdin: async () => '',
     read: async () => {
       localToolExecutions += 1;
       return '';
@@ -555,7 +558,8 @@ test('CodexModelClient does not leak provider web search fallback text when quer
   });
 
   const tools: AgentTools = {
-    bash: async () => '',
+    execCommand: async () => '',
+    writeStdin: async () => '',
     read: async () => '',
     ls: async () => '',
     write: async () => '',
@@ -649,7 +653,8 @@ test('CodexModelClient executes independent read-only tool calls in parallel whi
   const toolEvents: string[] = [];
   const emitted: Array<{ role: TranscriptRole; text: string }> = [];
   const tools: AgentTools = {
-    bash: async () => '',
+    execCommand: async () => '',
+    writeStdin: async () => '',
     read: async (filePath) => {
       toolEvents.push(`start:read:${filePath}`);
       await new Promise((resolve) => setTimeout(resolve, 40));
@@ -751,7 +756,8 @@ test('CodexModelClient surfaces streaming assistant deltas before completion', a
   const streamed: string[] = [];
   const emitted: Array<{ role: TranscriptRole; text: string }> = [];
   const tools: AgentTools = {
-    bash: async () => '',
+    execCommand: async () => '',
+    writeStdin: async () => '',
     read: async () => '',
     write: async () => '',
     edit: async () => '',
@@ -838,7 +844,7 @@ test('CodexModelClient injects an observation hint for experiment subagents afte
       if (responseCount === 2) {
         return createResponsesStream([
           responseCreated('resp_2'),
-          functionCallDone('call_bash_1', 'bash', { command: 'pwd' }, 0),
+          functionCallDone('call_exec_1', 'exec_command', { command: 'pwd' }, 0),
           functionCallDone('call_glob_1', 'glob', { pattern: '*.ts' }, 1),
           responseCompleted('resp_2')
         ]);
@@ -853,7 +859,8 @@ test('CodexModelClient injects an observation hint for experiment subagents afte
   });
 
   const tools: AgentTools = {
-    bash: async () => 'pwd',
+    execCommand: async () => 'pwd',
+    writeStdin: async () => '',
     read: async () => 'read result',
     write: async () => '',
     edit: async () => '',
@@ -942,7 +949,8 @@ test('CodexModelClient surfaces streaming content-part events before completion'
   const streamed: string[] = [];
   const emitted: Array<{ role: TranscriptRole; text: string }> = [];
   const tools: AgentTools = {
-    bash: async () => '',
+    execCommand: async () => '',
+    writeStdin: async () => '',
     read: async () => '',
     write: async () => '',
     edit: async () => '',
@@ -1039,7 +1047,8 @@ test('CodexModelClient does not duplicate live assistant text when final snapsho
   const streamed: string[] = [];
   const emitted: Array<{ role: TranscriptRole; text: string }> = [];
   const tools: AgentTools = {
-    bash: async () => '',
+    execCommand: async () => '',
+    writeStdin: async () => '',
     read: async () => '',
     write: async () => '',
     edit: async () => '',
@@ -1170,7 +1179,8 @@ test('CodexModelClient rebuilds requests from latest checkpoint plus recent tail
   });
 
   const tools: AgentTools = {
-    bash: async () => '',
+    execCommand: async () => '',
+    writeStdin: async () => '',
     read: async () => '',
     write: async () => '',
     edit: async () => '',
@@ -1299,7 +1309,8 @@ test('CodexModelClient does not inject open question reminder developer messages
   });
 
   const tools: AgentTools = {
-    bash: async () => '',
+    execCommand: async () => '',
+    writeStdin: async () => '',
     read: async () => '',
     write: async () => '',
     edit: async () => '',
@@ -1391,7 +1402,8 @@ test('CodexModelClient turns tool-call failures into tool outputs so the loop ca
 
   const emitted: Array<{ role: TranscriptRole; text: string }> = [];
   const tools: AgentTools = {
-    bash: async () => '',
+    execCommand: async () => '',
+    writeStdin: async () => '',
     read: async () => '',
     write: async () => '',
     edit: async () => '',
@@ -1508,7 +1520,8 @@ test('CodexModelClient retries transient 500 responses before succeeding', async
 
   const emitted: Array<{ role: TranscriptRole; text: string }> = [];
   const tools: AgentTools = {
-    bash: async () => '',
+    execCommand: async () => '',
+    writeStdin: async () => '',
     read: async () => '',
     write: async () => '',
     edit: async () => '',
@@ -1585,7 +1598,8 @@ test('CodexModelClient preserves streamed visible text when completed payload om
   const emitted: Array<{ role: TranscriptRole; text: string }> = [];
   const streamed: string[] = [];
   const tools: AgentTools = {
-    bash: async () => '',
+    execCommand: async () => '',
+    writeStdin: async () => '',
     read: async () => '',
     write: async () => '',
     edit: async () => '',
@@ -1674,7 +1688,8 @@ test('CodexModelClient reconstructs streamed tool calls when completed payload o
 
   const emitted: Array<{ role: TranscriptRole; text: string }> = [];
   const tools: AgentTools = {
-    bash: async () => '',
+    execCommand: async () => '',
+    writeStdin: async () => '',
     read: async (filePath) => `read ${filePath}`,
     write: async () => '',
     edit: async () => '',
@@ -1761,7 +1776,8 @@ test('CodexModelClient formats ranged read tool headers', async (t) => {
 
   const emitted: Array<{ role: TranscriptRole; text: string }> = [];
   const tools: AgentTools = {
-    bash: async () => '',
+    execCommand: async () => '',
+    writeStdin: async () => '',
     read: async (filePath, startLine, endLine) => `read ${filePath} ${startLine}-${endLine}`,
     write: async () => '',
     edit: async () => '',
