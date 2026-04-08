@@ -1700,6 +1700,7 @@ function buildEarlyStudyOpportunityHint(): string {
     'Harness hint:',
     'You likely have enough context to launch one bounded study now.',
     'If this uncertainty could change the implementation choice and there is known-safe work you can continue in parallel, spawn the study early instead of waiting until you are blocked.',
+    'If there are two distinct unresolved claims, separate them instead of forcing one study to do everything.',
     'Keep the study narrow, concrete, and falsifiable.'
   ].join(' ');
 }
@@ -1709,7 +1710,7 @@ function buildExperimentHint(): string {
     'Harness hint:',
     'You are still circling a studyable uncertainty inline without yet launching a bounded study.',
     'If spawn_experiment can settle this more cheaply than more background probing, run one narrow study now.',
-    'Prefer a concrete falsifier over more read/rg churn.'
+    'Prefer a concrete falsifier over more read/rg churn, and separate distinct hypotheses instead of collapsing them into one vague study.'
   ].join(' ');
 }
 
@@ -1847,7 +1848,7 @@ export const MAIN_TOOL_DEFINITIONS = [
     type: 'function',
     name: 'spawn_experiment',
     description:
-      'Run a scoped experiment in a separate git worktree. Use this when the uncertainty is load-bearing and a bounded disposable study is the cheapest reliable way to answer the residual uncertainty after a focused local evidence pass. Do not use it to repeat the same local inspection the main thread can already perform directly. If an open question exists, this experiment must be tied to that question via questionId and should test the single residual uncertainty that static inspection has not settled yet, not restate the whole implementation plan. localEvidenceSummary should say what the focused local pass already established. residualUncertainty should name the one thing still unresolved that this experiment is meant to answer. If resolving the question requires a live external or secret-backed runtime probe and you can continue independent safe work in parallel, prefer spawning that probe as an experiment instead of blocking on it inline. If one focused local evidence pass is likely to settle the question directly, finish that pass before spawning. If inspection already settles the question, resolve it statically instead of spawning. If you do not have a strong reason to choose a smaller number, use a 50000 token budget.',
+      'Run a scoped experiment in a separate git worktree. Use this when the uncertainty is load-bearing and a bounded disposable study is the cheapest reliable way to answer the residual uncertainty after a focused local evidence pass. Do not use it to repeat the same local inspection the main thread can already perform directly. If an open question exists, this experiment must be tied to that question via questionId and should test the single residual uncertainty that static inspection has not settled yet, not restate the whole implementation plan. localEvidenceSummary should say what the focused local pass already established. residualUncertainty should name the one thing still unresolved that this experiment is meant to answer. Exploration should help reject plausible alternatives, not just confirm your preferred path. Default to one main evidence path for a dependent implementation decision; only open separate questions or run parallel experiments when they test orthogonal falsifiers or genuinely independent unresolved claims. If resolving the question requires a live external or secret-backed runtime probe and you can continue independent safe work in parallel, prefer spawning that probe as an experiment instead of blocking on it inline. If one focused local evidence pass is likely to settle the question directly, finish that pass before spawning. If inspection already settles the question, resolve it statically instead of spawning. If you do not have a strong reason to choose a smaller number, use a 50000 token budget.',
     parameters: {
       type: 'object',
       properties: {
@@ -1910,7 +1911,7 @@ export const MAIN_TOOL_DEFINITIONS = [
     type: 'function',
     name: 'search_experiments',
     description:
-      'Search prior experiment history for evidence relevant to the current question. Do not use this as ad hoc memory lookup or precedent fishing. First articulate the live question, explicitly say why no question is needed, or resume a previously opened question; then search for prior findings that may answer or narrow that current uncertainty.',
+      'Search prior experiment history for evidence relevant to the current question. Prior experiment search is never the first step on a new task. Do not use this as ad hoc memory lookup or precedent fishing. First articulate the live question, explicitly say why no question is needed, or resume a previously opened question; then search for prior findings that may answer or narrow that current uncertainty.',
     parameters: {
       type: 'object',
       properties: {
@@ -1923,7 +1924,7 @@ export const MAIN_TOOL_DEFINITIONS = [
     type: 'function',
     name: 'open_question',
     description:
-      'Declare an unresolved, load-bearing open question before editing code that depends on it. Use this when being wrong could materially change the implementation choice. Choose the question that would most change the architecture, state model, runtime behavior, protocol handling, recovery semantics, or continuity assumptions if answered differently. Do not spend an open question on a quick framework or library capability check that one focused local read, doc slice, or tiny inline probe can settle immediately unless that capability is the true blocker. If the only way to answer the uncertainty is a live external or secret-backed runtime probe, open the question first even if you expect the probe to be quick. Once declared, dependent main-workspace edits are blocked until the question is resolved. Opening a question does not require an experiment; you can resolve it with quick static evidence, a small inline probe, or a bounded study.',
+      'Declare an unresolved, load-bearing open question before editing code that depends on it. Use this when being wrong could materially change the implementation choice. Choose the question that would most change the architecture, state model, runtime behavior, protocol handling, recovery semantics, continuity assumptions, or durable product contract if answered differently. In fresh or near-empty repos, do not open a question just because more than one architecture exists; open one only when the prompt leaves a durable product contract underdetermined and silently choosing one interpretation would likely surprise the user or materially change downstream behavior. Do not spend an open question on a quick framework or library capability check that one focused local read, doc slice, or tiny inline probe can settle immediately unless that capability is the true blocker. If the only way to answer the uncertainty is a live external or secret-backed runtime probe, open the question first even if you expect the probe to be quick. Once declared, dependent main-workspace edits are blocked until the question is resolved. Opening a question does not require an experiment; you can resolve it with quick static evidence, a small inline probe, or a bounded study.',
     parameters: {
       type: 'object',
       properties: {
