@@ -201,7 +201,17 @@ export class PrototypeRunner {
         if (!hypothesis) {
           await context.emit(
             'assistant',
-            `Usage: /spawn --hypothesis "..." [--budget ${DEFAULT_EXPERIMENT_BUDGET_TOKENS}] [--context "..."] [--preserve]`
+            `Usage: /spawn --hypothesis "..." --local-evidence "..." --residual-uncertainty "..." [--budget ${DEFAULT_EXPERIMENT_BUDGET_TOKENS}] [--context "..."] [--preserve]`
+          );
+          return;
+        }
+
+        const localEvidenceSummary = flags.get('local-evidence');
+        const residualUncertainty = flags.get('residual-uncertainty');
+        if (!localEvidenceSummary || !residualUncertainty) {
+          await context.emit(
+            'assistant',
+            'Spawning an experiment now requires --local-evidence and --residual-uncertainty so the study is tied to the focused local pass and the remaining unresolved claim.'
           );
           return;
         }
@@ -217,6 +227,8 @@ export class PrototypeRunner {
 
         const experiment = await context.tools.spawnExperiment({
           hypothesis,
+          localEvidenceSummary,
+          residualUncertainty,
           context: flags.get('context'),
           budgetTokens: budget,
           preserve: flags.has('preserve')
@@ -298,6 +310,10 @@ export class PrototypeRunner {
 
         const query = rawArgs.join(' ').trim();
         const matches = await context.tools.searchExperiments(query || undefined);
+        if (!Array.isArray(matches)) {
+          await context.emit('assistant', [matches.guardrail, ...matches.suggestedNext].join('\n'));
+          return;
+        }
         if (matches.length === 0) {
           await context.emit('assistant', query ? `No experiments matched "${query}".` : 'No experiments found.');
           return;

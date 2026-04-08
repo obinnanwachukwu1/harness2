@@ -33,21 +33,21 @@ test('HeadlessEngine routes slash commands through the prototype runner', async 
 
   await engine.submit('/write notes.txt :: hello from harness2');
   await engine.submit('/read notes.txt');
-  await engine.submit('/spawn --hypothesis "inspect the repo in isolation"');
+  await engine.submit(
+    '/spawn --hypothesis "inspect the repo in isolation" --local-evidence "The repo has a notes file and the main workspace is writable." --residual-uncertainty "Whether an isolated worktree can inspect the repo safely without touching the main workspace."'
+  );
 
   await waitFor(
     () => engine.snapshot.experiments[0],
-    (experiment) => Boolean(experiment) && experiment.status !== 'running'
+    (experiment) => Boolean(experiment)
   );
 
   const transcript = engine.snapshot.transcript.map((entry) => entry.text).join('\n\n');
   assert.match(transcript, /Wrote 19 chars to notes\.txt\./);
   assert.match(transcript, /notes\.txt/);
   assert.match(transcript, /Spawned exp-/);
-  assert.match(transcript, /Experiment resolved/);
   assert.equal(engine.snapshot.experiments.length, 1);
   assert.equal(engine.snapshot.experiments[0]?.budget, DEFAULT_EXPERIMENT_BUDGET_TOKENS);
-  assert.equal(engine.snapshot.experiments[0]?.finalVerdict, 'inconclusive');
 
   const notebook = (engine as any).options.notebook;
   const modelHistory = notebook.listModelHistory(engine.snapshot.session.id);
@@ -55,18 +55,9 @@ test('HeadlessEngine routes slash commands through the prototype runner', async 
     modelHistory.some(
       (item: any) =>
         item.type === 'message' &&
-        item.role === 'developer' &&
+        item.role === 'assistant' &&
         typeof item.content === 'string' &&
-        item.content.includes('Experiment resolved')
-    )
-  );
-  assert.ok(
-    modelHistory.some(
-      (item: any) =>
-        item.type === 'message' &&
-        item.role === 'developer' &&
-        typeof item.content === 'string' &&
-        item.content.includes('verdict: inconclusive')
+        item.content.includes('Spawned exp-')
     )
   );
 });
@@ -233,12 +224,15 @@ test('HeadlessEngine persists a thinking summary once and clears the live overla
     (engine as any).model.runTurn = originalRunTurn;
   });
 
-  const snapshots: Array<{ role: string; liveReasoningSummary: string | null }> = [];
+  const snapshots: Array<{ role: string; liveThinkingText: string | null }> = [];
   await engine.submit('inspect it', {
     onTranscriptEntry: async (role) => {
       snapshots.push({
         role,
-        liveReasoningSummary: engine.snapshot.liveReasoningSummary
+        liveThinkingText:
+          [...engine.snapshot.liveTurnEvents]
+            .reverse()
+            .find((event) => event.kind === 'thinking' && event.live)?.text ?? null
       });
     }
   });
@@ -247,10 +241,106 @@ test('HeadlessEngine persists a thinking summary once and clears the live overla
     (entry) => entry.role === 'system' && entry.text.startsWith('@@thinking\t')
   );
   assert.equal(thinkingEntries.length, 1);
-  assert.equal(engine.snapshot.liveReasoningSummary, null);
+  assert.equal(engine.snapshot.liveTurnEvents.some((event) => event.kind === 'thinking' && event.live), false);
   assert.equal(
-    snapshots.find((entry) => entry.role === 'system')?.liveReasoningSummary,
+    snapshots.find((entry) => entry.role === 'system')?.liveThinkingText,
     null
+  );
+});
+
+test('HeadlessEngine preserves completed tool events until the next turn starts', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  let releaseToolFinish: (() => void) | null = null;
+  const toolFinished = new Promise<void>((resolve) => {
+    releaseToolFinish = resolve;
+  });
+
+  const originalRunTurn = (engine as any).model.runTurn;
+  (engine as any).model.runTurn = async (
+    _sessionId: string,
+    _input: string,
+    _tools: unknown,
+    emit: (role: string, text: string) => Promise<void>,
+    _onAssistantStream: ((text: string) => Promise<void>) | undefined,
+    _onReasoningSummaryStream: ((text: string) => Promise<void>) | undefined,
+    _thinkingEnabled: boolean,
+    _toolDefinitions: unknown,
+    _instructions: string,
+    onToolCallStart: ((toolCall: {
+      toolCallId: string;
+      toolName: string;
+      label: string;
+      detail?: string | null;
+      body?: string[];
+      providerExecuted?: boolean;
+    }) => Promise<void>) | undefined,
+    onToolCallFinish: ((toolCallId: string, transcriptText?: string) => Promise<void>) | undefined
+  ) => {
+    await onToolCallStart?.({
+      toolCallId: 'call_bash_1',
+      toolName: 'bash',
+      label: 'Bash(pwd)',
+      detail: 'running…',
+      body: ['command: pwd'],
+      providerExecuted: false
+    });
+    await toolFinished;
+    const transcriptText = '@@tool\tbash\tBash(pwd)\nexit: 0\nstdout:\n/tmp/repo';
+    await emit('tool', transcriptText);
+    await onToolCallFinish?.('call_bash_1', transcriptText);
+  };
+  t.after(() => {
+    (engine as any).model.runTurn = originalRunTurn;
+  });
+
+  const submitPromise = engine.submit('run the check');
+
+  await waitFor(
+    () => engine.snapshot.liveTurnEvents.find((event) => event.kind === 'tool' && event.live),
+    (toolEvent) => Boolean(toolEvent)
+  );
+
+  assert.deepEqual(engine.snapshot.liveTurnEvents.find((event) => event.kind === 'tool' && event.live), {
+    id: 'live-tool-1',
+    kind: 'tool',
+    transcriptText: null,
+    live: true,
+    callId: 'call_bash_1',
+    toolName: 'bash',
+    label: 'Bash(pwd)',
+    detail: 'running…',
+    body: ['command: pwd'],
+    providerExecuted: false
+  });
+
+  releaseToolFinish?.();
+  await submitPromise;
+  assert.deepEqual(engine.snapshot.liveTurnEvents, [
+    {
+      id: 'live-tool-1',
+      kind: 'tool',
+      transcriptText: '@@tool\tbash\tBash(pwd)\nexit: 0\nstdout:\n/tmp/repo',
+      live: false,
+      callId: 'call_bash_1',
+      toolName: null,
+      label: null,
+      detail: null,
+      body: [],
+      providerExecuted: false
+    }
+  ]);
+
+  await engine.submit('/read README.md');
+  assert.equal(
+    engine.snapshot.liveTurnEvents.some(
+      (event) => event.kind === 'tool' && event.callId === 'call_bash_1'
+    ),
+    false
   );
 });
 
@@ -538,6 +628,8 @@ test('HeadlessEngine requires questionId when spawning an experiment with an ope
     () =>
       (engine as any).spawnExperiment({
         hypothesis: 'probe continuity handling',
+        localEvidenceSummary: 'The repo suggests continuity may cross auth boundaries.',
+        residualUncertainty: 'Whether the current flow preserves the same chat after sign-in.',
         budgetTokens: 1200,
         preserve: false
       }),
@@ -548,6 +640,8 @@ test('HeadlessEngine requires questionId when spawning an experiment with an ope
     (engine as any).spawnExperiment({
       questionId: debt.id,
       hypothesis: 'probe continuity handling',
+      localEvidenceSummary: 'The repo suggests continuity may cross auth boundaries.',
+      residualUncertainty: 'Whether the current flow preserves the same chat after sign-in.',
       budgetTokens: 1200,
       preserve: false
     })
@@ -574,6 +668,8 @@ test('HeadlessEngine rejects spawn_experiment pinned to an unknown or closed que
       (engine as any).spawnExperiment({
         questionId: 'question-missing',
         hypothesis: 'probe continuity handling',
+        localEvidenceSummary: 'The repo suggests continuity may cross auth boundaries.',
+        residualUncertainty: 'Whether the current flow preserves the same chat after sign-in.',
         budgetTokens: 1200,
         preserve: false
       }),
@@ -591,11 +687,33 @@ test('HeadlessEngine rejects spawn_experiment pinned to an unknown or closed que
       (engine as any).spawnExperiment({
         questionId: debt.id,
         hypothesis: 'probe continuity handling',
+        localEvidenceSummary: 'The repo suggests continuity may cross auth boundaries.',
+        residualUncertainty: 'Whether the current flow preserves the same chat after sign-in.',
         budgetTokens: 1200,
         preserve: false
       }),
     /already closed/
   );
+});
+
+test('HeadlessEngine searchExperiments returns a guardrail when no current question is open', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const result = await (engine as any).searchExperiments('oauth');
+  assert.deepEqual(result, {
+    ok: false,
+    guardrail:
+      'search_experiments is subordinate to the current task. Open the live question first, or explicitly say why no question is needed before searching prior experiments.',
+    suggestedNext: [
+      'Name the implementation-changing uncertainty.',
+      'Open the question if dependent edits rely on it.',
+      'Then search for prior findings only if they may answer or narrow that same question.'
+    ]
+  });
 });
 
 test('HeadlessEngine rejects resolving an open question as static evidence after a linked invalidation', async (t) => {

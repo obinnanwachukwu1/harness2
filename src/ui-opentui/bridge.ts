@@ -2,6 +2,7 @@
 import readline from 'node:readline';
 
 import { HeadlessEngine } from '../engine/headless-engine.js';
+import { formatUnknownError } from '../lib/utils.js';
 import type { OpenTuiBridgeCommand, OpenTuiBridgeEvent } from './protocol.js';
 import { buildOpenTuiState } from './render-state.js';
 
@@ -81,7 +82,7 @@ async function main(): Promise<void> {
           void engine.submit(command.text).catch((error) => {
             send({
               type: 'error',
-              message: error instanceof Error ? error.message : String(error)
+              message: formatUnknownError(error)
             });
           });
           break;
@@ -101,7 +102,7 @@ async function main(): Promise<void> {
     } catch (error) {
       send({
         type: 'error',
-        message: error instanceof Error ? error.message : String(error)
+        message: formatUnknownError(error)
       });
     }
   }
@@ -140,7 +141,7 @@ function parseArgs(args: string[]): { cwd: string; sessionId?: string } {
 }
 
 main().catch((error) => {
-  const message = error instanceof Error ? error.message : String(error);
+  const message = formatUnknownError(error);
   process.stderr.write(`${message}\n`);
   process.exit(1);
 });

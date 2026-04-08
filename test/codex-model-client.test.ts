@@ -88,6 +88,18 @@ function webSearchCallDone(
   };
 }
 
+function webSearchCallAdded(id: string, outputIndex = 0) {
+  return {
+    type: 'response.output_item.added',
+    output_index: outputIndex,
+    item: {
+      type: 'web_search_call',
+      id,
+      status: 'in_progress'
+    }
+  };
+}
+
 test('CodexModelClient performs tool round-trips and persists the latest response id', async (t) => {
   const tempDir = await createTempDir('h2-model-');
   t.after(async () => cleanupDir(tempDir));
@@ -150,6 +162,8 @@ test('CodexModelClient performs tool round-trips and persists the latest respons
 
   const emitted: Array<{ role: TranscriptRole; text: string }> = [];
   const streamed: string[] = [];
+  const liveToolEvents: Array<{ phase: 'start' | 'finish'; toolCallId: string; toolName?: string; label?: string }> =
+    [];
   const tools: AgentTools = {
     bash: async () => '',
     read: async (filePath) => `read ${filePath}`,
@@ -182,6 +196,24 @@ test('CodexModelClient performs tool round-trips and persists the latest respons
     },
     async (text) => {
       streamed.push(text);
+    },
+    undefined,
+    false,
+    undefined,
+    undefined,
+    async (toolCall) => {
+      liveToolEvents.push({
+        phase: 'start',
+        toolCallId: toolCall.toolCallId,
+        toolName: toolCall.toolName,
+        label: toolCall.label
+      });
+    },
+    async (toolCallId) => {
+      liveToolEvents.push({
+        phase: 'finish',
+        toolCallId
+      });
     }
   );
 
@@ -210,6 +242,18 @@ test('CodexModelClient performs tool round-trips and persists the latest respons
 
   assert.equal(notebook.getModelSession('session-test')?.previousResponseId, 'resp_2');
   assert.deepEqual(streamed, ['Done reading the file.']);
+  assert.deepEqual(liveToolEvents, [
+    {
+      phase: 'start',
+      toolCallId: 'call_1',
+      toolName: 'read',
+      label: 'Read(README.md)'
+    },
+    {
+      phase: 'finish',
+      toolCallId: 'call_1'
+    }
+  ]);
   assert.equal(emitted[0]?.role, 'tool');
   assert.match(emitted[0]?.text ?? '', /^@@tool\tread\tRead\(README\.md\)/);
   assert.equal(emitted[1]?.role, 'assistant');
@@ -346,6 +390,7 @@ test('CodexModelClient does not route provider-executed web search through the l
     fetchImpl: async () =>
       createResponsesStream([
         responseCreated('resp_1'),
+        webSearchCallAdded('ws_1'),
         webSearchCallDone('ws_1', 'weather seattle'),
         {
           type: 'response.output_text.delta',
@@ -358,6 +403,7 @@ test('CodexModelClient does not route provider-executed web search through the l
 
   let localToolExecutions = 0;
   const emitted: Array<{ role: TranscriptRole; text: string }> = [];
+  const liveToolEvents: Array<{ phase: 'start' | 'finish'; toolCallId: string; toolName?: string }> = [];
   const tools: AgentTools = {
     bash: async () => {
       localToolExecutions += 1;
@@ -407,10 +453,39 @@ test('CodexModelClient does not route provider-executed web search through the l
     tools,
     async (role, text) => {
       emitted.push({ role, text });
+    },
+    undefined,
+    undefined,
+    false,
+    undefined,
+    undefined,
+    async (toolCall) => {
+      liveToolEvents.push({
+        phase: 'start',
+        toolCallId: toolCall.toolCallId,
+        toolName: toolCall.toolName
+      });
+    },
+    async (toolCallId) => {
+      liveToolEvents.push({
+        phase: 'finish',
+        toolCallId
+      });
     }
   );
 
   assert.equal(localToolExecutions, 0);
+  assert.deepEqual(liveToolEvents, [
+    {
+      phase: 'start',
+      toolCallId: 'ws_1',
+      toolName: 'web_search'
+    },
+    {
+      phase: 'finish',
+      toolCallId: 'ws_1'
+    }
+  ]);
   assert.equal(emitted[0]?.role, 'tool');
   assert.match(emitted[0]?.text ?? '', /^@@tool\tweb_search\tWebSearch\(weather seattle\)/);
   assert.equal(emitted[1]?.role, 'assistant');
@@ -751,7 +826,11 @@ test('CodexModelClient injects a post-spawn wait hint after repeated probing', a
       if (responseCount === 1) {
         return createResponsesStream([
           responseCreated('resp_1'),
-          functionCallDone('call_spawn', 'spawn_experiment', { hypothesis: 'test it' }),
+          functionCallDone('call_spawn', 'spawn_experiment', {
+            hypothesis: 'test it',
+            localEvidenceSummary: 'The repo already shows the suspected code path.',
+            residualUncertainty: 'Whether the isolated repro actually confirms the bug.'
+          }),
           responseCompleted('resp_1')
         ]);
       }
@@ -1503,6 +1582,8 @@ test('CodexModelClient turns tool-call failures into tool outputs so the loop ca
           responseCreated('resp_1'),
           functionCallDone('call_1', 'spawn_experiment', {
             hypothesis: 'test concurrency guard',
+            localEvidenceSummary: 'The repo already points to the suspected concurrency limit.',
+            residualUncertainty: 'Whether the harness will refuse a sixth concurrent experiment.',
             budgetTokens: 1200
           }),
           responseCompleted('resp_1')
@@ -1563,7 +1644,8 @@ test('CodexModelClient turns tool-call failures into tool outputs so the loop ca
       type: 'function_call',
       call_id: 'call_1',
       name: 'spawn_experiment',
-      arguments: '{"hypothesis":"test concurrency guard","budgetTokens":1200}'
+      arguments:
+        '{"hypothesis":"test concurrency guard","localEvidenceSummary":"The repo already points to the suspected concurrency limit.","residualUncertainty":"Whether the harness will refuse a sixth concurrent experiment.","budgetTokens":1200}'
     },
     {
       type: 'function_call_output',

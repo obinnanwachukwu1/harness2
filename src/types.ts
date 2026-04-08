@@ -149,6 +149,12 @@ export interface ExperimentSearchResult {
   discovered: string[];
 }
 
+export interface ExperimentSearchGuardrail {
+  ok: false;
+  guardrail: string;
+  suggestedNext: string[];
+}
+
 export interface ExperimentWaitResult {
   timedOut: boolean;
   experimentId: string;
@@ -265,21 +271,49 @@ export interface EngineSnapshot {
   transcript: TranscriptEntry[];
   experiments: ExperimentRecord[];
   processingTurn: boolean;
+  currentTurnStartedAt: string | null;
   statusText: string;
   model: string;
   reasoningEffort: 'low' | 'medium' | 'high' | null;
   estimatedContextTokens: number;
   contextWindowTokens: number;
   standardRateContextTokens: number | null;
-  liveAssistantText: string | null;
-  liveReasoningSummary: string | null;
+  liveTurnEvents: LiveTurnEvent[];
   thinkingEnabled: boolean;
 }
+
+export type LiveTurnEvent =
+  | {
+      id: string;
+      kind: 'assistant';
+      text: string;
+      live: boolean;
+    }
+  | {
+      id: string;
+      kind: 'thinking';
+      text: string;
+      live: boolean;
+    }
+  | {
+      id: string;
+      kind: 'tool';
+      transcriptText: string | null;
+      live: boolean;
+      callId: string | null;
+      toolName: string | null;
+      label: string | null;
+      detail: string | null;
+      body: string[];
+      providerExecuted: boolean;
+    };
 
 export interface SpawnExperimentInput {
   sessionId: string;
   studyDebtId?: string;
   hypothesis: string;
+  localEvidenceSummary: string;
+  residualUncertainty: string;
   context?: string;
   budgetTokens: number;
   preserve: boolean;
@@ -316,7 +350,9 @@ export interface AgentTools {
     lastObservationSnippet: string | null;
     lowSignalWarningEmitted: boolean;
   }>;
-  searchExperiments?(query?: string): Promise<ExperimentSearchResult[]>;
+  searchExperiments?(
+    query?: string
+  ): Promise<ExperimentSearchResult[] | ExperimentSearchGuardrail>;
   openStudyDebt?(input: {
     summary: string;
     whyItMatters: string;

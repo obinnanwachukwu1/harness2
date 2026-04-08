@@ -1,4 +1,4 @@
-import { mkdir, access } from 'node:fs/promises';
+import { mkdir, access, copyFile, readdir, lstat } from 'node:fs/promises';
 import path from 'node:path';
 
 import { execa } from 'execa';
@@ -30,6 +30,29 @@ interface ExperimentManagerOptions {
 
 const MAX_RUNNING_EXPERIMENTS = 5;
 const LOW_SIGNAL_TOOL_OUTPUT_THRESHOLD = 1_200;
+const MAX_MIRRORED_ENV_FILES = 100;
+const MIRRORED_ENV_BASENAMES = new Set([
+  '.env',
+  '.env.local',
+  '.env.development',
+  '.env.development.local',
+  '.env.test',
+  '.env.test.local',
+  '.env.production',
+  '.env.production.local'
+]);
+const IGNORED_ENV_SCAN_DIRS = new Set([
+  '.git',
+  '.h2',
+  '.harness2',
+  'node_modules',
+  '.next',
+  'dist',
+  'build',
+  'coverage',
+  '.turbo',
+  '.cache'
+]);
 
 export class ExperimentBudgetExceededError extends Error {
   constructor(experimentId: string) {
@@ -62,6 +85,7 @@ export class ExperimentManager {
     await execa('git', ['worktree', 'add', '-b', branchName, worktreePath, baseCommitSha], {
       cwd: this.options.cwd
     });
+    const mirroredEnvFiles = await mirrorExperimentEnvFiles(this.options.cwd, worktreePath);
 
     this.options.notebook.createSession(this.getExperimentSessionId(id), worktreePath);
 
@@ -97,12 +121,32 @@ export class ExperimentManager {
 
     this.activeRecords.set(record.id, record);
     this.consumeTokens(record, `Hypothesis: ${record.hypothesis}`, 'context');
+    this.consumeTokens(record, `Local evidence: ${input.localEvidenceSummary}`, 'context');
+    this.consumeTokens(record, `Residual uncertainty: ${input.residualUncertainty}`, 'context');
     if (record.context) {
       this.consumeTokens(record, `Context: ${record.context}`, 'context');
     }
     this.options.notebook.upsertExperiment(record);
     await this.appendObservation(record, `Spawned isolated worktree at ${record.worktreePath}.`, ['discovery']);
+    if (mirroredEnvFiles.length > 0) {
+      await this.appendObservation(
+        record,
+        `Mirrored repo-local env files into the worktree: ${mirroredEnvFiles.join(', ')}.`,
+        ['discovery'],
+        { countBudget: false }
+      );
+    }
     await this.appendObservation(record, `Hypothesis: ${record.hypothesis}`, ['question']);
+    await this.appendObservation(
+      record,
+      `Local evidence already established: ${input.localEvidenceSummary}`,
+      ['discovery']
+    );
+    await this.appendObservation(
+      record,
+      `Residual uncertainty under test: ${input.residualUncertainty}`,
+      ['question']
+    );
     if (record.context) {
       await this.appendObservation(record, `Context: ${record.context}`, ['discovery']);
     }
@@ -518,6 +562,70 @@ export class ExperimentManager {
   }
 }
 
+async function mirrorExperimentEnvFiles(repoRoot: string, worktreePath: string): Promise<string[]> {
+  const relativePaths = await collectMirroredEnvRelativePaths(repoRoot);
+  const mirrored: string[] = [];
+
+  for (const relativePath of relativePaths) {
+    const sourcePath = path.join(repoRoot, relativePath);
+    const destinationPath = path.join(worktreePath, relativePath);
+    await mkdir(path.dirname(destinationPath), { recursive: true });
+    await copyFile(sourcePath, destinationPath);
+    mirrored.push(relativePath);
+  }
+
+  return mirrored;
+}
+
+async function collectMirroredEnvRelativePaths(
+  rootDir: string,
+  currentRelativeDir = ''
+): Promise<string[]> {
+  const currentDir = currentRelativeDir ? path.join(rootDir, currentRelativeDir) : rootDir;
+  const entries = await readdir(currentDir, { withFileTypes: true });
+  const results: string[] = [];
+
+  for (const entry of entries) {
+    if (entry.name === '.' || entry.name === '..') {
+      continue;
+    }
+
+    const relativePath = currentRelativeDir
+      ? path.join(currentRelativeDir, entry.name)
+      : entry.name;
+    const absolutePath = path.join(rootDir, relativePath);
+
+    if (entry.isDirectory()) {
+      if (IGNORED_ENV_SCAN_DIRS.has(entry.name)) {
+        continue;
+      }
+
+      const nested = await collectMirroredEnvRelativePaths(rootDir, relativePath);
+      results.push(...nested);
+      if (results.length >= MAX_MIRRORED_ENV_FILES) {
+        return results.slice(0, MAX_MIRRORED_ENV_FILES);
+      }
+      continue;
+    }
+
+    if (!MIRRORED_ENV_BASENAMES.has(entry.name)) {
+      continue;
+    }
+
+    const stat = await lstat(absolutePath);
+    if (!stat.isFile()) {
+      continue;
+    }
+
+    results.push(relativePath);
+    if (results.length >= MAX_MIRRORED_ENV_FILES) {
+      return results;
+    }
+  }
+
+  return results;
+}
+
 function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
@@ -528,6 +636,8 @@ function isBootstrapObservation(message: string): boolean {
   return (
     message.startsWith('Spawned isolated worktree at ') ||
     message.startsWith('Hypothesis: ') ||
-    message.startsWith('Context: ')
+    message.startsWith('Context: ') ||
+    message.startsWith('Local evidence already established: ') ||
+    message.startsWith('Residual uncertainty under test: ')
   );
 }

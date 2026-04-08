@@ -134,7 +134,7 @@ Investigate whether the current system can support that safely, the main constra
 The prototype now includes a direct OpenAI Codex OAuth flow for local testing.
 
 - `h2 auth login` starts a browser-based PKCE flow against `https://auth.openai.com`
-- tokens are stored in `.h2/notebook.sqlite`
+- tokens are stored globally in `~/.h2/auth.sqlite`
 - `h2 auth access` prints a refreshed bearer token to stdout for manual API testing
 - `/auth login`, `/auth status`, and `/auth logout` are also available inside the OpenTUI UI
 - once logged in, plain text in the interactive app is sent to the Codex backend using the stored OAuth token
@@ -145,6 +145,7 @@ Notes:
 - if the browser does not open, the CLI prints the authorization URL
 - token refresh happens automatically when expiry is within five minutes
 - the interactive UI does not print the raw bearer token into the transcript
+- older repo-local auth tokens in `.h2/notebook.sqlite` are migrated into the global auth store automatically
 
 ## Layout
 

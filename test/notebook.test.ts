@@ -68,9 +68,11 @@ test('Notebook persists transcript and experiment details', async (t) => {
   notebook.upsertExperiment(experiment);
   notebook.appendObservation(experiment.id, 'first observation', ['discovery']);
 
-  const snapshot = notebook.getSnapshot(session.id, false, 'idle');
+  const snapshot = notebook.getSnapshot(session.id, false, null, 'idle');
   assert.equal(snapshot.transcript.length, 2);
   assert.equal(snapshot.experiments.length, 1);
+  assert.deepEqual(snapshot.liveTurnEvents, []);
+  assert.equal(snapshot.currentTurnStartedAt, null);
   assert.equal(snapshot.experiments[0]?.id, experiment.id);
   assert.equal(notebook.listModelHistory(session.id).length, 3);
   assert.deepEqual(notebook.listModelHistory(session.id)[1], {

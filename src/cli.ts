@@ -6,6 +6,10 @@ import { fileURLToPath } from 'node:url';
 import { execa } from 'execa';
 
 import type { ExperimentRecord, ModelHistoryItem, TranscriptEntry } from './types.js';
+import {
+  migrateLegacyRepoLocalAuth,
+  openGlobalAuthNotebook
+} from './auth/storage.js';
 
 async function main(): Promise<void> {
   const [, , ...args] = process.argv;
@@ -163,8 +167,10 @@ async function runAuthCommand(args: string[]): Promise<void> {
     throw new Error('Usage: h2 auth <login|status|access|logout>');
   }
 
-  const notebook = new Notebook(`${process.cwd()}/.h2/notebook.sqlite`);
-  const auth = new OpenAICodexAuth(notebook, {
+  const repoNotebook = new Notebook(`${process.cwd()}/.h2/notebook.sqlite`);
+  const authNotebook = openGlobalAuthNotebook();
+  migrateLegacyRepoLocalAuth(repoNotebook, authNotebook);
+  const auth = new OpenAICodexAuth(authNotebook, {
     notify: (message) => {
       console.log(message);
       console.log('');
@@ -200,7 +206,8 @@ async function runAuthCommand(args: string[]): Promise<void> {
         : 'No OpenAI Codex OAuth credentials were stored.'
     );
   } finally {
-    notebook.close();
+    repoNotebook.close();
+    authNotebook.close();
   }
 }
 

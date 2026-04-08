@@ -7,6 +7,7 @@ import type {
   ExperimentDetails,
   ExperimentObservation,
   ExperimentRecord,
+  LiveTurnEvent,
   ExperimentObservationTag,
   ExperimentStatus,
   ExperimentSearchResult,
@@ -1377,6 +1378,7 @@ export class Notebook {
     ].join('\n');
   }
 
+
   createSessionCheckpoint(input: {
     sessionId: string;
     goal: string;
@@ -1490,12 +1492,12 @@ export class Notebook {
   getSnapshot(
     sessionId: string,
     processingTurn: boolean,
+    currentTurnStartedAt: string | null,
     statusText: string,
     estimatedContextTokens = 0,
     contextWindowTokens = 0,
     standardRateContextTokens: number | null = null,
-    liveAssistantText: string | null = null,
-    liveReasoningSummary: string | null = null,
+    liveTurnEvents: LiveTurnEvent[] = [],
     thinkingEnabled = true
   ): EngineSnapshot {
     const session = this.getSession(sessionId);
@@ -1508,14 +1510,14 @@ export class Notebook {
       transcript: this.listTranscript(sessionId),
       experiments: this.listExperiments(sessionId),
       processingTurn,
+      currentTurnStartedAt,
       statusText,
       model: this.getModelSession(sessionId)?.model ?? 'gpt-5.4',
       reasoningEffort: this.getModelSession(sessionId)?.reasoningEffort ?? 'medium',
       estimatedContextTokens,
       contextWindowTokens,
       standardRateContextTokens,
-      liveAssistantText,
-      liveReasoningSummary,
+      liveTurnEvents,
       thinkingEnabled
     };
   }

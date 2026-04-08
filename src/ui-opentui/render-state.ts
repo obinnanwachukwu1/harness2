@@ -19,7 +19,9 @@ export function buildOpenTuiState(snapshot: EngineSnapshot): OpenTuiState {
 
 function buildBlocks(snapshot: EngineSnapshot): OpenTuiRenderBlock[] {
   const currentTurnStartedAt =
-    snapshot.processingTurn && snapshot.currentTurnStartedAt ? snapshot.currentTurnStartedAt : null;
+    snapshot.currentTurnStartedAt && snapshot.liveTurnEvents.length > 0
+      ? snapshot.currentTurnStartedAt
+      : null;
   const historicalEntries = currentTurnStartedAt
     ? snapshot.transcript.filter(
         (entry) => !(entry.role !== 'user' && entry.createdAt >= currentTurnStartedAt)

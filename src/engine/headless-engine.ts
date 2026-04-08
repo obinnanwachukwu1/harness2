@@ -5,8 +5,9 @@ import { EventEmitter } from 'node:events';
 import { execa, execaCommand } from 'execa';
 
 import { OpenAICodexAuth } from '../auth/openai-codex.js';
+import { migrateLegacyRepoLocalAuth, openGlobalAuthNotebook } from '../auth/storage.js';
 import { ExperimentManager } from '../experiments/experiment-manager.js';
-import { clampText, createSessionId, lines, nowIso } from '../lib/utils.js';
+import { clampText, createSessionId, formatUnknownError, lines, nowIso } from '../lib/utils.js';
 import { CodexModelClient, EXPERIMENT_TOOL_DEFINITIONS } from '../model/codex-client.js';
 import { EXPERIMENT_SUBAGENT_PROMPT } from '../model/codex-prompt.js';
 import { Notebook } from '../storage/notebook.js';
@@ -22,8 +23,10 @@ import type {
   ExperimentQualityNotification,
   ExperimentRecord,
   ExperimentResolution,
+  ExperimentSearchGuardrail,
   ExperimentSearchResult,
   ExperimentWaitResult,
+  LiveTurnEvent,
   ModelHistoryItem,
   SessionExportResult,
   SpawnExperimentInput,
@@ -53,6 +56,8 @@ export class HeadlessEngine {
     await migrateLegacyExperimentState(options.cwd, experimentStateDir);
     const dbPath = path.join(stateDir, 'notebook.sqlite');
     const notebook = new Notebook(dbPath);
+    const authNotebook = openGlobalAuthNotebook();
+    migrateLegacyRepoLocalAuth(notebook, authNotebook);
 
     if (options.sessionId) {
       const existing = notebook.getSession(sessionId);
@@ -71,6 +76,7 @@ export class HeadlessEngine {
       experimentStateDir,
       revealExportsInFinder: options.revealExportsInFinder ?? true,
       notebook,
+      authNotebook,
       runner: new PrototypeRunner()
     });
   }
@@ -81,9 +87,13 @@ export class HeadlessEngine {
   private readonly model: CodexModelClient;
   private readonly tools: AgentTools;
   private processingTurn = false;
+  private currentTurnStartedAt: string | null = null;
   private statusText = 'idle';
-  private liveAssistantText: string | null = null;
-  private liveReasoningSummary: string | null = null;
+  private readonly liveTurnEvents: LiveTurnEvent[] = [];
+  private readonly liveToolEventIds = new Map<string, string>();
+  private lastLiveAssistantText = '';
+  private lastLiveThinkingText = '';
+  private liveEventCounter = 0;
   private thinkingEnabled = true;
   private turnQueue: Promise<void> = Promise.resolve();
   private lastTestStatus: string | null = null;
@@ -98,6 +108,7 @@ export class HeadlessEngine {
       experimentStateDir: string;
       revealExportsInFinder: boolean;
       notebook: Notebook;
+      authNotebook: Notebook;
       runner: AgentRunner;
     }
   ) {
@@ -111,7 +122,7 @@ export class HeadlessEngine {
       onResolved: (resolution) => this.handleExperimentResolved(resolution),
       startSubagent: (experiment) => this.runExperimentSubagent(experiment)
     });
-    this.auth = new OpenAICodexAuth(options.notebook);
+    this.auth = new OpenAICodexAuth(options.authNotebook);
     this.model = new CodexModelClient(options.notebook, this.auth);
 
     this.tools = {
@@ -154,12 +165,12 @@ export class HeadlessEngine {
     return this.options.notebook.getSnapshot(
       this.options.sessionId,
       this.processingTurn,
+      this.currentTurnStartedAt,
       this.statusText,
       contextWindow.usedTokens,
       contextWindow.totalTokens,
       contextWindow.standardRateTokens,
-      this.liveAssistantText,
-      this.liveReasoningSummary,
+      [...this.liveTurnEvents],
       this.thinkingEnabled
     );
   }
@@ -195,10 +206,10 @@ export class HeadlessEngine {
       }
 
       this.activeTurnId += 1;
+      this.clearLiveTurnState();
       this.processingTurn = true;
+      this.currentTurnStartedAt = nowIso();
       this.statusText = 'running turn';
-      this.liveAssistantText = null;
-      this.liveReasoningSummary = null;
       this.appendTranscript('user', trimmed);
       this.appendModelHistory({
         type: 'message',
@@ -226,22 +237,28 @@ export class HeadlessEngine {
                 await options.onTranscriptEntry?.(role, text);
               },
               async (text) => {
-                this.liveAssistantText = text;
-                this.emitChange();
+                this.appendLiveTextEvent('assistant', text);
                 await options.onAssistantStream?.(text);
               },
               async (text) => {
-                this.liveReasoningSummary = text;
-                this.emitChange();
+                this.appendLiveTextEvent('thinking', text);
                 await options.onReasoningSummaryStream?.(text);
               },
-              this.thinkingEnabled
+              this.thinkingEnabled,
+              undefined,
+              undefined,
+              async (toolCall) => {
+                this.startLiveToolCall(toolCall);
+              },
+              async (toolCallId, transcriptText) => {
+                this.finishLiveToolCall(toolCallId, transcriptText);
+              }
             );
           }
         });
         this.statusText = 'idle';
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error);
+        const message = formatUnknownError(error);
         const errorText = `Error: ${message}`;
         this.appendTranscript('assistant', errorText);
         this.appendModelHistory({
@@ -253,8 +270,6 @@ export class HeadlessEngine {
         this.statusText = 'error';
       } finally {
         this.processingTurn = false;
-        this.liveAssistantText = null;
-        this.liveReasoningSummary = null;
         this.emitChange();
       }
     });
@@ -266,6 +281,7 @@ export class HeadlessEngine {
   async dispose(): Promise<void> {
     await this.experimentManager.dispose();
     this.options.notebook.close();
+    this.options.authNotebook.close();
   }
 
   private appendTranscript(role: TranscriptRole, text: string): void {
@@ -273,16 +289,81 @@ export class HeadlessEngine {
     this.emitChange();
   }
 
+  private startLiveToolCall(input: {
+    toolCallId: string;
+    toolName: string;
+    label: string;
+    detail?: string | null;
+    body?: string[];
+    providerExecuted?: boolean;
+  }): void {
+    const eventId = this.createLiveEventId('tool');
+    this.liveTurnEvents.push({
+      id: eventId,
+      kind: 'tool',
+      transcriptText: null,
+      live: true,
+      callId: input.toolCallId,
+      toolName: input.toolName,
+      label: input.label,
+      detail: input.detail ?? null,
+      body: input.body ?? [],
+      providerExecuted: input.providerExecuted ?? false
+    });
+    this.liveToolEventIds.set(input.toolCallId, eventId);
+    this.emitChange();
+  }
+
+  private finishLiveToolCall(toolCallId: string, transcriptText?: string): void {
+    const eventId = this.liveToolEventIds.get(toolCallId);
+    if (!eventId) {
+      if (transcriptText) {
+        this.appendCompletedToolEvent(transcriptText);
+      }
+      return;
+    }
+
+    const event = this.liveTurnEvents.find(
+      (candidate) => candidate.id === eventId && candidate.kind === 'tool'
+    ) as Extract<LiveTurnEvent, { kind: 'tool' }> | undefined;
+    if (event) {
+      event.live = false;
+      event.transcriptText = transcriptText ?? event.transcriptText;
+      event.detail = null;
+      event.body = [];
+      event.label = null;
+      event.toolName = null;
+      this.emitChange();
+    }
+    this.liveToolEventIds.delete(toolCallId);
+  }
+
   private appendModelHistory(item: ModelHistoryItem): void {
     this.options.notebook.appendModelHistoryItem(this.options.sessionId, item);
   }
 
   private resetLiveStreamsForTranscriptEntry(role: TranscriptRole, text: string): void {
-    if (role !== 'system' || text.startsWith('@@thinking\t')) {
-      this.liveReasoningSummary = null;
+    if (!this.processingTurn) {
+      return;
     }
+
+    if (role === 'system' && text.startsWith('@@thinking\t')) {
+      this.finalizeLiveTextEvent('thinking', text.slice('@@thinking\t'.length));
+      return;
+    }
+
     if (role === 'assistant') {
-      this.liveAssistantText = null;
+      this.finalizeLiveTextEvent('assistant', text);
+      return;
+    }
+
+    if (role === 'tool') {
+      const hasActiveTrackedTool = this.liveTurnEvents.some(
+        (event) => event.kind === 'tool' && event.live
+      );
+      if (!hasActiveTrackedTool) {
+        this.appendCompletedToolEvent(text);
+      }
     }
   }
 
@@ -310,6 +391,88 @@ export class HeadlessEngine {
 
   private emitChange(): void {
     this.events.emit('change');
+  }
+
+  private clearLiveTurnState(): void {
+    this.liveTurnEvents.length = 0;
+    this.liveToolEventIds.clear();
+    this.lastLiveAssistantText = '';
+    this.lastLiveThinkingText = '';
+  }
+
+  private appendLiveTextEvent(kind: 'assistant' | 'thinking', fullText: string): void {
+    const previous = kind === 'assistant' ? this.lastLiveAssistantText : this.lastLiveThinkingText;
+    const nextChunk = fullText.startsWith(previous) ? fullText.slice(previous.length) : fullText;
+    if (!nextChunk) {
+      return;
+    }
+
+    const lastEvent = this.liveTurnEvents.at(-1);
+    if (lastEvent && lastEvent.kind === kind && lastEvent.live) {
+      lastEvent.text += nextChunk;
+    } else {
+      this.liveTurnEvents.push({
+        id: this.createLiveEventId(kind),
+        kind,
+        text: nextChunk,
+        live: true
+      });
+    }
+
+    if (kind === 'assistant') {
+      this.lastLiveAssistantText = fullText;
+    } else {
+      this.lastLiveThinkingText = fullText;
+    }
+    this.emitChange();
+  }
+
+  private finalizeLiveTextEvent(kind: 'assistant' | 'thinking', finalText: string): void {
+    const liveEvents = this.liveTurnEvents.filter(
+      (event): event is Extract<LiveTurnEvent, { kind: 'assistant' | 'thinking' }> =>
+        event.kind === kind && event.live
+    );
+
+    if (liveEvents.length > 0) {
+      for (const event of liveEvents) {
+        event.live = false;
+      }
+    } else if (finalText.trim()) {
+      this.liveTurnEvents.push({
+        id: this.createLiveEventId(kind),
+        kind,
+        text: finalText,
+        live: false
+      });
+    }
+
+    if (kind === 'assistant') {
+      this.lastLiveAssistantText = '';
+    } else {
+      this.lastLiveThinkingText = '';
+    }
+    this.emitChange();
+  }
+
+  private appendCompletedToolEvent(transcriptText: string): void {
+    this.liveTurnEvents.push({
+      id: this.createLiveEventId('tool'),
+      kind: 'tool',
+      transcriptText,
+      live: false,
+      callId: null,
+      toolName: null,
+      label: null,
+      detail: null,
+      body: [],
+      providerExecuted: false
+    });
+    this.emitChange();
+  }
+
+  private createLiveEventId(kind: 'assistant' | 'thinking' | 'tool'): string {
+    this.liveEventCounter += 1;
+    return `live-${kind}-${this.liveEventCounter}`;
   }
 
   private async runBash(command: string): Promise<string> {
@@ -531,7 +694,23 @@ export class HeadlessEngine {
     return this.experimentManager.waitForResolution(experimentId, timeoutMs);
   }
 
-  private async searchExperiments(query?: string): Promise<ExperimentSearchResult[]> {
+  private async searchExperiments(
+    query?: string
+  ): Promise<ExperimentSearchResult[] | ExperimentSearchGuardrail> {
+    const openDebts = this.options.notebook.listOpenStudyDebts(this.options.sessionId);
+    if (openDebts.length === 0) {
+      return {
+        ok: false,
+        guardrail:
+          'search_experiments is subordinate to the current task. Open the live question first, or explicitly say why no question is needed before searching prior experiments.',
+        suggestedNext: [
+          'Name the implementation-changing uncertainty.',
+          'Open the question if dependent edits rely on it.',
+          'Then search for prior findings only if they may answer or narrow that same question.'
+        ]
+      };
+    }
+
     return this.experimentManager.search(this.options.sessionId, query);
   }
 

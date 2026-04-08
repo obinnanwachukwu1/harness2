@@ -65,6 +65,7 @@ interface ToolExecutionResult {
 
 interface ProviderToolEvent {
   name: 'web_search';
+  toolCallId: string;
   transcript: string;
   historyNotice: string;
 }
@@ -95,7 +96,16 @@ export class CodexModelClient {
     onReasoningSummaryStream?: (text: string) => Promise<void>,
     thinkingEnabled = false,
     toolDefinitions: readonly ToolDefinition[] = MAIN_TOOL_DEFINITIONS,
-    instructions = MAIN_AGENT_PROMPT
+    instructions = MAIN_AGENT_PROMPT,
+    onToolCallStart?: (toolCall: {
+      toolCallId: string;
+      toolName: string;
+      label: string;
+      detail?: string | null;
+      body?: string[];
+      providerExecuted?: boolean;
+    }) => Promise<void>,
+    onToolCallFinish?: (toolCallId: string, transcriptText?: string) => Promise<void>
   ): Promise<void> {
     const accessToken = await this.auth.access();
     const authRecord = this.auth.getStored();
@@ -166,7 +176,17 @@ export class CodexModelClient {
         onReasoningSummaryStream,
         thinkingEnabled,
         toolDefinitions,
-        instructions
+        instructions,
+        onToolCallStart,
+        onProviderToolEvent: async (event) => {
+          this.persistHistoryItem(sessionId, {
+            type: 'message',
+            role: 'developer',
+            content: event.historyNotice
+          });
+          await emit('tool', event.transcript);
+          await onToolCallFinish?.(event.toolCallId, event.transcript);
+        }
       });
 
       previousResponseId = response.id ?? previousResponseId;
@@ -196,6 +216,7 @@ export class CodexModelClient {
           content: event.historyNotice
         });
         await emit('tool', event.transcript);
+        await onToolCallFinish?.(event.toolCallId, event.transcript);
       }
 
       if (assistantText) {
@@ -235,6 +256,17 @@ export class CodexModelClient {
           }
         }
 
+        for (const call of batchCalls) {
+          await onToolCallStart?.({
+            toolCallId: call.callId,
+            toolName: call.name,
+            label: formatToolHeader(call.name, call.rawArguments),
+            detail: call.name === 'web_search' ? 'searching…' : 'running…',
+            body: formatLiveToolBody(call.name, call.rawArguments),
+            providerExecuted: false
+          });
+        }
+
         const results = await executeToolCallBatch(batchCalls, tools);
 
         for (let batchIndex = 0; batchIndex < batchCalls.length; batchIndex += 1) {
@@ -254,14 +286,13 @@ export class CodexModelClient {
 
           this.persistHistoryItem(sessionId, functionCallItem);
           this.persistHistoryItem(sessionId, functionCallOutputItem);
-          await emit(
-            'tool',
-            formatToolOutput(
-              call.name,
-              call.rawArguments,
-              result.failed ? `${result.output}\nTool execution failed.` : result.output
-            )
+          const transcriptText = formatToolOutput(
+            call.name,
+            call.rawArguments,
+            result.failed ? `${result.output}\nTool execution failed.` : result.output
           );
+          await emit('tool', transcriptText);
+          await onToolCallFinish?.(call.callId, transcriptText);
         }
 
         index = nextIndex;
@@ -337,6 +368,15 @@ export class CodexModelClient {
     }>;
     onAssistantStream?: (text: string) => Promise<void>;
     onReasoningSummaryStream?: (text: string) => Promise<void>;
+    onToolCallStart?: (toolCall: {
+      toolCallId: string;
+      toolName: string;
+      label: string;
+      detail?: string | null;
+      body?: string[];
+      providerExecuted?: boolean;
+    }) => Promise<void>;
+    onProviderToolEvent?: (event: ProviderToolEvent) => Promise<void>;
     thinkingEnabled: boolean;
     toolDefinitions: readonly ToolDefinition[];
     instructions: string;
@@ -397,8 +437,37 @@ export class CodexModelClient {
       }
     });
 
-    for await (const _part of result.fullStream) {
-      // Streaming side effects are handled in onChunk; consuming the stream drives the SDK.
+    const announcedProviderToolCalls = new Set<string>();
+    const emittedProviderToolResults = new Set<string>();
+    for await (const part of result.fullStream) {
+      if (
+        part.type === 'tool-call' &&
+        part.providerExecuted === true &&
+        !announcedProviderToolCalls.has(part.toolCallId)
+      ) {
+        announcedProviderToolCalls.add(part.toolCallId);
+        await input.onToolCallStart?.({
+          toolCallId: part.toolCallId,
+          toolName: part.toolName,
+          label: formatToolHeader(part.toolName, JSON.stringify(part.input)),
+          detail: 'searching…',
+          body: formatLiveToolBody(part.toolName, JSON.stringify(part.input)),
+          providerExecuted: true
+        });
+      }
+
+      if (
+        part.type === 'tool-result' &&
+        part.providerExecuted === true &&
+        !part.preliminary &&
+        !emittedProviderToolResults.has(part.toolCallId)
+      ) {
+        const event = buildProviderToolEventFromOutput(part.toolCallId, part.output);
+        if (event) {
+          emittedProviderToolResults.add(part.toolCallId);
+          await input.onProviderToolEvent?.(event);
+        }
+      }
     }
 
     const response = await result.response;
@@ -407,7 +476,9 @@ export class CodexModelClient {
     const toolCalls = await result.toolCalls;
     const toolResults = await result.toolResults;
     const sources = await result.sources;
-    const providerToolEvents = buildProviderToolEvents(toolCalls, toolResults, sources);
+    const providerToolEvents = buildProviderToolEvents(toolCalls, toolResults, sources).filter(
+      (event) => !emittedProviderToolResults.has(event.toolCallId)
+    );
     const localToolCalls = toolCalls.filter((call) => !call.providerExecuted);
 
     await debugResponseShape(input.sessionId, 'sdk_response', {
@@ -580,6 +651,8 @@ async function executeToolCall(call: ToolCall, tools: AgentTools): Promise<strin
         studyDebtId:
           readOptionalStringArg(args, 'questionId') ?? readOptionalStringArg(args, 'studyDebtId'),
         hypothesis: readStringArg(args, 'hypothesis'),
+        localEvidenceSummary: readStringArg(args, 'localEvidenceSummary'),
+        residualUncertainty: readStringArg(args, 'residualUncertainty'),
         context: readOptionalStringArg(args, 'context'),
         budgetTokens:
           readOptionalNumberArg(args, 'budgetTokens') ?? DEFAULT_EXPERIMENT_BUDGET_TOKENS,
@@ -919,42 +992,52 @@ function buildProviderToolEvents(
   const providerToolResults = toolResults.filter(
     (result) => result.providerExecuted && result.toolName === 'web_search'
   );
-  const toolCallsById = new Map(toolCalls.map((call) => [call.toolCallId, call]));
   const events: ProviderToolEvent[] = [];
 
   for (const result of providerToolResults) {
-    const call = toolCallsById.get(result.toolCallId);
-    const output = readWebSearchOutput(result?.output);
-    const query =
-      output?.action?.type === 'search' ? output.action.query?.trim() || undefined : undefined;
-    const outputSources = output?.sources
-      ?.map((source) => (source.type === 'url' ? source.url : source.name))
-      .filter((value): value is string => typeof value === 'string' && value.length > 0);
     const fallbackSources = sources
       .map((source) => source.url ?? source.name)
       .filter((value): value is string => typeof value === 'string' && value.length > 0);
-    const sourceList = (outputSources && outputSources.length > 0 ? outputSources : fallbackSources).slice(0, 5);
-    const queryText = query ?? 'provider-executed web search';
-    const transcriptLines = [`query: ${queryText}`];
-    if (sourceList.length > 0) {
-      transcriptLines.push('sources:');
-      transcriptLines.push(...sourceList.map((source) => `- ${source}`));
-    } else {
-      transcriptLines.push('sources: none returned');
+    const event = buildProviderToolEventFromOutput(result.toolCallId, result.output, fallbackSources);
+    if (event) {
+      events.push(event);
     }
-
-    events.push({
-      name: 'web_search',
-      transcript: `@@tool\tweb_search\tWebSearch(${compactTextForHeader(queryText, 72)})\n${transcriptLines.join('\n')}`,
-      historyNotice: [
-        'Built-in web_search executed.',
-        `query: ${queryText}`,
-        sourceList.length > 0 ? `sources: ${sourceList.join(', ')}` : 'sources: none returned'
-      ].join('\n')
-    });
   }
 
   return events;
+}
+
+function buildProviderToolEventFromOutput(
+  toolCallId: string,
+  outputValue: unknown,
+  fallbackSources: string[] = []
+): ProviderToolEvent | null {
+  const output = readWebSearchOutput(outputValue);
+  const query =
+    output?.action?.type === 'search' ? output.action.query?.trim() || undefined : undefined;
+  const outputSources = output?.sources
+    ?.map((source) => (source.type === 'url' ? source.url : source.name))
+    .filter((value): value is string => typeof value === 'string' && value.length > 0);
+  const sourceList = (outputSources && outputSources.length > 0 ? outputSources : fallbackSources).slice(0, 5);
+  const queryText = query ?? 'provider-executed web search';
+  const transcriptLines = [`query: ${queryText}`];
+  if (sourceList.length > 0) {
+    transcriptLines.push('sources:');
+    transcriptLines.push(...sourceList.map((source) => `- ${source}`));
+  } else {
+    transcriptLines.push('sources: none returned');
+  }
+
+  return {
+    name: 'web_search',
+    toolCallId,
+    transcript: `@@tool\tweb_search\tWebSearch(${compactTextForHeader(queryText, 72)})\n${transcriptLines.join('\n')}`,
+    historyNotice: [
+      'Built-in web_search executed.',
+      `query: ${queryText}`,
+      sourceList.length > 0 ? `sources: ${sourceList.join(', ')}` : 'sources: none returned'
+    ].join('\n')
+  };
 }
 
 function readWebSearchOutput(value: unknown):
@@ -1041,6 +1124,10 @@ function formatToolHeader(name: string, rawArguments: string): string {
         ? `Rg(${readStringArg(args, 'pattern')} in ${targetText})`
         : `Rg(${readStringArg(args, 'pattern')})`;
     }
+    case 'web_search': {
+      const query = readOptionalStringArg(args, 'query');
+      return query ? `WebSearch(${compactTextForHeader(query, 64)})` : 'WebSearch';
+    }
     case 'spawn_experiment': {
       const questionId =
         readOptionalStringArg(args, 'questionId') ?? readOptionalStringArg(args, 'studyDebtId');
@@ -1071,6 +1158,63 @@ function formatToolHeader(name: string, rawArguments: string): string {
     default:
       return name;
   }
+}
+
+function formatLiveToolBody(name: string, rawArguments: string): string[] {
+  const args = parseArguments(rawArguments);
+
+  switch (name) {
+    case 'bash':
+      return [`command: ${readStringArg(args, 'command')}`];
+    case 'read': {
+      const path = readStringArg(args, 'path');
+      const startLine = readOptionalNumberArg(args, 'startLine');
+      const endLine = readOptionalNumberArg(args, 'endLine');
+      const range =
+        typeof startLine === 'number' || typeof endLine === 'number'
+          ? `lines ${typeof startLine === 'number' ? Math.floor(startLine) : 1}-${typeof endLine === 'number' ? Math.floor(endLine) : 'end'}`
+          : null;
+      return range ? [`path: ${path}`, range] : [`path: ${path}`];
+    }
+    case 'ls':
+      return [`path: ${readOptionalStringArg(args, 'path') ?? '.'}`];
+    case 'write':
+    case 'edit':
+      return [`path: ${readStringArg(args, 'path')}`];
+    case 'glob':
+      return [`pattern: ${readStringArg(args, 'pattern')}`];
+    case 'rg':
+    case 'grep': {
+      const pattern = readStringArg(args, 'pattern');
+      const target = readOptionalStringOrArrayArg(args, 'target');
+      const targetText = Array.isArray(target) ? target.join(' ') : target;
+      return targetText ? [`pattern: ${pattern}`, `target: ${targetText}`] : [`pattern: ${pattern}`];
+    }
+    case 'web_search': {
+      const query = readOptionalStringArg(args, 'query');
+      return query ? [`query: ${query}`] : [];
+    }
+    default:
+      return formatJsonArgumentPreview(args);
+  }
+}
+
+function formatJsonArgumentPreview(args: Record<string, unknown>): string[] {
+  if (Object.keys(args).length === 0) {
+    return [];
+  }
+
+  const pretty = JSON.stringify(args, null, 2);
+  if (!pretty) {
+    return [];
+  }
+
+  const lines = pretty.split('\n');
+  if (lines.length <= 4) {
+    return lines;
+  }
+
+  return [...lines.slice(0, 4), `… ${lines.length - 4} more line(s)`];
 }
 
 function compactTextForHeader(text: string, limit: number): string {
@@ -1264,6 +1408,7 @@ function shouldInjectEarlyStudyOpportunityHint(
 
 function shouldInjectPreEditGuardHint(requestItems: ModelHistoryItem[]): boolean {
   const functionCalls = getCurrentTurnFunctionCalls(requestItems);
+  const currentTurnItems = getCurrentTurnItems(requestItems);
 
   const lastCall = functionCalls.at(-1);
   if (!lastCall || !['write', 'edit'].includes(lastCall.name)) {
@@ -1282,7 +1427,18 @@ function shouldInjectPreEditGuardHint(requestItems: ModelHistoryItem[]): boolean
     return false;
   }
 
+  const usedProviderWebSearch = currentTurnItems.some(
+    (item) =>
+      item.type === 'message' &&
+      item.role === 'developer' &&
+      item.content.startsWith('Built-in web_search executed.')
+  );
+
   const investigationCalls = getInlineProbeCalls(functionCalls.slice(0, -1));
+
+  if (usedProviderWebSearch) {
+    return true;
+  }
 
   return investigationCalls.length >= 5 && isCirclingRiskArea(investigationCalls);
 }
@@ -1503,6 +1659,7 @@ function buildPreEditGuardHint(): string {
   return [
     'Harness hint:',
     'You investigated this plan for a while and are now moving toward implementation.',
+    'If external docs or web search materially shaped the protocol, backend, provider, or runtime path, track that as a current question before editing through it.',
     'If dependent edits still rely on unresolved load-bearing uncertainty, declare or resolve an open question before editing through it.',
     'Either open a question, justify why static evidence is sufficient, or explicitly narrow scope before editing dependent code.'
   ].join(' ');
@@ -1544,7 +1701,7 @@ export const MAIN_TOOL_DEFINITIONS = [
     type: 'function',
     name: 'bash',
     description:
-      'Run a shell command in the current workspace. Prefer this for direct repo inspection, tiny inline probes, targeted tests, or other checks that are cheaper to answer inline than by spawning a bounded experiment.',
+      'Run a shell command in the current workspace. Prefer this for direct repo inspection, tiny inline probes, targeted tests, or other checks that are cheaper to answer inline than by spawning a bounded experiment. If the command is a live external or secret-backed runtime probe whose result could materially change the implementation, declare an open question first.',
     parameters: {
       type: 'object',
       properties: {
@@ -1633,17 +1790,19 @@ export const MAIN_TOOL_DEFINITIONS = [
     type: 'function',
     name: 'spawn_experiment',
     description:
-      'Run a scoped experiment in a separate git worktree. Use this when the uncertainty is load-bearing and a bounded disposable study is the cheapest reliable way to answer the residual uncertainty after a focused local evidence pass. Do not use it to repeat the same local inspection the main thread can already perform directly. After a brief orientation pass, if you can state one concrete falsifiable experiment and there is known-safe work you can continue in parallel, prefer launching it early over more background gathering. If an open question exists, this experiment must be tied to that question via questionId and should test the single residual uncertainty that static inspection has not settled yet, not restate the whole implementation plan. If one focused local evidence pass is likely to settle the question directly, finish that pass before spawning. If inspection already settles the question, resolve it statically instead of spawning. If you do not have a strong reason to choose a smaller number, use a 50000 token budget.',
+      'Run a scoped experiment in a separate git worktree. Use this when the uncertainty is load-bearing and a bounded disposable study is the cheapest reliable way to answer the residual uncertainty after a focused local evidence pass. Do not use it to repeat the same local inspection the main thread can already perform directly. If an open question exists, this experiment must be tied to that question via questionId and should test the single residual uncertainty that static inspection has not settled yet, not restate the whole implementation plan. localEvidenceSummary should say what the focused local pass already established. residualUncertainty should name the one thing still unresolved that this experiment is meant to answer. If resolving the question requires a live external or secret-backed runtime probe and you can continue independent safe work in parallel, prefer spawning that probe as an experiment instead of blocking on it inline. If one focused local evidence pass is likely to settle the question directly, finish that pass before spawning. If inspection already settles the question, resolve it statically instead of spawning. If you do not have a strong reason to choose a smaller number, use a 50000 token budget.',
     parameters: {
       type: 'object',
       properties: {
         questionId: { type: 'string' },
         hypothesis: { type: 'string' },
+        localEvidenceSummary: { type: 'string' },
+        residualUncertainty: { type: 'string' },
         context: { type: 'string' },
         budgetTokens: { type: 'number' },
         preserve: { type: 'boolean' }
       },
-      required: ['hypothesis'],
+      required: ['hypothesis', 'localEvidenceSummary', 'residualUncertainty'],
       additionalProperties: false
     }
   },
@@ -1693,7 +1852,8 @@ export const MAIN_TOOL_DEFINITIONS = [
   {
     type: 'function',
     name: 'search_experiments',
-    description: 'Search prior experiment history by hypothesis, summary, or observations.',
+    description:
+      'Search prior experiment history for evidence relevant to the current question. Do not use this as ad hoc memory lookup or precedent fishing. First articulate the live question, explicitly say why no question is needed, or resume a previously opened question; then search for prior findings that may answer or narrow that current uncertainty.',
     parameters: {
       type: 'object',
       properties: {
@@ -1706,7 +1866,7 @@ export const MAIN_TOOL_DEFINITIONS = [
     type: 'function',
     name: 'open_question',
     description:
-      'Declare an unresolved, load-bearing open question before editing code that depends on it. Use this when being wrong could materially change the implementation choice. Once declared, dependent main-workspace edits are blocked until the question is resolved. Opening a question does not require an experiment; you can resolve it with quick static evidence, a small inline probe, or a bounded study.',
+      'Declare an unresolved, load-bearing open question before editing code that depends on it. Use this when being wrong could materially change the implementation choice. Choose the question that would most change the architecture, state model, runtime behavior, protocol handling, recovery semantics, or continuity assumptions if answered differently. Do not spend an open question on a quick framework or library capability check that one focused local read, doc slice, or tiny inline probe can settle immediately unless that capability is the true blocker. If the only way to answer the uncertainty is a live external or secret-backed runtime probe, open the question first even if you expect the probe to be quick. Once declared, dependent main-workspace edits are blocked until the question is resolved. Opening a question does not require an experiment; you can resolve it with quick static evidence, a small inline probe, or a bounded study.',
     parameters: {
       type: 'object',
       properties: {

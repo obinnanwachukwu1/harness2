@@ -29,3 +29,24 @@ export function clampText(text: string, limit = 4000): string {
 export function lines(text: string): string[] {
   return text.split(/\r?\n/).filter(Boolean);
 }
+
+export function formatUnknownError(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+
+  if (typeof error === 'string') {
+    return error;
+  }
+
+  try {
+    const serialized = JSON.stringify(error);
+    if (serialized && serialized !== '{}') {
+      return serialized;
+    }
+  } catch {
+    // Fall through to the generic string conversion below.
+  }
+
+  return String(error);
+}

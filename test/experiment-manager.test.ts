@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 
@@ -56,6 +57,8 @@ test('ExperimentManager spawn creates worktree and persists a running record', a
     sessionId: 'session-test',
     studyDebtId: debt.id,
     hypothesis: 'investigate the repo safely',
+    localEvidenceSummary: 'The repo is available and an isolated worktree can be created.',
+    residualUncertainty: 'Whether the isolated study can inspect the repo safely.',
     budgetTokens: 1200,
     preserve: false
   });
@@ -65,6 +68,54 @@ test('ExperimentManager spawn creates worktree and persists a running record', a
   assert.equal(manager.read(experiment.id).status, 'running');
   assert.equal(manager.read(experiment.id).studyDebtId, debt.id);
   assert.equal(notebook.getExperiment(experiment.id)?.hypothesis, 'investigate the repo safely');
+});
+
+test('ExperimentManager spawn mirrors repo-local env files into the experiment worktree', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  await writeFile(path.join(repoDir, '.env.local'), 'OPENAI_API_KEY=root-secret\n', 'utf8');
+  await mkdir(path.join(repoDir, 'apps', 'web'), { recursive: true });
+  await writeFile(
+    path.join(repoDir, 'apps', 'web', '.env.development.local'),
+    'NEXT_PUBLIC_API_URL=http://localhost:3000\n',
+    'utf8'
+  );
+  await mkdir(path.join(repoDir, 'node_modules', 'pkg'), { recursive: true });
+  await writeFile(path.join(repoDir, 'node_modules', 'pkg', '.env.local'), 'SHOULD_NOT_COPY=1\n', 'utf8');
+
+  const notebook = new Notebook(path.join(repoDir, '.h2', 'test.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-test', repoDir);
+
+  const manager = createManager(repoDir, notebook, async () => {});
+  t.after(async () => manager.dispose());
+
+  const experiment = await manager.spawn({
+    sessionId: 'session-test',
+    hypothesis: 'env mirroring works',
+    localEvidenceSummary: 'Repo-local env files exist in root and nested app paths.',
+    residualUncertainty: 'Whether experiment worktrees receive the same repo-local env files.',
+    budgetTokens: 1200,
+    preserve: false
+  });
+
+  assert.equal(
+    await readFile(path.join(experiment.worktreePath, '.env.local'), 'utf8'),
+    'OPENAI_API_KEY=root-secret\n'
+  );
+  assert.equal(
+    await readFile(path.join(experiment.worktreePath, 'apps', 'web', '.env.development.local'), 'utf8'),
+    'NEXT_PUBLIC_API_URL=http://localhost:3000\n'
+  );
+  assert.equal(await pathExists(path.join(experiment.worktreePath, 'node_modules', 'pkg', '.env.local')), false);
+
+  const details = manager.read(experiment.id);
+  assert.ok(
+    details.observations.some((entry) =>
+      entry.message.includes('Mirrored repo-local env files into the worktree')
+    )
+  );
 });
 
 test('ExperimentManager logObservation appends tagged notes to durable state', async (t) => {
@@ -83,6 +134,8 @@ test('ExperimentManager logObservation appends tagged notes to durable state', a
   const experiment = await manager.spawn({
     sessionId: 'session-test',
     hypothesis: 'look for a useful clue',
+    localEvidenceSummary: 'The worktree can be created and the subagent can run.',
+    residualUncertainty: 'Whether observations are durably recorded while the experiment is running.',
     budgetTokens: 1200,
     preserve: false
   });
@@ -124,6 +177,8 @@ test('ExperimentManager resolve updates status and removes or preserves the work
   const experiment = await manager.spawn({
     sessionId: 'session-test',
     hypothesis: 'confirm worktree cleanup',
+    localEvidenceSummary: 'The experiment can resolve without promotion.',
+    residualUncertainty: 'Whether cleanup removes the temporary worktree after resolution.',
     budgetTokens: 1200,
     preserve: false
   });
@@ -154,6 +209,8 @@ test('ExperimentManager resolve updates status and removes or preserves the work
   const preserved = await preservedManager.spawn({
     sessionId: 'session-test',
     hypothesis: 'preserve promoted result',
+    localEvidenceSummary: 'Promoted experiments should preserve their worktree after resolution.',
+    residualUncertainty: 'Whether promotion keeps the worktree available for later adoption.',
     budgetTokens: 1200,
     preserve: false
   });
@@ -189,6 +246,8 @@ test('ExperimentManager pauses and notifies when the budget is exhausted', async
   const experiment = await manager.spawn({
     sessionId: 'session-test',
     hypothesis: 'force budget exhaustion',
+    localEvidenceSummary: 'The experiment can emit large observations repeatedly.',
+    residualUncertainty: 'Whether the manager pauses the experiment when the budget is exceeded.',
     budgetTokens: 300,
     preserve: false
   });
@@ -240,6 +299,8 @@ test('ExperimentManager can extend a budget-exhausted experiment and resume it',
   const experiment = await manager.spawn({
     sessionId: 'session-test',
     hypothesis: 'resume after budget extension',
+    localEvidenceSummary: 'A budget-exhausted experiment can be extended.',
+    residualUncertainty: 'Whether extending the budget resumes the experiment correctly.',
     budgetTokens: 300,
     preserve: false
   });
@@ -292,6 +353,8 @@ test('ExperimentManager emits a low-signal warning after heavy tool output witho
   const experiment = await manager.spawn({
     sessionId: 'session-test',
     hypothesis: 'warn on low-signal probing',
+    localEvidenceSummary: 'The experiment can consume substantial tool-output budget.',
+    residualUncertainty: 'Whether low-signal probing triggers the quality warning.',
     budgetTokens: 10_000,
     preserve: false
   });
@@ -324,6 +387,8 @@ test('ExperimentManager waitForResolution returns timedOut when an experiment is
   const experiment = await manager.spawn({
     sessionId: 'session-test',
     hypothesis: 'wait should time out cleanly',
+    localEvidenceSummary: 'The experiment remains running long enough to wait on it.',
+    residualUncertainty: 'Whether waitForResolution reports a timeout cleanly.',
     budgetTokens: 1200,
     preserve: false
   });
@@ -362,6 +427,8 @@ test('ExperimentManager waitForResolution returns the resolved experiment when i
   const experiment = await manager.spawn({
     sessionId: 'session-test',
     hypothesis: 'wait should observe resolution',
+    localEvidenceSummary: 'The experiment can resolve within the timeout window.',
+    residualUncertainty: 'Whether waitForResolution returns the resolved experiment result.',
     budgetTokens: 1200,
     preserve: false
   });
@@ -399,6 +466,8 @@ test('ExperimentManager allows up to five concurrent experiments and rejects the
       manager.spawn({
         sessionId: 'session-test',
         hypothesis: `concurrency slot ${index + 1}`,
+        localEvidenceSummary: 'Fewer than five experiments are currently running.',
+        residualUncertainty: 'Whether this slot can be allocated without violating the concurrency cap.',
         budgetTokens: 1200,
         preserve: false
       })
@@ -412,6 +481,8 @@ test('ExperimentManager allows up to five concurrent experiments and rejects the
       manager.spawn({
         sessionId: 'session-test',
         hypothesis: 'should exceed the concurrency limit',
+        localEvidenceSummary: 'Five experiments are already running.',
+        residualUncertainty: 'Whether the manager rejects the sixth concurrent experiment.',
         budgetTokens: 1200,
         preserve: false
       }),

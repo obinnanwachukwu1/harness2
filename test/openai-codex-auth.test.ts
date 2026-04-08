@@ -10,6 +10,7 @@ import {
   parseJWT,
   shouldRefreshToken
 } from '../src/auth/openai-codex.js';
+import { migrateLegacyRepoLocalAuth } from '../src/auth/storage.js';
 import { Notebook } from '../src/storage/notebook.js';
 import { cleanupDir, createTempDir, createUnsignedJwt } from '../test-support/helpers.js';
 
@@ -146,4 +147,30 @@ test('OpenAICodexAuth access refreshes tokens nearing expiry', async (t) => {
   const token = await auth.access();
   assert.equal(token, nextAccess);
   assert.equal(notebook.getOpenAICodexAuth()?.refreshToken, 'refresh-new');
+});
+
+test('legacy repo-local auth migrates into the global auth notebook', async (t) => {
+  const tempDir = await createTempDir('h2-auth-migrate-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const repoNotebook = new Notebook(path.join(tempDir, 'repo.sqlite'));
+  const globalNotebook = new Notebook(path.join(tempDir, 'global.sqlite'));
+  t.after(() => repoNotebook.close());
+  t.after(() => globalNotebook.close());
+
+  repoNotebook.upsertOpenAICodexAuth({
+    provider: 'openai-codex',
+    type: 'oauth',
+    accessToken: 'legacy-access',
+    refreshToken: 'legacy-refresh',
+    idToken: '',
+    accountId: 'acct_legacy',
+    expiresAt: 123,
+    createdAt: new Date(123).toISOString(),
+    updatedAt: new Date(123).toISOString()
+  });
+
+  assert.equal(migrateLegacyRepoLocalAuth(repoNotebook, globalNotebook), true);
+  assert.equal(repoNotebook.getOpenAICodexAuth(), null);
+  assert.equal(globalNotebook.getOpenAICodexAuth()?.accountId, 'acct_legacy');
 });
