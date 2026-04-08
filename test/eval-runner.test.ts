@@ -1,0 +1,142 @@
+import assert from 'node:assert/strict';
+import path from 'node:path';
+import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
+import test from 'node:test';
+
+import { runEvalSuite } from '../src/evals/suite-runner.js';
+import { cleanupDir, createGitRepo, createTempDir } from '../test-support/helpers.js';
+
+test('runEvalSuite materializes template fixture env and exports artifacts', async (t) => {
+  const tempDir = await createTempDir('h2-eval-runner-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const originalH2Home = process.env.H2_HOME;
+  process.env.H2_HOME = path.join(tempDir, 'h2-home');
+  t.after(() => {
+    if (originalH2Home === undefined) {
+      delete process.env.H2_HOME;
+    } else {
+      process.env.H2_HOME = originalH2Home;
+    }
+  });
+
+  const fixtureDir = path.join(tempDir, 'fixtures', 'tiny-app');
+  await mkdir(fixtureDir, { recursive: true });
+  await writeFile(path.join(fixtureDir, 'README.md'), '# fixture\n', 'utf8');
+  const envSourcePath = path.join(tempDir, 'fixture.env');
+  await writeFile(
+    envSourcePath,
+    ['OPENAI_API_KEY=secret-value', 'OPENAI_BASE_URL=http://127.0.0.1:8787', 'FLAG=true'].join('\n'),
+    'utf8'
+  );
+
+  const manifestPath = path.join(tempDir, 'suite.toml');
+  await writeFile(
+    manifestPath,
+    `
+[suite]
+id = "core-12"
+
+[runtime]
+reasoning_effort = "medium"
+thinking = false
+web_search_mode = "fixed"
+
+[[fixtures]]
+id = "tiny-app"
+type = "template"
+path = "./fixtures/tiny-app"
+env_source = "./fixture.env"
+write_env_file = ".env"
+write_env_example = ".env.example"
+
+[[cases]]
+id = "A1"
+bucket = "A"
+fixture = "tiny-app"
+prompt = "/write note.txt :: hello from eval"
+question_expected = false
+experiment_expected = false
+`,
+    'utf8'
+  );
+
+  const result = await runEvalSuite({
+    manifestPath,
+    selectedCaseIds: ['A1']
+  });
+
+  assert.equal(result.cases.length, 1);
+  const caseResult = result.cases[0]!;
+  assert.equal(caseResult.autoScore.questionActual, false);
+  assert.equal(caseResult.autoScore.experimentActual, 0);
+
+  await assert.doesNotReject(() => access(caseResult.artifacts.sessionMarkdownPath));
+  await assert.doesNotReject(() => access(path.join(caseResult.workspacePath, 'note.txt')));
+  assert.equal(await readFile(path.join(caseResult.workspacePath, 'note.txt'), 'utf8'), 'hello from eval');
+  assert.equal(
+    await readFile(path.join(caseResult.workspacePath, '.env'), 'utf8'),
+    await readFile(envSourcePath, 'utf8')
+  );
+  assert.equal(
+    await readFile(path.join(caseResult.workspacePath, '.env.example'), 'utf8'),
+    ['OPENAI_API_KEY=', 'OPENAI_BASE_URL=http://127.0.0.1:8787', 'FLAG=true'].join('\n')
+  );
+  const runDir = path.dirname(path.dirname(caseResult.workspacePath));
+  await assert.doesNotReject(() => access(path.join(runDir, 'score-sheet.csv')));
+  await assert.doesNotReject(() => access(path.join(runDir, 'score-sheet.json')));
+});
+
+test('runEvalSuite supports git_checkout fixtures for a single case run', async (t) => {
+  const tempDir = await createTempDir('h2-eval-git-checkout-');
+  t.after(async () => cleanupDir(tempDir));
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const originalH2Home = process.env.H2_HOME;
+  process.env.H2_HOME = path.join(tempDir, 'h2-home');
+  t.after(() => {
+    if (originalH2Home === undefined) {
+      delete process.env.H2_HOME;
+    } else {
+      process.env.H2_HOME = originalH2Home;
+    }
+  });
+
+  const manifestPath = path.join(tempDir, 'suite.toml');
+  await writeFile(
+    manifestPath,
+    `
+[suite]
+id = "core-12"
+
+[runtime]
+reasoning_effort = "medium"
+thinking = false
+web_search_mode = "fixed"
+
+[[fixtures]]
+id = "repo-fixture"
+type = "git_checkout"
+path = "${repoDir.replace(/\\/g, '\\\\')}"
+ref = "HEAD"
+
+[[cases]]
+id = "A2"
+bucket = "A"
+fixture = "repo-fixture"
+prompt = "/read README.md"
+question_expected = false
+experiment_expected = false
+`,
+    'utf8'
+  );
+
+  const result = await runEvalSuite({
+    manifestPath,
+    selectedCaseIds: ['A2']
+  });
+
+  const transcript = JSON.parse(await readFile(result.cases[0]!.artifacts.transcriptJsonPath, 'utf8')) as Array<{ text: string }>;
+  assert.ok(transcript.some((entry) => entry.text.includes('README.md')));
+});

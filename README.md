@@ -57,6 +57,8 @@ npm test
 
 `npm run typecheck` covers both the core CLI/engine code and `packages/ui-opentui`.
 
+Eval runner design notes live under `docs/evals/`.
+
 ## Interactive commands
 
 Inside the terminal UI, use slash commands:

@@ -55,6 +55,12 @@ async function main(): Promise<void> {
     return;
   }
 
+  if (command === 'eval') {
+    assertSupportedNodeRuntime();
+    await runEvalCommand(args.slice(1));
+    return;
+  }
+
   const sessionId = command === 'resume' ? args[1] : undefined;
   if (command === 'resume' && !sessionId) {
     await assertInsideGitRepository(process.cwd());
@@ -252,7 +258,7 @@ function printDoctor(report: {
 }
 
 function printUsage(): void {
-  console.log('Usage: h2 [resume <sessionId>] [opentui] | h2 auth <login|status|access|logout> | h2 doctor | h2 paths');
+  console.log('Usage: h2 [resume [sessionId]] [opentui] | h2 auth <login|status|access|logout> | h2 doctor | h2 paths | h2 eval run <manifest> [--case <id>] | h2 eval score <run-dir>');
   console.log('');
   console.log('Examples:');
   console.log('h2');
@@ -261,6 +267,67 @@ function printUsage(): void {
   console.log('h2 resume <sessionId>');
   console.log('h2 auth login');
   console.log('h2 doctor');
+  console.log('h2 eval run evals/core-suite.toml --case A1');
+  console.log('h2 eval score ~/.h2/evals/<run-id>');
+}
+
+async function runEvalCommand(args: string[]): Promise<void> {
+  const action = args[0];
+  if (action !== 'run' && action !== 'score') {
+    throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>] | h2 eval score <run-dir>');
+  }
+
+  if (action === 'score') {
+    const runDir = args[1];
+    if (!runDir) {
+      throw new CliUsageError('Usage: h2 eval score <run-dir>');
+    }
+    const { scoreEvalRun } = await import('./evals/score-run.js');
+    const result = await scoreEvalRun(path.resolve(runDir));
+    console.log(`score sheet: ${result.scoreSheetCsvPath}`);
+    console.log(`score data: ${result.scoreSheetJsonPath}`);
+    console.log('');
+    for (const score of result.scores) {
+      console.log(`${score.testId}  overall=${score.overall}  question=${score.questionActual ? 'yes' : 'no'}  experiments=${score.experimentActual}`);
+    }
+    return;
+  }
+
+  const manifestPath = args[1];
+  if (!manifestPath) {
+    throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>]');
+  }
+
+  const selectedCaseIds: string[] = [];
+  for (let index = 2; index < args.length; index += 1) {
+    const token = args[index];
+    if (token === '--case') {
+      const caseId = args[index + 1];
+      if (!caseId) {
+        throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>]');
+      }
+      selectedCaseIds.push(caseId);
+      index += 1;
+      continue;
+    }
+    throw new CliUsageError(`Unknown eval argument: ${token}`);
+  }
+
+  const { runEvalSuite } = await import('./evals/suite-runner.js');
+  const result = await runEvalSuite({
+    manifestPath,
+    selectedCaseIds: selectedCaseIds.length > 0 ? selectedCaseIds : undefined
+  });
+
+  console.log(`eval run: ${result.runId}`);
+  console.log(`suite: ${result.suiteId}`);
+  console.log(`results: ${path.dirname(result.lockedManifestPath)}`);
+  console.log('');
+  for (const caseResult of result.cases) {
+    console.log(
+      `${caseResult.caseId}  session=${caseResult.sessionId}  question=${caseResult.autoScore.questionActual ? 'yes' : 'no'}  experiments=${caseResult.autoScore.experimentActual}`
+    );
+  }
 }
 
 function printStatePaths(cwd: string): void {
@@ -355,10 +422,10 @@ function printPromptEvalSummary(input: {
   const spawnCalls = input.historyItems.filter(
     (item) => item.type === 'function_call' && item.name === 'spawn_experiment'
   ).length;
-  const bashExperimentProbes = input.historyItems.filter(
+  const inlineExperimentProbes = input.historyItems.filter(
     (item) =>
       item.type === 'function_call' &&
-      item.name === 'bash' &&
+      item.name === 'exec_command' &&
       /ExperimentManager|spawned exp-|worktree|startSubagent|spawn\(/i.test(item.arguments)
   ).length;
   const assistantText = input.transcript
@@ -384,8 +451,8 @@ function printPromptEvalSummary(input: {
     );
   }
 
-  if (bashExperimentProbes > 0) {
-    lines.push(`bash experiment-like probes: ${bashExperimentProbes}`);
+  if (inlineExperimentProbes > 0) {
+    lines.push(`exec_command experiment-like probes: ${inlineExperimentProbes}`);
   }
 
   lines.push(`assistant claimed experiment use: ${claimedExperimentUse ? 'yes' : 'no'}`);
