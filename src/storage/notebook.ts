@@ -1359,14 +1359,8 @@ export class Notebook {
 
   buildModelRequestHistory(sessionId: string): ModelHistoryItem[] {
     const checkpoint = this.getLatestSessionCheckpoint(sessionId);
-    const openStudyDebtReminder = this.buildOpenStudyDebtReminder(sessionId);
     if (!checkpoint) {
-      return [
-        ...(openStudyDebtReminder
-          ? [{ type: 'message', role: 'developer', content: openStudyDebtReminder } satisfies ModelHistoryItem]
-          : []),
-        ...this.listModelHistory(sessionId)
-      ];
+      return this.listModelHistory(sessionId);
     }
 
     const tailRows = this.db
@@ -1400,39 +1394,9 @@ export class Notebook {
         role: 'developer',
         content: checkpoint.checkpointBlock
       },
-      ...(openStudyDebtReminder
-        ? [{ type: 'message', role: 'developer', content: openStudyDebtReminder } satisfies ModelHistoryItem]
-        : []),
       ...tailRows.map(mapModelHistoryItem)
     ];
   }
-
-  buildOpenStudyDebtReminder(sessionId: string): string | null {
-    const openDebts = this.listOpenStudyDebts(sessionId);
-    if (openDebts.length === 0) {
-      return null;
-    }
-
-    return [
-      'Open questions:',
-      ...openDebts.map((debt) => {
-        const invalidated = this.listInvalidatedExperimentsForStudyDebt(debt.id);
-        const scope =
-          debt.affectedPaths && debt.affectedPaths.length > 0
-            ? ` scope=${debt.affectedPaths.join(', ')}`
-            : ' scope=all main-workspace edits';
-        const study = debt.recommendedStudy ? ` study=${debt.recommendedStudy}` : '';
-        const invalidation =
-          invalidated.length > 0
-            ? ` linked_invalidated_experiments=${invalidated
-                .map((experiment) => experiment.id)
-                .join(', ')}; do not continue on the invalidated path without narrowing scope or opening a new question.`
-            : '';
-        return `- ${debt.id} [${debt.kind}]: ${debt.summary}; why=${debt.whyItMatters}; resolve via study, static evidence, scope narrowing, or user override before dependent edits. Tie any related experiment to this question.${scope}${study}${invalidation}`;
-      })
-    ].join('\n');
-  }
-
 
   createSessionCheckpoint(input: {
     sessionId: string;

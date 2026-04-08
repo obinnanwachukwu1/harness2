@@ -393,7 +393,7 @@ test('Notebook persists checkpoints and rebuilds compacted request history from 
   ]);
 });
 
-test('Notebook persists open questions and injects question reminders into request history', async (t) => {
+test('Notebook persists open questions without injecting reminder developer messages into request history', async (t) => {
   const tempDir = await createTempDir('h2-notebook-open-question-');
   t.after(async () => cleanupDir(tempDir));
 
@@ -421,9 +421,8 @@ test('Notebook persists open questions and injects question reminders into reque
 
   const requestHistory = notebook.buildModelRequestHistory(session.id);
   assert.equal(requestHistory[0]?.type, 'message');
-  assert.equal(requestHistory[0]?.role, 'developer');
-  assert.match((requestHistory[0] as any).content, /Open questions:/);
-  assert.match((requestHistory[0] as any).content, /guest-to-login chat continuity is unproven/);
+  assert.equal(requestHistory[0]?.role, 'user');
+  assert.match((requestHistory[0] as any).content, /investigate auth continuity/);
 
   const timestamp = nowIso();
   notebook.upsertExperiment({
@@ -456,11 +455,6 @@ test('Notebook persists open questions and injects question reminders into reque
     promote: false
   });
 
-  assert.match(
-    notebook.buildOpenStudyDebtReminder(session.id) ?? '',
-    /linked_invalidated_experiments=exp-invalidated/
-  );
-
   notebook.createSessionCheckpoint({
     sessionId: session.id,
     goal: 'preserve continuity',
@@ -475,16 +469,11 @@ test('Notebook persists open questions and injects question reminders into reque
   });
 
   const compactedHistory = notebook.buildModelRequestHistory(session.id);
-  assert.deepEqual(compactedHistory.slice(0, 2), [
+  assert.deepEqual(compactedHistory.slice(0, 1), [
     {
       type: 'message',
       role: 'developer',
       content: 'Harness checkpoint with debt'
-    },
-    {
-      type: 'message',
-      role: 'developer',
-      content: notebook.buildOpenStudyDebtReminder(session.id)
     }
   ]);
 
@@ -495,7 +484,6 @@ test('Notebook persists open questions and injects question reminders into reque
   });
   assert.equal(resolved.status, 'closed');
   assert.equal(notebook.listOpenStudyDebts(session.id).length, 0);
-  assert.equal(notebook.buildOpenStudyDebtReminder(session.id), null);
 });
 
 test('Notebook rejects resolving a question while a linked experiment is still active', async (t) => {

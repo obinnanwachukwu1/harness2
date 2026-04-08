@@ -9,16 +9,8 @@ import { clampText, estimateTokens, nowIso } from '../lib/utils.js';
 import { EXPERIMENT_SUBAGENT_PROMPT, MAIN_AGENT_PROMPT } from './codex-prompt.js';
 import { Notebook } from '../storage/notebook.js';
 import {
-  buildEarlyStudyOpportunityHint,
-  buildExperimentHint,
   buildObservationHint,
-  buildPostSpawnWaitHint,
-  buildPreEditGuardHint,
-  shouldInjectEarlyStudyOpportunityHint,
-  shouldInjectExperimentHint,
   shouldInjectObservationHint,
-  shouldInjectPostSpawnWaitHint,
-  shouldInjectPreEditGuardHint
 } from './codex-hints.js';
 import {
   buildAiSdkTools,
@@ -152,24 +144,8 @@ export class CodexModelClient {
         return;
       }
 
-      const earlyStudyOpportunityHint = shouldInjectEarlyStudyOpportunityHint(
-        inputText,
-        requestItems,
-        toolDefinitions
-      )
-        ? buildEarlyStudyOpportunityHint()
-        : null;
       const hints = [
-        earlyStudyOpportunityHint,
-        !earlyStudyOpportunityHint &&
-        shouldInjectExperimentHint(inputText, requestItems, toolDefinitions)
-          ? buildExperimentHint()
-          : null,
-        shouldInjectPreEditGuardHint(requestItems) ? buildPreEditGuardHint() : null,
-        shouldInjectPostSpawnWaitHint(requestItems) ? buildPostSpawnWaitHint() : null,
-        shouldInjectObservationHint(requestItems, toolDefinitions)
-          ? buildObservationHint()
-          : null
+        shouldInjectObservationHint(requestItems, toolDefinitions) ? buildObservationHint() : null
       ].filter((value): value is string => Boolean(value));
       const response = await this.createResponse({
         accessToken,
