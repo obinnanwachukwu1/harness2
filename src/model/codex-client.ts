@@ -1803,7 +1803,7 @@ export const MAIN_TOOL_DEFINITIONS = [
     type: 'function',
     name: 'edit',
     description:
-      'Apply a patch-style edit to workspace files. The patch must use this exact format: begin with "*** Begin Patch" and end with "*** End Patch". Inside, use one or more operations: "*** Add File: path" followed by content lines prefixed with "+", "*** Delete File: path", or "*** Update File: path". An update may include optional "*** Move to: new/path" immediately after the update header, then one or more "@@" hunk markers followed by lines prefixed with space for context, "-" for removals, and "+" for additions. Prefer this over bash heredocs for creating or changing workspace files.',
+      'Apply file changes with the explicit patch grammar. Use this for normal workspace file creation, updates, moves, and deletions. The patch must start with "*** Begin Patch" and end with "*** End Patch". Use "*** Add File: path", "*** Update File: path", or "*** Delete File: path"; updates may include "*** Move to: new/path" and one or more "@@" hunks with context lines prefixed by space, removals by "-", and additions by "+". Prefer small, exact hunks. Do not use bash heredocs or ad hoc string replacement for normal file edits, and do not edit through a still-open load-bearing question.',
     parameters: {
       type: 'object',
       properties: {
@@ -1848,7 +1848,7 @@ export const MAIN_TOOL_DEFINITIONS = [
     type: 'function',
     name: 'spawn_experiment',
     description:
-      'Run a scoped experiment in a separate git worktree. Use this when the uncertainty is load-bearing and a bounded disposable study is the cheapest reliable way to answer the residual uncertainty after a focused local evidence pass. Do not use it to repeat the same local inspection the main thread can already perform directly. If an open question exists, this experiment must be tied to that question via questionId and should test the single residual uncertainty that static inspection has not settled yet, not restate the whole implementation plan. localEvidenceSummary should say what the focused local pass already established. residualUncertainty should name the one thing still unresolved that this experiment is meant to answer. Exploration should help reject plausible alternatives, not just confirm your preferred path. Default to one main evidence path for a dependent implementation decision; only open separate questions or run parallel experiments when they test orthogonal falsifiers or genuinely independent unresolved claims. If resolving the question requires a live external or secret-backed runtime probe and you can continue independent safe work in parallel, prefer spawning that probe as an experiment instead of blocking on it inline. If one focused local evidence pass is likely to settle the question directly, finish that pass before spawning. If inspection already settles the question, resolve it statically instead of spawning. If you do not have a strong reason to choose a smaller number, use a 50000 token budget.',
+      'Run a bounded experiment in an isolated worktree to answer one residual uncertainty. Use this only after a focused local evidence pass when the unresolved claim still matters and a disposable study is the cheapest reliable way to decide it. Tie the experiment to questionId when it is answering an open question. hypothesis should be falsifiable. localEvidenceSummary should state what the local pass already established. residualUncertainty should name the single remaining unknown this experiment must decide. Do not use this for vague exploration, repeated repo inspection, or to restate the full implementation plan. Prefer one experiment per question; parallel experiments only for orthogonal risks. Once this is the chosen evidence path for a question, prefer wait_experiment or read_experiment over duplicate inline probing. This is a good fit for live external or secret-backed probes when independent safe work can continue in parallel. If you do not have a strong reason to choose smaller, use a 50000 token budget.',
     parameters: {
       type: 'object',
       properties: {
@@ -1911,7 +1911,7 @@ export const MAIN_TOOL_DEFINITIONS = [
     type: 'function',
     name: 'search_experiments',
     description:
-      'Search prior experiment history for evidence relevant to the current question. Prior experiment search is never the first step on a new task. Do not use this as ad hoc memory lookup or precedent fishing. First articulate the live question, explicitly say why no question is needed, or resume a previously opened question; then search for prior findings that may answer or narrow that current uncertainty.',
+      'Search prior experiment history for evidence relevant to the current named question. This is never the first step on a new task and never freeform memory lookup. First have a live question, an explicitly resumed question, or an explicit decision that no question is needed; then search for prior experiments that may answer or narrow that current uncertainty. Query for the claim, not the broad topic. Treat hits as candidate evidence only; read the specific experiment before relying on it.',
     parameters: {
       type: 'object',
       properties: {
@@ -1924,7 +1924,7 @@ export const MAIN_TOOL_DEFINITIONS = [
     type: 'function',
     name: 'open_question',
     description:
-      'Declare an unresolved, load-bearing open question before editing code that depends on it. Use this when being wrong could materially change the implementation choice. Choose the question that would most change the architecture, state model, runtime behavior, protocol handling, recovery semantics, continuity assumptions, or durable product contract if answered differently. In fresh or near-empty repos, do not open a question just because more than one architecture exists; open one only when the prompt leaves a durable product contract underdetermined and silently choosing one interpretation would likely surprise the user or materially change downstream behavior. Do not spend an open question on a quick framework or library capability check that one focused local read, doc slice, or tiny inline probe can settle immediately unless that capability is the true blocker. If the only way to answer the uncertainty is a live external or secret-backed runtime probe, open the question first even if you expect the probe to be quick. Once declared, dependent main-workspace edits are blocked until the question is resolved. Opening a question does not require an experiment; you can resolve it with quick static evidence, a small inline probe, or a bounded study.',
+      'Declare a load-bearing unresolved claim that blocks dependent edits. Use this when being wrong could materially change architecture, interfaces, protocol behavior, recovery, durability, retry, ownership, history, or integration behavior. summary should name the concrete claim. whyItMatters should say what would change if the answer goes the other way. In greenfield work, do not open a question merely because several designs exist; open one only when the prompt leaves a product contract underdetermined. Do not spend a question on routine implementation taste or on a capability check that one focused read or tiny local probe can settle immediately unless that check is the true blocker. Open the question before any live external, secret-backed, or runtime probe that could change the implementation.',
     parameters: {
       type: 'object',
       properties: {
@@ -1948,7 +1948,7 @@ export const MAIN_TOOL_DEFINITIONS = [
     type: 'function',
     name: 'resolve_question',
     description:
-      'Resolve a previously opened question once it has been answered by running a study, justifying static evidence, narrowing scope, or honoring a user override.',
+      'Resolve a previously opened question once dependent edits are safe again. Use study_run when an experiment or other study answered it; static_evidence_sufficient when a focused local pass settled it; scope_narrowed when you explicitly reduced the claim or implementation scope so blocked edits no longer depend on the original question; user_override when the user explicitly chose the answer. note should record the answer or narrowing, the evidence that justified it, and why dependent edits are now allowed. Do not resolve with vague optimism.',
     parameters: {
       type: 'object',
       properties: {
