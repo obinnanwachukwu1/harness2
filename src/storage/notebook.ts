@@ -292,6 +292,22 @@ export class Notebook {
     return row ? mapSession(row) : null;
   }
 
+  listRecentSessions(limit = 10): SessionRecord[] {
+    const rows = this.db
+      .prepare(
+        `
+          SELECT id, cwd, started_at, last_active_at
+          FROM sessions
+          WHERE id LIKE 'session-%'
+          ORDER BY last_active_at DESC
+          LIMIT ?
+        `
+      )
+      .all(limit) as unknown as SessionRow[];
+
+    return rows.map(mapSession);
+  }
+
   appendTranscript(sessionId: string, role: TranscriptRole, text: string): void {
     const timestamp = nowIso();
     this.db

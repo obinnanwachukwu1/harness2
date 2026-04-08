@@ -6,7 +6,7 @@ import { fileURLToPath } from 'node:url';
 
 import { execa } from 'execa';
 
-import type { ExperimentRecord, ModelHistoryItem, TranscriptEntry } from './types.js';
+import type { ExperimentRecord, ModelHistoryItem, SessionRecord, TranscriptEntry } from './types.js';
 import { describeStatePaths, getRepoNotebookPath } from './state-paths.js';
 
 class CliUsageError extends Error {}
@@ -57,7 +57,9 @@ async function main(): Promise<void> {
 
   const sessionId = command === 'resume' ? args[1] : undefined;
   if (command === 'resume' && !sessionId) {
-    throw new CliUsageError('Usage: h2 resume <sessionId>');
+    await assertInsideGitRepository(process.cwd());
+    await printRecentSessions(process.cwd());
+    return;
   }
 
   if (command && command !== 'resume') {
@@ -69,6 +71,7 @@ async function main(): Promise<void> {
 }
 
 async function runOpenTui(sessionId?: string): Promise<void> {
+  await assertKnownSession(process.cwd(), sessionId);
   const repoRoot = resolveHarnessRoot();
   const entryPath = path.join(repoRoot, 'packages/ui-opentui/src/index.ts');
   await assertBunAvailable();
@@ -254,6 +257,7 @@ function printUsage(): void {
   console.log('Examples:');
   console.log('h2');
   console.log('h2 -p "inspect the repo"');
+  console.log('h2 resume');
   console.log('h2 resume <sessionId>');
   console.log('h2 auth login');
   console.log('h2 doctor');
@@ -423,6 +427,63 @@ async function assertInsideGitRepository(cwd: string): Promise<void> {
   throw new Error(
     'h2 requires a Git repository with at least one commit. Create an initial commit, then retry.'
   );
+}
+
+async function assertKnownSession(cwd: string, sessionId?: string): Promise<void> {
+  if (!sessionId) {
+    return;
+  }
+
+  const { Notebook } = await import('./storage/notebook.js');
+  const notebook = new Notebook(getRepoNotebookPath(cwd));
+  try {
+    if (notebook.getSession(sessionId)) {
+      return;
+    }
+
+    const recentSessions = notebook.listRecentSessions(10);
+    const recentSummary =
+      recentSessions.length > 0
+        ? `\n\nRecent sessions in this repo:\n${formatSessionList(recentSessions)}`
+        : '\n\nNo saved sessions were found in this repo.';
+
+    throw new Error(
+      `Unknown session: ${sessionId}. Sessions are stored per repository, so run \`h2 resume ${sessionId}\` from the repo where that session was created.${recentSummary}`
+    );
+  } finally {
+    notebook.close();
+  }
+}
+
+async function printRecentSessions(cwd: string): Promise<void> {
+  const { Notebook } = await import('./storage/notebook.js');
+  const notebook = new Notebook(getRepoNotebookPath(cwd));
+
+  try {
+    const recentSessions = notebook.listRecentSessions(10);
+    if (recentSessions.length === 0) {
+      console.log('No saved sessions in this repo yet.');
+      console.log('Start one with `h2` or `h2 -p "<prompt>"`.');
+      return;
+    }
+
+    console.log(`Recent sessions for ${cwd}:`);
+    console.log('');
+    console.log(formatSessionList(recentSessions));
+    console.log('');
+    console.log('Resume one with `h2 resume <sessionId>`.');
+  } finally {
+    notebook.close();
+  }
+}
+
+function formatSessionList(sessions: SessionRecord[]): string {
+  return sessions
+    .map(
+      (session) =>
+        `${session.id}  last active ${session.lastActiveAt}  started ${session.startedAt}`
+    )
+    .join('\n');
 }
 
 async function assertBunAvailable(): Promise<void> {

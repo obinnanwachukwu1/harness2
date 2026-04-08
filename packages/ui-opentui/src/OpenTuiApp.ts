@@ -46,6 +46,7 @@ export class OpenTuiApp {
   private currentBlocks: OpenTuiRenderBlock[] = [];
   private readonly experimentChildIds = new Set<string>();
   private destroyed = false;
+  private lastBridgeError: string | null = null;
   private resolveRun?: () => void;
   private transientStatus: { message: string; timeout: ReturnType<typeof setTimeout> | null } | null = null;
 
@@ -196,12 +197,13 @@ export class OpenTuiApp {
       if (this.destroyed) {
         return;
       }
+      const exitLabel = `bridge exited (${code ?? 'unknown'})`;
       this.renderStatusLine({
-        label: `bridge exited (${code ?? 'unknown'})`,
+        label: this.lastBridgeError ? 'error' : exitLabel,
         model: this.state?.status.model ?? 'gpt-5.4',
         contextText: this.state?.status.contextText ?? '',
         contextUsagePercent: this.state?.status.contextUsagePercent ?? 0,
-        usageText: this.state?.status.usageText ?? ''
+        usageText: this.lastBridgeError ? `${this.lastBridgeError} (${exitLabel})` : this.state?.status.usageText ?? ''
       });
       this.renderer.requestRender();
     });
@@ -298,6 +300,7 @@ export class OpenTuiApp {
 
   private handleBridgeEvent(event: OpenTuiBridgeEvent): void {
     if (event.type === 'error') {
+      this.lastBridgeError = event.message;
       this.renderStatusLine({
         label: 'error',
         model: this.state?.status.model ?? 'gpt-5.4',
@@ -318,6 +321,7 @@ export class OpenTuiApp {
   }
 
   private applyState(state: OpenTuiState): void {
+    this.lastBridgeError = null;
     this.state = state;
     this.input.placeholder = state.inputPlaceholder;
     this.syncTranscript(state.blocks);
