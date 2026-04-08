@@ -224,6 +224,66 @@ test('ExperimentManager resolve updates status and removes or preserves the work
   assert.equal(await pathExists(preserved.worktreePath), true);
 });
 
+test('ExperimentManager requires evidence or an explicit resolution note before resolving', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const notebook = new Notebook(path.join(repoDir, '.h2', 'test.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-test', repoDir);
+
+  let releaseSubagent: (() => void) | null = null;
+  const manager = createManager(
+    repoDir,
+    notebook,
+    async () =>
+      new Promise<void>((resolve) => {
+        releaseSubagent = resolve;
+      })
+  );
+  t.after(async () => {
+    releaseSubagent?.();
+    await manager.dispose();
+  });
+
+  const experiment = await manager.spawn({
+    sessionId: 'session-test',
+    hypothesis: 'check resolution hygiene',
+    localEvidenceSummary: 'The worktree can be created and the experiment can start.',
+    residualUncertainty: 'Whether resolve_experiment can succeed without any meaningful findings.',
+    budgetTokens: 1200,
+    preserve: false
+  });
+
+  await assert.rejects(
+    () =>
+      manager.resolve({
+        experimentId: experiment.id,
+        verdict: 'inconclusive',
+        summary: 'No result yet.',
+        discovered: [],
+        promote: false
+      }),
+    /requires either a material observation trail or an explicit resolutionNote/i
+  );
+
+  const resolution = await manager.resolve({
+    experimentId: experiment.id,
+    verdict: 'inconclusive',
+    summary: 'No reliable signal after the initial setup.',
+    discovered: [],
+    resolutionNote: 'No finding: the minimal checks produced no differentiating evidence.',
+    promote: false
+  });
+
+  assert.equal(resolution.verdict, 'inconclusive');
+  assert.ok(
+    manager
+      .read(experiment.id)
+      .observations.some((entry) => entry.message.includes('Resolution note: No finding'))
+  );
+});
+
 test('ExperimentManager pauses and notifies when the budget is exhausted', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));

@@ -1021,6 +1021,65 @@ test('HeadlessEngine rejects resolving a question while a linked experiment is s
   );
 });
 
+test('HeadlessEngine blocks overlapping inline read probes while a linked experiment is active', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  await mkdir(path.join(repoDir, 'src', 'auth'), { recursive: true });
+  await writeFile(path.join(repoDir, 'src', 'auth', 'flow.ts'), 'export const flow = true;\n', 'utf8');
+  await writeFile(path.join(repoDir, 'notes.txt'), 'safe\n', 'utf8');
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const notebook = (engine as any).options.notebook;
+  const question = notebook.openStudyDebt({
+    sessionId: engine.snapshot.session.id,
+    summary: 'auth continuity is under experiment',
+    whyItMatters: 'Being wrong would materially change the auth flow.',
+    kind: 'runtime',
+    affectedPaths: ['src/auth']
+  });
+
+  const timestamp = nowIso();
+  notebook.upsertExperiment({
+    id: 'exp-auth-running',
+    sessionId: engine.snapshot.session.id,
+    studyDebtId: question.id,
+    hypothesis: 'guest continuity survives auth transitions',
+    command: 'subagent',
+    context: '',
+    baseCommitSha: 'abc123',
+    branchName: 'h2-exp-auth-running',
+    worktreePath: path.join(repoDir, '.h2', 'worktrees', 'exp-auth-running'),
+    status: 'running',
+    budget: 5000,
+    tokensUsed: 100,
+    contextTokensUsed: 10,
+    toolOutputTokensUsed: 80,
+    observationTokensUsed: 10,
+    preserve: false,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    resolvedAt: null,
+    finalVerdict: null,
+    finalSummary: null,
+    discovered: [],
+    artifacts: [],
+    constraints: [],
+    confidenceNote: null,
+    lowSignalWarningEmitted: false,
+    promote: false
+  });
+
+  await assert.rejects(
+    () => (engine as any).runRead('src/auth/flow.ts'),
+    /Use wait_experiment or read_experiment before more inline probing on the same question/i
+  );
+
+  await assert.doesNotReject(() => (engine as any).runRead('notes.txt'));
+});
+
 test('HeadlessEngine surfaces linked invalidations in open-question mutation blocks', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));

@@ -505,6 +505,7 @@ export class HeadlessEngine {
   }
 
   private async runBashAtRoot(root: string, command: string): Promise<string> {
+    this.assertExperimentAllowsInlineProbe(root, 'bash');
     const result = await execa(DEFAULT_COMMAND_SHELL, ['-lc', command], {
       cwd: root,
       reject: false
@@ -524,6 +525,7 @@ export class HeadlessEngine {
     endLine?: number
   ): Promise<string> {
     const resolvedPath = this.resolveRootedPath(root, filePath);
+    this.assertExperimentAllowsInlineProbe(root, 'read', [resolvedPath]);
     const content = await readFile(resolvedPath, 'utf8');
     const allLines = content.split(/\r?\n/);
     const totalLines = allLines.length;
@@ -582,6 +584,7 @@ export class HeadlessEngine {
   }
 
   private async runGlobAtRoot(root: string, patternText: string): Promise<string[]> {
+    this.assertExperimentAllowsInlineProbe(root, 'glob');
     const matches: string[] = [];
     for await (const entry of glob(patternText, { cwd: root })) {
       matches.push(entry);
@@ -602,6 +605,7 @@ export class HeadlessEngine {
 
   private async runLsAtRoot(root: string, filePath = '.', recursive = false): Promise<string> {
     const targetPath = this.resolveRootedPath(root, filePath);
+    this.assertExperimentAllowsInlineProbe(root, 'ls', [targetPath]);
     const command = recursive ? `ls -laR ${shellQuote(targetPath)}` : `ls -la ${shellQuote(targetPath)}`;
     const result = await execaCommand(command, {
       cwd: root,
@@ -623,6 +627,10 @@ export class HeadlessEngine {
     target: string | string[] = '.'
   ): Promise<string> {
     const targets = await normalizeRgTargets(root, target);
+    const resolvedTargets = targets
+      .filter((entry) => entry !== '.')
+      .map((entry) => this.resolveRootedPath(root, entry));
+    this.assertExperimentAllowsInlineProbe(root, 'rg', resolvedTargets);
     try {
       const result = await execa(
         'rg',
@@ -1310,6 +1318,67 @@ export class HeadlessEngine {
           ? 'A linked experiment invalidated the current path. Before editing dependent code, narrow the claim with resolve_question(scope_narrowed), open a new question for a different path, or record a user override.'
           : 'Before editing dependent code, either run a bounded study, resolve the question with static evidence justification, resolve it via explicit scope narrowing, or record a user override with resolve_question.',
         'If this edit depends on additional unresolved risk that is not covered here, open a question for that too before continuing.'
+      ].join('\n')
+    );
+  }
+
+  private assertExperimentAllowsInlineProbe(
+    root: string,
+    toolName: 'bash' | 'read' | 'ls' | 'glob' | 'rg',
+    resolvedTargets: string[] = []
+  ): void {
+    if (root !== this.options.cwd) {
+      return;
+    }
+
+    const openDebts = this.options.notebook.listOpenStudyDebts(this.options.sessionId);
+    if (openDebts.length === 0) {
+      return;
+    }
+
+    const blockingDebts = openDebts.filter((debt) => {
+      const activeExperiments = this.options.notebook.listActiveExperimentsForStudyDebt(debt.id);
+      if (activeExperiments.length === 0) {
+        return false;
+      }
+
+      if (!debt.affectedPaths || debt.affectedPaths.length === 0) {
+        return true;
+      }
+
+      if (resolvedTargets.length === 0) {
+        return false;
+      }
+
+      return debt.affectedPaths.some((scope) => {
+        const resolvedScope = this.resolveRootedPath(this.options.cwd, scope);
+        return resolvedTargets.some(
+          (resolvedTarget) =>
+            resolvedTarget === resolvedScope ||
+            resolvedTarget.startsWith(`${resolvedScope}${path.sep}`)
+        );
+      });
+    });
+
+    if (blockingDebts.length === 0) {
+      return;
+    }
+
+    throw new Error(
+      [
+        `An active linked experiment already owns this evidence path for ${toolName}.`,
+        ...blockingDebts.map((debt) => {
+          const activeExperiments = this.options.notebook
+            .listActiveExperimentsForStudyDebt(debt.id)
+            .map((experiment) => experiment.id)
+            .join(', ');
+          const scope =
+            debt.affectedPaths && debt.affectedPaths.length > 0
+              ? debt.affectedPaths.join(', ')
+              : 'all main-workspace evidence';
+          return `${debt.id}: ${debt.summary} [active_experiments=${activeExperiments}; affected_paths=${scope}]`;
+        }),
+        'Use wait_experiment or read_experiment before more inline probing on the same question.'
       ].join('\n')
     );
   }

@@ -393,6 +393,7 @@ export interface AgentTools {
     artifacts?: string[];
     constraints?: string[];
     confidenceNote?: string;
+    resolutionNote?: string;
     promote: boolean;
   }): Promise<ExperimentResolution>;
   authLogin(): Promise<string>;

@@ -464,6 +464,7 @@ export const MAIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
           items: { type: 'string' }
         },
         confidenceNote: { type: 'string' },
+        resolutionNote: { type: 'string' },
         promote: { type: 'boolean' }
       },
       required: ['experimentId', 'verdict', 'summary'],
@@ -528,6 +529,7 @@ export const EXPERIMENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
           items: { type: 'string' }
         },
         confidenceNote: { type: 'string' },
+        resolutionNote: { type: 'string' },
         promote: { type: 'boolean' }
       },
       required: ['experimentId', 'verdict', 'summary'],
@@ -796,6 +798,7 @@ async function executeToolCall(call: ToolCall, tools: AgentTools): Promise<strin
           artifacts: readOptionalStringArrayArg(args, 'artifacts') ?? [],
           constraints: readOptionalStringArrayArg(args, 'constraints') ?? [],
           confidenceNote: readOptionalStringArg(args, 'confidenceNote'),
+          resolutionNote: readOptionalStringArg(args, 'resolutionNote'),
           promote: readOptionalBooleanArg(args, 'promote') ?? false
         }),
         null,

@@ -247,11 +247,31 @@ export class ExperimentManager {
     artifacts?: string[];
     constraints?: string[];
     confidenceNote?: string;
+    resolutionNote?: string;
     promote: boolean;
   }): Promise<ExperimentResolution> {
     const record = this.getMutableRecord(input.experimentId);
     if (record.status !== 'running') {
       return this.toResolution(record);
+    }
+
+    const details = this.read(record.id);
+    const meaningfulObservations = details.observations.filter(
+      (observation) => !isBootstrapObservation(observation.message)
+    );
+    const hasExplicitResolutionNote = Boolean(input.resolutionNote?.trim());
+    const hasMaterialEvidence =
+      meaningfulObservations.length > 0 ||
+      input.discovered.length > 0 ||
+      (input.artifacts?.length ?? 0) > 0 ||
+      (input.constraints?.length ?? 0) > 0 ||
+      Boolean(input.confidenceNote?.trim()) ||
+      hasExplicitResolutionNote;
+
+    if (!hasMaterialEvidence) {
+      throw new Error(
+        'resolve_experiment requires either a material observation trail or an explicit resolutionNote for the blocker/no-finding case.'
+      );
     }
 
     const preserved = record.preserve || input.promote;
@@ -270,6 +290,15 @@ export class ExperimentManager {
     record.preserve = preserved;
     record.updatedAt = resolvedAt;
     record.resolvedAt = resolvedAt;
+
+    if (hasExplicitResolutionNote) {
+      await this.appendObservation(
+        record,
+        `Resolution note: ${clampText(input.resolutionNote!.trim(), 4000)}`,
+        input.verdict === 'validated' ? ['conclusion'] : ['blocker', 'conclusion'],
+        { countBudget: false }
+      );
+    }
 
     if (record.promote) {
       await this.appendObservation(
