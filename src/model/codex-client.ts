@@ -2,9 +2,7 @@ import { appendFile, mkdir } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 
-import { stepCountIs, streamText, type ModelMessage } from 'ai';
-import { createOpenAI } from '@ai-sdk/openai';
-import { OPENAI_CODEX_ORIGINATOR, OpenAICodexAuth } from '../auth/openai-codex.js';
+import { OpenAICodexAuth } from '../auth/openai-codex.js';
 import { clampText, estimateTokens, nowIso } from '../lib/utils.js';
 import { EXPERIMENT_SUBAGENT_PROMPT, MAIN_AGENT_PROMPT } from './codex-prompt.js';
 import { Notebook } from '../storage/notebook.js';
@@ -13,18 +11,20 @@ import {
   shouldInjectObservationHint,
 } from './codex-hints.js';
 import {
-  buildAiSdkTools,
   executeToolCallBatch,
   formatLiveToolBody,
   formatToolHeader,
   formatToolOutput,
   isParallelReadOnlyToolCall,
   MAIN_TOOL_DEFINITIONS,
-  normalizeExperimentWaitTimeout,
-  parseArguments,
-  type ToolCall,
   type ToolDefinition
 } from './codex-tooling.js';
+import {
+  createModelStepResponse,
+  type ModelStepResponse,
+  type ProviderToolEvent,
+  toResponseInputItem
+} from './codex-response.js';
 import type {
   AgentTools,
   ModelHistoryItem,
@@ -42,7 +42,6 @@ const DEBUG_RESPONSES_ENABLED = process.env.H2_DEBUG_RESPONSES === '1';
 const DEBUG_RESPONSES_FILE =
   process.env.H2_DEBUG_RESPONSES_FILE ??
   path.join(process.cwd(), '.h2', 'debug', 'responses.jsonl');
-const DEFAULT_WEB_SEARCH_MODE = 'cached';
 
 export { EXPERIMENT_TOOL_DEFINITIONS, MAIN_TOOL_DEFINITIONS } from './codex-tooling.js';
 
@@ -52,25 +51,10 @@ interface CodexModelClientOptions {
   model?: string;
 }
 
-interface ModelStepResponse {
-  id?: string;
-  assistantText: string;
-  reasoningSummary: string;
-  toolCalls: ToolCall[];
-  providerToolEvents: ProviderToolEvent[];
-}
-
 interface ContextWindowUsage {
   usedTokens: number;
   totalTokens: number;
   standardRateTokens: number | null;
-}
-
-interface ProviderToolEvent {
-  name: 'web_search';
-  toolCallId: string;
-  transcript: string;
-  historyNotice: string;
 }
 
 export class CodexModelClient {
@@ -343,16 +327,11 @@ export class CodexModelClient {
     accountId: string;
     sessionId: string;
     settings: ModelSessionRecord;
-    input: Array<{ role: 'user' | 'assistant' | 'system' | 'developer'; content: string } | {
-      type: 'function_call';
-      call_id: string;
-      name: string;
-      arguments: string;
-    } | {
-      type: 'function_call_output';
-      call_id: string;
-      output: string;
-    }>;
+    input: Array<
+      | { role: 'user' | 'assistant' | 'system' | 'developer'; content: string }
+      | { type: 'function_call'; call_id: string; name: string; arguments: string }
+      | { type: 'function_call_output'; call_id: string; output: string }
+    >;
     onAssistantStream?: (text: string) => Promise<void>;
     onReasoningSummaryStream?: (text: string) => Promise<void>;
     onToolCallStart?: (toolCall: {
@@ -368,190 +347,18 @@ export class CodexModelClient {
     toolDefinitions: readonly ToolDefinition[];
     instructions: string;
   }): Promise<ModelStepResponse> {
-    const provider = this.createCodexProvider(input.accessToken, input.accountId, input.sessionId);
-    const model = provider.responses(input.settings.model);
-    const messages = buildAiSdkMessages(input.input);
-    const tools = buildAiSdkTools(input.toolDefinitions, provider, getWebSearchMode());
-    let liveAssistantText = '';
-    let liveReasoningSummary = '';
-
-    await debugResponseShape(input.sessionId, 'request', {
+    return createModelStepResponse({
+      fetchImpl: this.fetchImpl,
       endpoint: this.endpoint,
-      model: input.settings.model,
-      reasoning:
-        input.settings.reasoningEffort || input.thinkingEnabled
-          ? {
-              effort: input.settings.reasoningEffort ?? null,
-              summary: input.thinkingEnabled ? 'auto' : null
-            }
-          : null,
-      input: messages,
-      prompt_cache_key: input.sessionId
-    });
-
-    const result = streamText({
-      model,
-      messages,
-      tools,
-      toolChoice: 'auto',
-      stopWhen: stepCountIs(1),
+      aiProviderBaseUrl: this.aiProviderBaseUrl,
       maxRetries: MAX_TRANSIENT_MODEL_RETRIES,
-      providerOptions: {
-        openai: {
-          instructions: input.instructions,
-          promptCacheKey: input.sessionId,
-          store: false,
-          systemMessageMode: 'developer',
-          ...(input.settings.reasoningEffort
-            ? { reasoningEffort: input.settings.reasoningEffort }
-            : {}),
-          ...(input.thinkingEnabled ? { reasoningSummary: 'auto' } : {})
-        }
-      },
-      onChunk: async ({ chunk }) => {
-        if (chunk.type === 'text-delta') {
-          liveAssistantText += chunk.text;
-          await input.onAssistantStream?.(liveAssistantText);
-        }
-
-        if (chunk.type === 'reasoning-delta') {
-          liveReasoningSummary += chunk.text;
-          await input.onReasoningSummaryStream?.(liveReasoningSummary);
-        }
-      },
-      onError: async ({ error }) => {
-        throw error;
-      }
-    });
-
-    const announcedProviderToolCalls = new Set<string>();
-    const emittedProviderToolResults = new Set<string>();
-    for await (const part of result.fullStream) {
-      if (
-        part.type === 'tool-call' &&
-        part.providerExecuted === true &&
-        !announcedProviderToolCalls.has(part.toolCallId)
-      ) {
-        announcedProviderToolCalls.add(part.toolCallId);
-        await input.onToolCallStart?.({
-          toolCallId: part.toolCallId,
-          toolName: part.toolName,
-          label: formatToolHeader(part.toolName, JSON.stringify(part.input)),
-          detail: 'searching…',
-          body: formatLiveToolBody(part.toolName, JSON.stringify(part.input)),
-          providerExecuted: true
-        });
-      }
-
-      if (
-        part.type === 'tool-result' &&
-        part.providerExecuted === true &&
-        !part.preliminary &&
-        !emittedProviderToolResults.has(part.toolCallId)
-      ) {
-        const event = buildProviderToolEventFromOutput(part.toolCallId, part.output);
-        if (event) {
-          emittedProviderToolResults.add(part.toolCallId);
-          await input.onProviderToolEvent?.(event);
-        }
-      }
-    }
-
-    const response = await result.response;
-    const assistantText = await result.text;
-    const reasoningSummary = await result.reasoningText;
-    const toolCalls = await result.toolCalls;
-    const toolResults = await result.toolResults;
-    const sources = await result.sources;
-    const providerToolEvents = buildProviderToolEvents(toolCalls, toolResults, sources).filter(
-      (event) => !emittedProviderToolResults.has(event.toolCallId)
-    );
-    const localToolCalls = toolCalls.filter((call) => !call.providerExecuted);
-
-    await debugResponseShape(input.sessionId, 'sdk_response', {
-      id: response.id ?? null,
-      finishReason: await result.finishReason,
-      text: assistantText,
-      reasoningText: reasoningSummary ?? null,
-      toolCalls: toolCalls.map((call) => ({
-        toolCallId: call.toolCallId,
-        toolName: call.toolName,
-        input: call.input,
-        providerExecuted: call.providerExecuted ?? false
-      })),
-      toolResults,
-      sources,
-      usage: await result.usage
-    });
-
-    return {
-      id: response.id ?? undefined,
-      assistantText: (assistantText.trim() || liveAssistantText.trim()),
-      reasoningSummary: (reasoningSummary?.trim() || liveReasoningSummary.trim()),
-      toolCalls: localToolCalls.map((call) => ({
-        name: call.toolName,
-        callId: call.toolCallId,
-        rawArguments: JSON.stringify(call.input)
-      })),
-      providerToolEvents
-    };
-  }
-
-  private createCodexProvider(accessToken: string, accountId: string, sessionId: string) {
-    return createOpenAI({
-      apiKey: accessToken,
-      baseURL: this.aiProviderBaseUrl,
-      fetch: async (requestInput, init) => {
-        const headers = new Headers(init?.headers);
-        headers.set('authorization', `Bearer ${accessToken}`);
-        headers.set('originator', OPENAI_CODEX_ORIGINATOR);
-        headers.set('session_id', sessionId);
-
-        if (accountId) {
-          headers.set('chatgpt-account-id', accountId);
-        }
-
-        const parsed =
-          requestInput instanceof URL
-            ? requestInput
-            : new URL(typeof requestInput === 'string' ? requestInput : requestInput.url);
-        const url =
-          parsed.pathname.includes('/v1/responses') || parsed.pathname.includes('/chat/completions')
-            ? new URL(this.endpoint)
-            : parsed;
-
-        return this.fetchWithRetries(url, {
-          ...init,
-          headers
-        });
-      }
+      ...input,
+      debugResponse: (kind, payload) => debugResponseShape(input.sessionId, kind, payload)
     });
   }
 
   private persistSession(record: ModelSessionRecord): void {
     this.notebook.upsertModelSession(record);
-  }
-
-  private async fetchWithRetries(input: RequestInfo | URL, init: RequestInit): Promise<Response> {
-    let attempt = 0;
-    let lastResponse: Response | null = null;
-
-    while (attempt <= MAX_TRANSIENT_MODEL_RETRIES) {
-      const response = await this.fetchImpl(input, init);
-      if (response.status !== 500) {
-        return response;
-      }
-
-      lastResponse = response;
-      if (attempt === MAX_TRANSIENT_MODEL_RETRIES) {
-        return response;
-      }
-
-      attempt += 1;
-      await delay(250 * attempt);
-    }
-
-    return lastResponse ?? this.fetchImpl(input, init);
   }
 
   private persistHistoryItem(sessionId: string, item: ModelHistoryItem): void {
@@ -576,172 +383,6 @@ export class CodexModelClient {
       updatedAt: nowIso()
     };
   }
-}
-
-
-function toResponseInputItem(item: ModelHistoryItem):
-  | { role: 'user' | 'assistant' | 'system' | 'developer'; content: string }
-  | { type: 'function_call'; call_id: string; name: string; arguments: string }
-  | { type: 'function_call_output'; call_id: string; output: string } {
-  if (item.type === 'message') {
-    return {
-      role: item.role,
-      content: item.content
-    };
-  }
-
-  if (item.type === 'function_call') {
-    return item;
-  }
-
-  return item;
-}
-
-function buildAiSdkMessages(
-  items: Array<
-    | { role: 'user' | 'assistant' | 'system' | 'developer'; content: string }
-    | { type: 'function_call'; call_id: string; name: string; arguments: string }
-    | { type: 'function_call_output'; call_id: string; output: string }
-  >
-): ModelMessage[] {
-  const messages: ModelMessage[] = [];
-  const toolCallNames = new Map<string, string>();
-
-  for (const item of items) {
-    if ('role' in item) {
-      if (item.role === 'user') {
-        messages.push({ role: 'user', content: item.content });
-        continue;
-      }
-
-      if (item.role === 'assistant') {
-        messages.push({ role: 'assistant', content: item.content });
-        continue;
-      }
-
-      messages.push({ role: 'system', content: item.content });
-      continue;
-    }
-
-    if (item.type === 'function_call') {
-      toolCallNames.set(item.call_id, item.name);
-      messages.push({
-        role: 'assistant',
-        content: [
-          {
-            type: 'tool-call',
-            toolCallId: item.call_id,
-            toolName: item.name,
-            input: parseArguments(item.arguments)
-          }
-        ]
-      });
-      continue;
-    }
-
-    messages.push({
-      role: 'tool',
-      content: [
-        {
-          type: 'tool-result',
-          toolCallId: item.call_id,
-          toolName: toolCallNames.get(item.call_id) ?? 'unknown_tool',
-          output: {
-            type: 'text',
-            value: item.output
-          }
-        }
-      ]
-    });
-  }
-
-  return messages;
-}
-
-function getWebSearchMode(): 'disabled' | 'cached' | 'live' {
-  const raw = process.env.H2_WEB_SEARCH_MODE?.trim().toLowerCase();
-  if (raw === 'disabled' || raw === 'cached' || raw === 'live') {
-    return raw;
-  }
-  return DEFAULT_WEB_SEARCH_MODE;
-}
-
-function buildProviderToolEvents(
-  toolCalls: Array<{ toolCallId: string; toolName: string; providerExecuted?: boolean }>,
-  toolResults: Array<{
-    toolCallId: string;
-    toolName: string;
-    providerExecuted?: boolean;
-    output: unknown;
-  }>,
-  sources: Array<{ type?: string; url?: string; name?: string }>
-): ProviderToolEvent[] {
-  const providerToolResults = toolResults.filter(
-    (result) => result.providerExecuted && result.toolName === 'web_search'
-  );
-  const events: ProviderToolEvent[] = [];
-
-  for (const result of providerToolResults) {
-    const fallbackSources = sources
-      .map((source) => source.url ?? source.name)
-      .filter((value): value is string => typeof value === 'string' && value.length > 0);
-    const event = buildProviderToolEventFromOutput(result.toolCallId, result.output, fallbackSources);
-    if (event) {
-      events.push(event);
-    }
-  }
-
-  return events;
-}
-
-function buildProviderToolEventFromOutput(
-  toolCallId: string,
-  outputValue: unknown,
-  fallbackSources: string[] = []
-): ProviderToolEvent | null {
-  const output = readWebSearchOutput(outputValue);
-  const query =
-    output?.action?.type === 'search' ? output.action.query?.trim() || undefined : undefined;
-  const outputSources = output?.sources
-    ?.map((source) => (source.type === 'url' ? source.url : source.name))
-    .filter((value): value is string => typeof value === 'string' && value.length > 0);
-  const sourceList = (outputSources && outputSources.length > 0 ? outputSources : fallbackSources).slice(0, 5);
-  const transcriptLines = query ? [`query: ${query}`] : [];
-  if (sourceList.length > 0) {
-    transcriptLines.push('sources:');
-    transcriptLines.push(...sourceList.map((source) => `- ${source}`));
-  } else {
-    transcriptLines.push('sources: none returned');
-  }
-  const header = query ? `WebSearch(${compactTextForHeader(query, 72)})` : 'WebSearch';
-
-  return {
-    name: 'web_search',
-    toolCallId,
-    transcript: `@@tool\tweb_search\t${header}\n${transcriptLines.join('\n')}`,
-    historyNotice: ['Built-in web_search executed.', ...transcriptLines].join('\n')
-  };
-}
-
-function readWebSearchOutput(value: unknown):
-  | {
-      action?: { type?: string; query?: string };
-      sources?: Array<{ type: string; url?: string; name?: string }>;
-    }
-  | undefined {
-  if (!value || typeof value !== 'object' || Array.isArray(value)) {
-    return undefined;
-  }
-
-  const candidate = value as {
-    action?: { type?: string; query?: string };
-    sources?: Array<{ type: string; url?: string; name?: string }>;
-  };
-  return candidate;
-}
-
-function compactTextForHeader(text: string, limit: number): string {
-  return text.length <= limit ? text : `${text.slice(0, limit - 1)}…`;
 }
 
 function formatReadHeader(path: string, startLine?: number, endLine?: number): string {
@@ -831,12 +472,6 @@ function normalizeMaxModelSteps(value: string | undefined): number | null {
   }
 
   return parsed;
-}
-
-function delay(ms: number): Promise<void> {
-  return new Promise((resolve) => {
-    setTimeout(resolve, ms);
-  });
 }
 
 async function debugResponseShape(

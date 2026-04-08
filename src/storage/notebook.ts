@@ -23,7 +23,21 @@ import type {
   TranscriptEntry,
   TranscriptRole
 } from '../types.js';
-import { nowIso } from '../lib/utils.js';
+import { createStudyDebtId, nowIso } from '../lib/utils.js';
+import {
+  appendObservation,
+  EXPERIMENT_SCHEMA_SQL,
+  getExperiment,
+  getExperimentDetails,
+  listActiveExperimentsForStudyDebt,
+  listExperiments,
+  listInvalidatedExperimentsForStudyDebt,
+  listObservations,
+  migrateExperimentTables,
+  searchExperimentDetails,
+  searchExperimentSummaries,
+  upsertExperiment
+} from './notebook-experiments.js';
 
 interface SessionRow {
   id: string;
@@ -38,44 +52,6 @@ interface TranscriptRow {
   role: TranscriptRole;
   text: string;
   created_at: string;
-}
-
-interface ExperimentRow {
-  id: string;
-  session_id: string;
-  study_debt_id: string | null;
-  hypothesis: string;
-  command: string;
-  context: string;
-  base_commit_sha: string;
-  branch_name: string;
-  worktree_path: string;
-  status: ExperimentRecord['status'];
-  budget: number;
-  tokens_used: number;
-  context_tokens_used: number;
-  tool_output_tokens_used: number;
-  observation_tokens_used: number;
-  preserve: number;
-  created_at: string;
-  updated_at: string;
-  resolved_at: string | null;
-  final_verdict: ExperimentRecord['finalVerdict'];
-  final_summary: string | null;
-  discovered_json: string | null;
-  artifacts_json: string | null;
-  constraints_json: string | null;
-  confidence_note: string | null;
-  low_signal_warning_emitted: number;
-  promote: number;
-}
-
-interface ObservationRow {
-  id: number;
-  experiment_id: string;
-  message: string;
-  created_at: string;
-  tags_json: string | null;
 }
 
 interface AuthTokenRow {
@@ -181,49 +157,7 @@ export class Notebook {
       CREATE INDEX IF NOT EXISTS idx_transcript_session_created_at
       ON transcript_entries(session_id, created_at);
 
-      CREATE TABLE IF NOT EXISTS experiments (
-        id TEXT PRIMARY KEY,
-        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
-        study_debt_id TEXT REFERENCES study_debts(id) ON DELETE SET NULL,
-        hypothesis TEXT NOT NULL,
-        command TEXT NOT NULL,
-        context TEXT NOT NULL,
-        base_commit_sha TEXT NOT NULL,
-        branch_name TEXT NOT NULL,
-        worktree_path TEXT NOT NULL,
-        status TEXT NOT NULL,
-        budget INTEGER NOT NULL,
-        tokens_used INTEGER NOT NULL,
-        context_tokens_used INTEGER NOT NULL DEFAULT 0,
-        tool_output_tokens_used INTEGER NOT NULL DEFAULT 0,
-        observation_tokens_used INTEGER NOT NULL DEFAULT 0,
-        preserve INTEGER NOT NULL,
-        created_at TEXT NOT NULL,
-        updated_at TEXT NOT NULL,
-        resolved_at TEXT,
-        final_verdict TEXT,
-        final_summary TEXT,
-        discovered_json TEXT,
-        artifacts_json TEXT,
-        constraints_json TEXT,
-        confidence_note TEXT,
-        low_signal_warning_emitted INTEGER NOT NULL DEFAULT 0,
-        promote INTEGER NOT NULL DEFAULT 0
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_experiments_session_created_at
-      ON experiments(session_id, created_at);
-
-      CREATE TABLE IF NOT EXISTS experiment_observations (
-        id INTEGER PRIMARY KEY AUTOINCREMENT,
-        experiment_id TEXT NOT NULL REFERENCES experiments(id) ON DELETE CASCADE,
-        message TEXT NOT NULL,
-        created_at TEXT NOT NULL,
-        tags_json TEXT
-      );
-
-      CREATE INDEX IF NOT EXISTS idx_experiment_observations_experiment_created_at
-      ON experiment_observations(experiment_id, created_at);
+      ${EXPERIMENT_SCHEMA_SQL}
 
       CREATE TABLE IF NOT EXISTS auth_tokens (
         provider TEXT PRIMARY KEY,
@@ -309,61 +243,7 @@ export class Notebook {
       this.db.exec(`ALTER TABLE model_sessions ADD COLUMN reasoning_effort TEXT`);
     }
 
-    const experimentColumns = this.db
-      .prepare(`PRAGMA table_info(experiments)`)
-      .all() as unknown as TableInfoRow[];
-
-    if (!experimentColumns.some((column) => column.name === 'discovered_json')) {
-      this.db.exec(`ALTER TABLE experiments ADD COLUMN discovered_json TEXT`);
-    }
-
-    if (!experimentColumns.some((column) => column.name === 'artifacts_json')) {
-      this.db.exec(`ALTER TABLE experiments ADD COLUMN artifacts_json TEXT`);
-    }
-
-    if (!experimentColumns.some((column) => column.name === 'constraints_json')) {
-      this.db.exec(`ALTER TABLE experiments ADD COLUMN constraints_json TEXT`);
-    }
-
-    if (!experimentColumns.some((column) => column.name === 'confidence_note')) {
-      this.db.exec(`ALTER TABLE experiments ADD COLUMN confidence_note TEXT`);
-    }
-
-    if (!experimentColumns.some((column) => column.name === 'low_signal_warning_emitted')) {
-      this.db.exec(
-        `ALTER TABLE experiments ADD COLUMN low_signal_warning_emitted INTEGER NOT NULL DEFAULT 0`
-      );
-    }
-
-    if (!experimentColumns.some((column) => column.name === 'promote')) {
-      this.db.exec(`ALTER TABLE experiments ADD COLUMN promote INTEGER NOT NULL DEFAULT 0`);
-    }
-
-    if (!experimentColumns.some((column) => column.name === 'study_debt_id')) {
-      this.db.exec(
-        `ALTER TABLE experiments ADD COLUMN study_debt_id TEXT REFERENCES study_debts(id) ON DELETE SET NULL`
-      );
-    }
-
-    if (!experimentColumns.some((column) => column.name === 'context_tokens_used')) {
-      this.db.exec(`ALTER TABLE experiments ADD COLUMN context_tokens_used INTEGER NOT NULL DEFAULT 0`);
-    }
-
-    if (!experimentColumns.some((column) => column.name === 'tool_output_tokens_used')) {
-      this.db.exec(`ALTER TABLE experiments ADD COLUMN tool_output_tokens_used INTEGER NOT NULL DEFAULT 0`);
-    }
-
-    if (!experimentColumns.some((column) => column.name === 'observation_tokens_used')) {
-      this.db.exec(`ALTER TABLE experiments ADD COLUMN observation_tokens_used INTEGER NOT NULL DEFAULT 0`);
-    }
-
-    const observationColumns = this.db
-      .prepare(`PRAGMA table_info(experiment_observations)`)
-      .all() as unknown as TableInfoRow[];
-
-    if (!observationColumns.some((column) => column.name === 'tags_json')) {
-      this.db.exec(`ALTER TABLE experiment_observations ADD COLUMN tags_json TEXT`);
-    }
+    migrateExperimentTables(this.db);
   }
 
   createSession(sessionId: string, cwd: string): SessionRecord {
@@ -442,268 +322,24 @@ export class Notebook {
   }
 
   upsertExperiment(experiment: ExperimentRecord): void {
-    this.db
-      .prepare(
-        `
-          INSERT INTO experiments (
-            id,
-            session_id,
-            study_debt_id,
-            hypothesis,
-            command,
-            context,
-            base_commit_sha,
-            branch_name,
-            worktree_path,
-            status,
-            budget,
-            tokens_used,
-            context_tokens_used,
-            tool_output_tokens_used,
-            observation_tokens_used,
-            preserve,
-            created_at,
-            updated_at,
-            resolved_at,
-            final_verdict,
-            final_summary,
-            discovered_json,
-            artifacts_json,
-            constraints_json,
-            confidence_note,
-            low_signal_warning_emitted,
-            promote
-          )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-          ON CONFLICT(id) DO UPDATE SET
-            session_id = excluded.session_id,
-            study_debt_id = excluded.study_debt_id,
-            hypothesis = excluded.hypothesis,
-            command = excluded.command,
-            context = excluded.context,
-            base_commit_sha = excluded.base_commit_sha,
-            branch_name = excluded.branch_name,
-            worktree_path = excluded.worktree_path,
-            status = excluded.status,
-            budget = excluded.budget,
-            tokens_used = excluded.tokens_used,
-            context_tokens_used = excluded.context_tokens_used,
-            tool_output_tokens_used = excluded.tool_output_tokens_used,
-            observation_tokens_used = excluded.observation_tokens_used,
-            preserve = excluded.preserve,
-            created_at = excluded.created_at,
-            updated_at = excluded.updated_at,
-            resolved_at = excluded.resolved_at,
-            final_verdict = excluded.final_verdict,
-            final_summary = excluded.final_summary,
-            discovered_json = excluded.discovered_json,
-            artifacts_json = excluded.artifacts_json,
-            constraints_json = excluded.constraints_json,
-            confidence_note = excluded.confidence_note,
-            low_signal_warning_emitted = excluded.low_signal_warning_emitted,
-            promote = excluded.promote
-        `
-      )
-      .run(
-        experiment.id,
-        experiment.sessionId,
-        experiment.studyDebtId,
-        experiment.hypothesis,
-        experiment.command,
-        experiment.context,
-        experiment.baseCommitSha,
-        experiment.branchName,
-        experiment.worktreePath,
-        experiment.status,
-        experiment.budget,
-        experiment.tokensUsed,
-        experiment.contextTokensUsed,
-        experiment.toolOutputTokensUsed,
-        experiment.observationTokensUsed,
-        experiment.preserve ? 1 : 0,
-        experiment.createdAt,
-        experiment.updatedAt,
-        experiment.resolvedAt,
-        experiment.finalVerdict,
-        experiment.finalSummary,
-        JSON.stringify(experiment.discovered),
-        JSON.stringify(experiment.artifacts),
-        JSON.stringify(experiment.constraints),
-        experiment.confidenceNote,
-        experiment.lowSignalWarningEmitted ? 1 : 0,
-        experiment.promote ? 1 : 0
-      );
-
+    upsertExperiment(this.db, experiment);
     this.touchSession(experiment.sessionId);
   }
 
   getExperiment(experimentId: string): ExperimentRecord | null {
-    const row = this.db
-      .prepare(
-        `
-          SELECT
-            id,
-            session_id,
-            study_debt_id,
-            hypothesis,
-            command,
-            context,
-            base_commit_sha,
-            branch_name,
-            worktree_path,
-            status,
-            budget,
-            tokens_used,
-            context_tokens_used,
-            tool_output_tokens_used,
-            observation_tokens_used,
-            preserve,
-            created_at,
-            updated_at,
-            resolved_at,
-            final_verdict,
-            final_summary,
-            discovered_json,
-            artifacts_json,
-            constraints_json,
-            confidence_note,
-            low_signal_warning_emitted,
-            promote
-          FROM experiments
-          WHERE id = ?
-        `
-      )
-      .get(experimentId) as ExperimentRow | undefined;
-
-    return row ? mapExperiment(row) : null;
+    return getExperiment(this.db, experimentId);
   }
 
   listExperiments(sessionId: string): ExperimentRecord[] {
-    const rows = this.db
-      .prepare(
-        `
-          SELECT
-            id,
-            session_id,
-            study_debt_id,
-            hypothesis,
-            command,
-            context,
-            base_commit_sha,
-            branch_name,
-            worktree_path,
-            status,
-            budget,
-            tokens_used,
-            context_tokens_used,
-            tool_output_tokens_used,
-            observation_tokens_used,
-            preserve,
-            created_at,
-            updated_at,
-            resolved_at,
-            final_verdict,
-            final_summary,
-            discovered_json,
-            artifacts_json,
-            constraints_json,
-            confidence_note,
-            low_signal_warning_emitted,
-            promote
-          FROM experiments
-          WHERE session_id = ?
-          ORDER BY created_at DESC
-        `
-      )
-      .all(sessionId) as unknown as ExperimentRow[];
-
-    return rows.map(mapExperiment);
+    return listExperiments(this.db, sessionId);
   }
 
   listInvalidatedExperimentsForStudyDebt(questionId: string): ExperimentRecord[] {
-    const rows = this.db
-      .prepare(
-        `
-          SELECT
-            id,
-            session_id,
-            study_debt_id,
-            hypothesis,
-            command,
-            context,
-            base_commit_sha,
-            branch_name,
-            worktree_path,
-            status,
-            budget,
-            tokens_used,
-            context_tokens_used,
-            tool_output_tokens_used,
-            observation_tokens_used,
-            preserve,
-            created_at,
-            updated_at,
-            resolved_at,
-            final_verdict,
-            final_summary,
-            discovered_json,
-            artifacts_json,
-            constraints_json,
-            confidence_note,
-            low_signal_warning_emitted,
-            promote
-          FROM experiments
-          WHERE study_debt_id = ?
-            AND (final_verdict = 'invalidated' OR status = 'invalidated')
-          ORDER BY updated_at DESC, id DESC
-        `
-      )
-      .all(questionId) as unknown as ExperimentRow[];
-
-    return rows.map(mapExperiment);
+    return listInvalidatedExperimentsForStudyDebt(this.db, questionId);
   }
 
   listActiveExperimentsForStudyDebt(questionId: string): ExperimentRecord[] {
-    const rows = this.db
-      .prepare(
-        `
-          SELECT
-            id,
-            session_id,
-            study_debt_id,
-            hypothesis,
-            command,
-            context,
-            base_commit_sha,
-            branch_name,
-            worktree_path,
-            status,
-            budget,
-            tokens_used,
-            context_tokens_used,
-            tool_output_tokens_used,
-            observation_tokens_used,
-            preserve,
-            created_at,
-            updated_at,
-            resolved_at,
-            final_verdict,
-            final_summary,
-            discovered_json,
-            artifacts_json,
-            constraints_json,
-            confidence_note,
-            low_signal_warning_emitted,
-            promote
-          FROM experiments
-          WHERE study_debt_id = ?
-            AND status IN ('running', 'budget_exhausted')
-          ORDER BY updated_at DESC, id DESC
-        `
-      )
-      .all(questionId) as unknown as ExperimentRow[];
-
-    return rows.map(mapExperiment);
+    return listActiveExperimentsForStudyDebt(this.db, questionId);
   }
 
   clearExperimentJournal(
@@ -764,182 +400,23 @@ export class Notebook {
     message: string,
     tags: ExperimentObservationTag[] = []
   ): ExperimentObservation {
-    const createdAt = nowIso();
-    this.db
-      .prepare(
-        `
-          INSERT INTO experiment_observations (experiment_id, message, created_at, tags_json)
-          VALUES (?, ?, ?, ?)
-        `
-      )
-      .run(experimentId, message, createdAt, JSON.stringify(tags));
-
-    const row = this.db
-      .prepare(
-        `
-          SELECT id, experiment_id, message, created_at, tags_json
-          FROM experiment_observations
-          WHERE id = last_insert_rowid()
-        `
-      )
-      .get() as unknown as ObservationRow;
-
-    return mapObservation(row);
+    return appendObservation(this.db, experimentId, message, tags);
   }
 
   listObservations(experimentId: string): ExperimentObservation[] {
-    const rows = this.db
-      .prepare(
-        `
-          SELECT id, experiment_id, message, created_at
-            , tags_json
-          FROM experiment_observations
-          WHERE experiment_id = ?
-          ORDER BY id ASC
-        `
-      )
-      .all(experimentId) as unknown as ObservationRow[];
-
-    return rows.map(mapObservation);
+    return listObservations(this.db, experimentId);
   }
 
   searchExperimentDetails(sessionId: string, query?: string): ExperimentDetails[] {
-    const normalized = query?.trim();
-    if (!normalized) {
-      return this.listExperiments(sessionId).map((experiment) => ({
-        ...experiment,
-        observations: this.listObservations(experiment.id)
-      }));
-    }
-
-    const searchTerm = `%${normalized}%`;
-    const rows = this.db
-      .prepare(
-        `
-          SELECT DISTINCT
-            e.id,
-            e.session_id,
-            e.study_debt_id,
-            e.hypothesis,
-            e.command,
-            e.context,
-            e.base_commit_sha,
-            e.branch_name,
-            e.worktree_path,
-            e.status,
-            e.budget,
-            e.tokens_used,
-            e.context_tokens_used,
-            e.tool_output_tokens_used,
-            e.observation_tokens_used,
-            e.preserve,
-            e.created_at,
-            e.updated_at,
-            e.resolved_at,
-            e.final_verdict,
-            e.final_summary,
-            e.discovered_json,
-            e.artifacts_json,
-            e.constraints_json,
-            e.confidence_note,
-            e.low_signal_warning_emitted,
-            e.promote
-          FROM experiments e
-          LEFT JOIN experiment_observations o
-            ON o.experiment_id = e.id
-          WHERE e.session_id = ?
-            AND (
-              e.id LIKE ?
-              OR e.hypothesis LIKE ?
-              OR e.final_summary LIKE ?
-              OR o.message LIKE ?
-            )
-          ORDER BY e.created_at DESC
-        `
-      )
-      .all(sessionId, searchTerm, searchTerm, searchTerm, searchTerm) as unknown as ExperimentRow[];
-
-    return rows.map((row) => ({
-      ...mapExperiment(row),
-      observations: this.listObservations(row.id)
-    }));
+    return searchExperimentDetails(this.db, sessionId, query);
   }
 
   searchExperimentSummaries(sessionId: string, query?: string): ExperimentSearchResult[] {
-    const normalized = query?.trim();
-    if (!normalized) {
-      return this.listExperiments(sessionId).map(mapExperimentSearchResult);
-    }
-
-    const searchTerm = `%${normalized}%`;
-    const rows = this.db
-      .prepare(
-        `
-          SELECT DISTINCT
-            e.id,
-            e.session_id,
-            e.hypothesis,
-            e.command,
-            e.context,
-            e.base_commit_sha,
-            e.branch_name,
-            e.worktree_path,
-            e.status,
-            e.budget,
-            e.tokens_used,
-            e.context_tokens_used,
-            e.tool_output_tokens_used,
-            e.observation_tokens_used,
-            e.preserve,
-            e.created_at,
-            e.updated_at,
-            e.resolved_at,
-            e.final_verdict,
-            e.final_summary,
-            e.discovered_json,
-            e.artifacts_json,
-            e.constraints_json,
-            e.confidence_note,
-            e.low_signal_warning_emitted,
-            e.promote
-          FROM experiments e
-          LEFT JOIN experiment_observations o
-            ON o.experiment_id = e.id
-          WHERE e.session_id = ?
-            AND (
-              e.id LIKE ?
-              OR e.hypothesis LIKE ?
-              OR e.status LIKE ?
-              OR e.final_summary LIKE ?
-              OR e.discovered_json LIKE ?
-              OR o.message LIKE ?
-            )
-          ORDER BY e.created_at DESC
-        `
-      )
-      .all(
-        sessionId,
-        searchTerm,
-        searchTerm,
-        searchTerm,
-        searchTerm,
-        searchTerm,
-        searchTerm
-      ) as unknown as ExperimentRow[];
-
-    return rows.map((row) => mapExperimentSearchResult(mapExperiment(row)));
+    return searchExperimentSummaries(this.db, sessionId, query);
   }
 
   getExperimentDetails(experimentId: string): ExperimentDetails | null {
-    const experiment = this.getExperiment(experimentId);
-    if (!experiment) {
-      return null;
-    }
-
-    return {
-      ...experiment,
-      observations: this.listObservations(experimentId)
-    };
+    return getExperimentDetails(this.db, experimentId);
   }
 
   upsertOpenAICodexAuth(record: OpenAICodexAuthRecord): void {
@@ -1172,7 +649,7 @@ export class Notebook {
     recommendedStudy?: string;
   }): StudyDebtRecord {
     const timestamp = nowIso();
-    const id = `question-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 8)}`;
+    const id = createStudyDebtId();
     const affectedPaths =
       input.affectedPaths && input.affectedPaths.length > 0
         ? input.affectedPaths.map((item) => item.trim()).filter(Boolean)
@@ -1566,58 +1043,6 @@ function mapTranscript(row: TranscriptRow): TranscriptEntry {
   };
 }
 
-function mapExperiment(row: ExperimentRow): ExperimentRecord {
-  return {
-    id: row.id,
-    sessionId: row.session_id,
-    studyDebtId: row.study_debt_id,
-    hypothesis: row.hypothesis,
-    command: row.command,
-    context: row.context,
-    baseCommitSha: row.base_commit_sha,
-    branchName: row.branch_name,
-    worktreePath: row.worktree_path,
-    status: row.status,
-    budget: row.budget,
-    tokensUsed: row.tokens_used,
-    contextTokensUsed: row.context_tokens_used,
-    toolOutputTokensUsed: row.tool_output_tokens_used,
-    observationTokensUsed: row.observation_tokens_used,
-    preserve: Boolean(row.preserve),
-    createdAt: row.created_at,
-    updatedAt: row.updated_at,
-    resolvedAt: row.resolved_at,
-    finalVerdict: row.final_verdict,
-    finalSummary: row.final_summary,
-    discovered: parseJsonArray(row.discovered_json),
-    artifacts: parseJsonArray(row.artifacts_json),
-    constraints: parseJsonArray(row.constraints_json),
-    confidenceNote: row.confidence_note,
-    lowSignalWarningEmitted: Boolean(row.low_signal_warning_emitted),
-    promote: Boolean(row.promote)
-  };
-}
-
-function mapObservation(row: ObservationRow): ExperimentObservation {
-  return {
-    id: row.id,
-    experimentId: row.experiment_id,
-    message: row.message,
-    createdAt: row.created_at,
-    tags: parseJsonArray(row.tags_json) as ExperimentObservationTag[]
-  };
-}
-
-function mapExperimentSearchResult(experiment: ExperimentRecord): ExperimentSearchResult {
-  return {
-    experimentId: experiment.id,
-    hypothesis: experiment.hypothesis,
-    status: experiment.status,
-    summary: experiment.finalSummary ?? '',
-    discovered: experiment.discovered
-  };
-}
-
 function mapAuthToken(row: AuthTokenRow): OpenAICodexAuthRecord {
   return {
     provider: 'openai-codex',
@@ -1676,7 +1101,7 @@ function mapStudyDebt(row: StudyDebtRow): StudyDebtRecord {
     kind: row.kind,
     summary: row.summary,
     whyItMatters: row.why_it_matters,
-    affectedPaths: parseNullableJsonArray(row.affected_paths_json),
+    affectedPaths: parseNullableJsonArray(row.affected_paths_json, 'study_debts.affected_paths_json'),
     recommendedStudy: row.recommended_study,
     openedAt: row.opened_at,
     updatedAt: row.updated_at,
@@ -1699,78 +1124,81 @@ function mapSessionCheckpoint(row: SessionCheckpointRow): SessionCheckpointRecor
     gitStatus: row.git_status,
     gitDiffStat: row.git_diff_stat,
     lastTestStatus: row.last_test_status,
-    activeExperimentSummaries: parseExperimentSearchResults(row.active_experiments_json),
+    activeExperimentSummaries: parseExperimentSearchResults(
+      row.active_experiments_json,
+      'session_checkpoints.active_experiments_json'
+    ),
     checkpointBlock: row.checkpoint_block,
     tailStartHistoryId: row.tail_start_history_id
   };
 }
 
-function parseJsonArray(value: string | null): string[] {
+function parseJsonStringArray(value: string | null, field: string): string[] {
   if (!value) {
     return [];
   }
 
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(value) as unknown;
-    if (!Array.isArray(parsed)) {
-      return [];
-    }
-
-    return parsed.filter((item): item is string => typeof item === 'string');
-  } catch {
-    return [];
+    parsed = JSON.parse(value);
+  } catch (error) {
+    throw new Error(`Invalid JSON stored in ${field}: ${String(error)}`);
   }
+
+  if (!Array.isArray(parsed) || parsed.some((item) => typeof item !== 'string')) {
+    throw new Error(`Invalid string array stored in ${field}.`);
+  }
+
+  return parsed;
 }
 
-function parseNullableJsonArray(value: string | null): string[] | null {
+function parseNullableJsonArray(value: string | null, field: string): string[] | null {
   if (!value) {
     return null;
   }
 
-  const parsed = parseJsonArray(value);
+  const parsed = parseJsonStringArray(value, field);
   return parsed.length > 0 ? parsed : [];
 }
 
-function parseExperimentSearchResults(value: string | null): ExperimentSearchResult[] {
+function parseExperimentSearchResults(value: string | null, field: string): ExperimentSearchResult[] {
   if (!value) {
     return [];
   }
 
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(value) as unknown;
-    if (!Array.isArray(parsed)) {
-      return [];
+    parsed = JSON.parse(value);
+  } catch (error) {
+    throw new Error(`Invalid JSON stored in ${field}: ${String(error)}`);
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error(`Invalid experiment summary array stored in ${field}.`);
+  }
+
+  return parsed.map((item) => {
+    if (!item || typeof item !== 'object') {
+      throw new Error(`Invalid experiment summary entry stored in ${field}.`);
     }
 
-    return parsed.flatMap((item) => {
-      if (!item || typeof item !== 'object') {
-        return [];
-      }
+    const candidate = item as Record<string, unknown>;
+    if (
+      typeof candidate.experimentId !== 'string' ||
+      typeof candidate.hypothesis !== 'string' ||
+      typeof candidate.status !== 'string'
+    ) {
+      throw new Error(`Invalid experiment summary entry stored in ${field}.`);
+    }
 
-      const candidate = item as Record<string, unknown>;
-      const experimentId =
-        typeof candidate.experimentId === 'string' ? candidate.experimentId : undefined;
-      const hypothesis = typeof candidate.hypothesis === 'string' ? candidate.hypothesis : undefined;
-      const status = typeof candidate.status === 'string' ? candidate.status : undefined;
-      if (!experimentId || !hypothesis || !status) {
-        return [];
-      }
-
-      return [
-        {
-          experimentId,
-          hypothesis,
-          status: status as ExperimentSearchResult['status'],
-          summary: typeof candidate.summary === 'string' ? candidate.summary : '',
-          discovered: Array.isArray(candidate.discovered)
-            ? candidate.discovered.filter(
-                (entry): entry is string => typeof entry === 'string'
-              )
-            : []
-        }
-      ];
-    });
-  } catch {
-    return [];
-  }
+    return {
+      experimentId: candidate.experimentId,
+      hypothesis: candidate.hypothesis,
+      status: candidate.status as ExperimentSearchResult['status'],
+      summary: typeof candidate.summary === 'string' ? candidate.summary : '',
+      discovered: Array.isArray(candidate.discovered)
+        ? candidate.discovered.filter((entry): entry is string => typeof entry === 'string')
+        : []
+    };
+  });
 }

@@ -3,7 +3,6 @@ import path from 'node:path';
 import { EventEmitter } from 'node:events';
 
 import { execa, execaCommand } from 'execa';
-import { createTwoFilesPatch } from 'diff';
 
 import { OpenAICodexAuth } from '../auth/openai-codex.js';
 import { migrateLegacyRepoLocalAuth, openGlobalAuthNotebook } from '../auth/storage.js';
@@ -35,6 +34,7 @@ import type {
   StudyDebtResolution,
   TranscriptRole
 } from '../types.js';
+import { executeEditPatch } from './edit-patch.js';
 import { PrototypeRunner } from './prototype-runner.js';
 
 interface OpenEngineOptions {
@@ -190,6 +190,18 @@ export class HeadlessEngine {
 
   getThinkingEnabled(): boolean {
     return this.thinkingEnabled;
+  }
+
+  get notebook(): Notebook {
+    return this.options.notebook;
+  }
+
+  get modelClient(): CodexModelClient {
+    return this.model;
+  }
+
+  get experiments(): ExperimentManager {
+    return this.experimentManager;
   }
 
   submit(
@@ -476,31 +488,31 @@ export class HeadlessEngine {
     return `live-${kind}-${this.liveEventCounter}`;
   }
 
-  private async runBash(command: string): Promise<string> {
+  async runBash(command: string): Promise<string> {
     return this.runBashAtRoot(this.options.cwd, command);
   }
 
-  private async runRead(filePath: string, startLine?: number, endLine?: number): Promise<string> {
+  async runRead(filePath: string, startLine?: number, endLine?: number): Promise<string> {
     return this.runReadAtRoot(this.options.cwd, filePath, startLine, endLine);
   }
 
-  private async runLs(filePath = '.', recursive = false): Promise<string> {
+  async runLs(filePath = '.', recursive = false): Promise<string> {
     return this.runLsAtRoot(this.options.cwd, filePath, recursive);
   }
 
-  private async runWrite(filePath: string, content: string): Promise<string> {
+  async runWrite(filePath: string, content: string): Promise<string> {
     return this.runWriteAtRoot(this.options.cwd, filePath, content);
   }
 
-  private async runEdit(patchText: string): Promise<string> {
+  async runEdit(patchText: string): Promise<string> {
     return this.runEditAtRoot(this.options.cwd, patchText);
   }
 
-  private async runGlob(patternText: string): Promise<string[]> {
+  async runGlob(patternText: string): Promise<string[]> {
     return this.runGlobAtRoot(this.options.cwd, patternText);
   }
 
-  private async runRg(patternText: string, target: string | string[] = '.'): Promise<string> {
+  async runRg(patternText: string, target: string | string[] = '.'): Promise<string> {
     return this.runRgAtRoot(this.options.cwd, patternText, target);
   }
 
@@ -540,47 +552,17 @@ export class HeadlessEngine {
     ].join('\n');
   }
 
-  private async runEditAtRoot(root: string, patchText: string): Promise<string> {
-    const operations = parseEditPatch(patchText);
-    const renderedDiffs: string[] = [];
-
-    for (const operation of operations) {
-      if (operation.kind === 'add') {
-        const resolvedPath = this.resolveRootedPath(root, operation.path);
-        this.assertStudyDebtAllowsMutation(root, resolvedPath);
+  async runEditAtRoot(root: string, patchText: string): Promise<string> {
+    return executeEditPatch(patchText, {
+      resolvePath: (filePath) => this.resolveRootedPath(root, filePath),
+      assertCanMutate: (resolvedPath) => this.assertStudyDebtAllowsMutation(root, resolvedPath),
+      ensureParentDir: async (resolvedPath) => {
         await mkdir(path.dirname(resolvedPath), { recursive: true });
-        await writeFile(resolvedPath, operation.content, 'utf8');
-        renderedDiffs.push(renderFileDiff('/dev/null', operation.path, '', operation.content));
-        continue;
-      }
-
-      if (operation.kind === 'delete') {
-        const resolvedPath = this.resolveRootedPath(root, operation.path);
-        this.assertStudyDebtAllowsMutation(root, resolvedPath);
-        const current = await readFile(resolvedPath, 'utf8');
-        await rm(resolvedPath, { force: false });
-        renderedDiffs.push(renderFileDiff(operation.path, '/dev/null', current, ''));
-        continue;
-      }
-
-      const resolvedSourcePath = this.resolveRootedPath(root, operation.path);
-      this.assertStudyDebtAllowsMutation(root, resolvedSourcePath);
-      const current = await readFile(resolvedSourcePath, 'utf8');
-      const next = applyUpdatePatch(current, operation, operation.path);
-
-      if (operation.moveTo) {
-        const resolvedTargetPath = this.resolveRootedPath(root, operation.moveTo);
-        this.assertStudyDebtAllowsMutation(root, resolvedTargetPath);
-        await mkdir(path.dirname(resolvedTargetPath), { recursive: true });
-        await writeFile(resolvedTargetPath, next, 'utf8');
-        await rm(resolvedSourcePath, { force: false });
-      } else {
-        await writeFile(resolvedSourcePath, next, 'utf8');
-      }
-      renderedDiffs.push(renderFileDiff(operation.path, operation.moveTo ?? operation.path, current, next));
-    }
-
-    return formatEditDiffToolTranscript(operations, renderedDiffs);
+      },
+      readFile: (resolvedPath) => readFile(resolvedPath, 'utf8'),
+      writeFile: (resolvedPath, content) => writeFile(resolvedPath, content, 'utf8'),
+      removeFile: (resolvedPath) => rm(resolvedPath, { force: false })
+    });
   }
 
   private async runGlobAtRoot(root: string, patternText: string): Promise<string[]> {
@@ -595,7 +577,7 @@ export class HeadlessEngine {
       .sort();
   }
 
-  private async runWriteAtRoot(root: string, filePath: string, content: string): Promise<string> {
+  async runWriteAtRoot(root: string, filePath: string, content: string): Promise<string> {
     const resolvedPath = this.resolveRootedPath(root, filePath);
     this.assertStudyDebtAllowsMutation(root, resolvedPath);
     await mkdir(path.dirname(resolvedPath), { recursive: true });
@@ -675,7 +657,7 @@ export class HeadlessEngine {
     }
   }
 
-  private async spawnExperiment(
+  async spawnExperiment(
     input: Omit<SpawnExperimentInput, 'sessionId'> & { questionId?: string }
   ): Promise<ExperimentRecord> {
     const questionId = input.questionId ?? input.studyDebtId;
@@ -741,7 +723,7 @@ export class HeadlessEngine {
     return this.experimentManager.waitForResolution(experimentId, timeoutMs);
   }
 
-  private async searchExperiments(
+  async searchExperiments(
     query?: string
   ): Promise<ExperimentSearchResult[] | ExperimentSearchGuardrail> {
     const openDebts = this.options.notebook.listOpenStudyDebts(this.options.sessionId);
@@ -761,7 +743,7 @@ export class HeadlessEngine {
     return this.experimentManager.search(this.options.sessionId, query);
   }
 
-  private async openStudyDebt(input: {
+  async openStudyDebt(input: {
     summary: string;
     whyItMatters: string;
     kind?: StudyDebtKind;
@@ -790,7 +772,7 @@ export class HeadlessEngine {
     };
   }
 
-  private async resolveStudyDebt(input: {
+  async resolveStudyDebt(input: {
     questionId: string;
     resolution: StudyDebtResolution;
     note: string;
@@ -1025,7 +1007,7 @@ export class HeadlessEngine {
     return `thinking ${enabled ? 'on' : 'off'}`;
   }
 
-  private async runExperimentSubagent(experiment: ExperimentRecord): Promise<void> {
+  async runExperimentSubagent(experiment: ExperimentRecord): Promise<void> {
     const experimentSessionId = this.experimentManager.getExperimentSessionId(experiment.id);
     this.options.notebook.createSession(experimentSessionId, experiment.worktreePath);
     this.model.setModel(experimentSessionId, DEFAULT_EXPERIMENT_MODEL);
@@ -1383,7 +1365,7 @@ export class HeadlessEngine {
     );
   }
 
-  private async runCompact(
+  async runCompact(
     goal: string,
     completed: string,
     next: string,
@@ -1764,236 +1746,6 @@ function normalizeReadEndLine(startLine: number, endLine: number | undefined, to
   }
 
   return Math.min(maxLine, Math.max(startLine, Math.floor(endLine)));
-}
-
-type ParsedEditOperation =
-  | { kind: 'add'; path: string; content: string }
-  | { kind: 'delete'; path: string }
-  | { kind: 'update'; path: string; moveTo: string | null; hunks: ParsedPatchHunk[] };
-
-interface ParsedPatchHunk {
-  lines: Array<{ prefix: ' ' | '+' | '-'; text: string }>;
-}
-
-function parseEditPatch(patchText: string): ParsedEditOperation[] {
-  const lines = patchText.split(/\r?\n/);
-  if (lines[0] !== '*** Begin Patch') {
-    throw new Error('Patch must start with "*** Begin Patch".');
-  }
-
-  const operations: ParsedEditOperation[] = [];
-  let index = 1;
-
-  while (index < lines.length) {
-    const line = lines[index] ?? '';
-    if (line === '*** End Patch') {
-      return operations;
-    }
-
-    if (line.startsWith('*** Add File: ')) {
-      const pathText = line.slice('*** Add File: '.length).trim();
-      index += 1;
-      const contentLines: string[] = [];
-      while (index < lines.length) {
-        const nextLine = lines[index] ?? '';
-        if (nextLine === '*** End Patch' || nextLine.startsWith('*** ')) {
-          break;
-        }
-        if (!nextLine.startsWith('+')) {
-          throw new Error(`Invalid add-file line in ${pathText}: ${nextLine}`);
-        }
-        contentLines.push(nextLine.slice(1));
-        index += 1;
-      }
-      operations.push({ kind: 'add', path: pathText, content: contentLines.join('\n') });
-      continue;
-    }
-
-    if (line.startsWith('*** Delete File: ')) {
-      operations.push({ kind: 'delete', path: line.slice('*** Delete File: '.length).trim() });
-      index += 1;
-      continue;
-    }
-
-    if (line.startsWith('*** Update File: ')) {
-      const pathText = line.slice('*** Update File: '.length).trim();
-      index += 1;
-      let moveTo: string | null = null;
-      if ((lines[index] ?? '').startsWith('*** Move to: ')) {
-        moveTo = (lines[index] ?? '').slice('*** Move to: '.length).trim();
-        index += 1;
-      }
-
-      const hunks: ParsedPatchHunk[] = [];
-      let currentHunk: ParsedPatchHunk | null = null;
-
-      while (index < lines.length) {
-        const nextLine = lines[index] ?? '';
-        if (nextLine === '*** End Patch' || nextLine.startsWith('*** Add File: ') || nextLine.startsWith('*** Update File: ') || nextLine.startsWith('*** Delete File: ')) {
-          break;
-        }
-        if (nextLine === '*** End of File') {
-          index += 1;
-          continue;
-        }
-        if (nextLine.startsWith('@@')) {
-          currentHunk = { lines: [] };
-          hunks.push(currentHunk);
-          index += 1;
-          continue;
-        }
-        const prefix = nextLine[0];
-        if (prefix !== ' ' && prefix !== '+' && prefix !== '-') {
-          throw new Error(`Invalid patch line in ${pathText}: ${nextLine}`);
-        }
-        if (!currentHunk) {
-          currentHunk = { lines: [] };
-          hunks.push(currentHunk);
-        }
-        currentHunk.lines.push({
-          prefix,
-          text: nextLine.slice(1)
-        });
-        index += 1;
-      }
-
-      if (hunks.length === 0) {
-        throw new Error(`Update patch for ${pathText} did not contain any hunks.`);
-      }
-      operations.push({ kind: 'update', path: pathText, moveTo, hunks });
-      continue;
-    }
-
-    if (!line.trim()) {
-      index += 1;
-      continue;
-    }
-
-    throw new Error(`Invalid patch header: ${line}`);
-  }
-
-  throw new Error('Patch must end with "*** End Patch".');
-}
-
-function applyUpdatePatch(
-  currentContent: string,
-  operation: Extract<ParsedEditOperation, { kind: 'update' }>,
-  filePath: string
-): string {
-  const sourceLines = currentContent.split(/\r?\n/);
-  const outputLines: string[] = [];
-  let cursor = 0;
-
-  for (const hunk of operation.hunks) {
-    const oldLines = hunk.lines
-      .filter((line) => line.prefix === ' ' || line.prefix === '-')
-      .map((line) => line.text);
-    const matchIndex = findPatchMatchIndex(sourceLines, oldLines, cursor);
-    if (matchIndex === -1) {
-      throw new Error(`Could not apply patch hunk to ${filePath}.`);
-    }
-
-    outputLines.push(...sourceLines.slice(cursor, matchIndex));
-    let readIndex = matchIndex;
-    for (const line of hunk.lines) {
-      if (line.prefix === ' ') {
-        if (sourceLines[readIndex] !== line.text) {
-          throw new Error(`Patch context mismatch while applying ${filePath}.`);
-        }
-        outputLines.push(line.text);
-        readIndex += 1;
-        continue;
-      }
-      if (line.prefix === '-') {
-        if (sourceLines[readIndex] !== line.text) {
-          throw new Error(`Patch deletion mismatch while applying ${filePath}.`);
-        }
-        readIndex += 1;
-        continue;
-      }
-      outputLines.push(line.text);
-    }
-    cursor = readIndex;
-  }
-
-  outputLines.push(...sourceLines.slice(cursor));
-  return outputLines.join('\n');
-}
-
-function findPatchMatchIndex(sourceLines: string[], oldLines: string[], startIndex: number): number {
-  if (oldLines.length === 0) {
-    return startIndex;
-  }
-
-  for (let index = startIndex; index <= sourceLines.length - oldLines.length; index += 1) {
-    let matched = true;
-    for (let offset = 0; offset < oldLines.length; offset += 1) {
-      if (sourceLines[index + offset] !== oldLines[offset]) {
-        matched = false;
-        break;
-      }
-    }
-    if (matched) {
-      return index;
-    }
-  }
-
-  return -1;
-}
-
-function formatEditDiffToolTranscript(
-  operations: ParsedEditOperation[],
-  renderedDiffs: string[]
-): string {
-  const label =
-    operations.length === 1
-      ? describeEditOperation(operations[0]!)
-      : `Edit(${operations.length} files)`;
-  return `@@tool\tedit_diff\t${label}\n${renderedDiffs.join('\n\n')}`;
-}
-
-function describeEditOperation(operation: ParsedEditOperation): string {
-  if (operation.kind === 'add') {
-    return `Add(${operation.path})`;
-  }
-  if (operation.kind === 'delete') {
-    return `Delete(${operation.path})`;
-  }
-  if (operation.moveTo) {
-    return `Move(${operation.path} -> ${operation.moveTo})`;
-  }
-  return `Edit(${operation.path})`;
-}
-
-function renderFileDiff(oldPath: string, newPath: string, before: string, after: string): string {
-  const diffHeaderOld = oldPath === '/dev/null' ? '/dev/null' : `a/${oldPath}`;
-  const diffHeaderNew = newPath === '/dev/null' ? '/dev/null' : `b/${newPath}`;
-  const patch = sanitizeUnifiedDiff(
-    createTwoFilesPatch(diffHeaderOld, diffHeaderNew, before, after, '', '', {
-      context: 3
-    })
-  );
-
-  const metadata: string[] = [`diff --git ${diffHeaderOld} ${diffHeaderNew}`];
-  if (oldPath === '/dev/null') {
-    metadata.push('new file mode 100644');
-  } else if (newPath === '/dev/null') {
-    metadata.push('deleted file mode 100644');
-  }
-
-  const patchLines = patch.split('\n');
-  return [...metadata, ...patchLines].join('\n');
-}
-
-function sanitizeUnifiedDiff(patch: string): string {
-  const normalized = patch
-    .replace(/\r\n/g, '\n')
-    .split('\n')
-    .filter((line) => !/^=+$/.test(line))
-    .map((line) => line.replace(/\t+$/, ''))
-    .join('\n');
-
-  return normalized.endsWith('\n') ? normalized.slice(0, -1) : normalized;
 }
 
 function looksLikeTestCommand(command: string): boolean {

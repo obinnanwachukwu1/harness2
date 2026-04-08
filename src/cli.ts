@@ -72,7 +72,6 @@ async function runPrintMode(
   thinking = true
 ): Promise<void> {
   const { HeadlessEngine } = await import('./engine/headless-engine.js');
-  const { Notebook } = await import('./storage/notebook.js');
   const engine = await HeadlessEngine.open({
     cwd: process.cwd(),
     sessionId
@@ -84,8 +83,7 @@ async function runPrintMode(
   const maxWidth = Math.max(20, output.columns ?? 100);
   const activeSessionId = engine.snapshot.session.id;
   const initialTranscriptLength = engine.snapshot.transcript.length;
-  const notebook = new Notebook(`${process.cwd()}/.h2/notebook.sqlite`);
-  const initialHistoryLength = notebook.listModelHistory(activeSessionId).length;
+  const initialHistoryLength = engine.notebook.listModelHistory(activeSessionId).length;
 
   try {
     await engine.submit(prompt, {
@@ -147,15 +145,14 @@ async function runPrintMode(
       output.write(`${truncatePrintLines(pendingThinking, maxWidth)}\n`);
     }
     const finalTranscript = engine.snapshot.transcript.slice(initialTranscriptLength);
-    await engine.dispose();
     printPromptEvalSummary({
       sessionId: activeSessionId,
-      historyItems: notebook.listModelHistory(activeSessionId).slice(initialHistoryLength),
-      experiments: notebook.listExperiments(activeSessionId),
+      historyItems: engine.notebook.listModelHistory(activeSessionId).slice(initialHistoryLength),
+      experiments: engine.notebook.listExperiments(activeSessionId),
       transcript: finalTranscript,
       width: maxWidth
     });
-    notebook.close();
+    await engine.dispose();
   }
 }
 

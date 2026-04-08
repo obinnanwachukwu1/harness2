@@ -14,6 +14,10 @@ export function createExperimentId(): string {
   return `exp-${randomUUID().slice(0, 8)}`;
 }
 
+export function createStudyDebtId(): string {
+  return `question-${randomUUID().slice(0, 8)}`;
+}
+
 export function estimateTokens(text: string): number {
   return Math.max(1, Math.ceil(text.length / 4));
 }
