@@ -71,12 +71,13 @@ async function main(): Promise<void> {
 async function runOpenTui(sessionId?: string): Promise<void> {
   const repoRoot = resolveHarnessRoot();
   const entryPath = path.join(repoRoot, 'packages/ui-opentui/src/index.ts');
-  const args = ['--import', 'tsx', entryPath, '--cwd', process.cwd()];
+  await assertBunAvailable();
+  const args = ['run', entryPath, '--cwd', process.cwd()];
   if (sessionId) {
     args.push('--session', sessionId);
   }
 
-  await execa(process.execPath, args, {
+  await execa('bun', args, {
     cwd: repoRoot,
     stdio: 'inherit'
   });
@@ -421,6 +422,20 @@ async function assertInsideGitRepository(cwd: string): Promise<void> {
 
   throw new Error(
     'h2 requires a Git repository with at least one commit. Create an initial commit, then retry.'
+  );
+}
+
+async function assertBunAvailable(): Promise<void> {
+  const result = await execa('bun', ['--version'], {
+    reject: false
+  });
+
+  if (result.exitCode === 0) {
+    return;
+  }
+
+  throw new Error(
+    'OpenTUI currently requires Bun because @opentui/core imports bun:ffi. Install Bun, or use print mode (`h2 -p "..."`) for a Node-only path.'
   );
 }
 

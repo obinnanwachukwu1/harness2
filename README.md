@@ -13,10 +13,11 @@ This is still intentionally v0.1. The core vertical slice works, but the harness
 ## Requirements
 
 - Node 22+
+- Bun 1.x for the OpenTUI frontend
 - a Git repository with at least one commit in the current working directory
 - project dependencies installed with `npm install`
 
-`h2` runs on the Node + `tsx` toolchain. `bun` is not required.
+Core commands (`doctor`, `auth`, `-p` print mode, tests, typecheck, build) run on Node. The interactive OpenTUI path currently requires Bun because `@opentui/core` imports `bun:ffi`.
 
 ## Run
 
@@ -192,6 +193,8 @@ test/
 - State lives under `.h2/notebook.sqlite`.
 - Global auth state lives under `~/.h2/auth.sqlite` unless `H2_HOME` or `H2_AUTH_DB_PATH` overrides it.
 - `h2 paths` prints the repo state dir, repo notebook, legacy `.harness2` dir, and global auth paths.
+- `h2`, `h2 resume`, and `h2 opentui` launch the OpenTUI frontend and therefore require Bun today.
+- `h2 -p "..."` is the Node-only noninteractive path if Bun is not installed.
 - Experiment worktrees live under `.h2/worktrees/<experimentId>`.
 - Adoption previews and patches live under `.h2/adoptions/<experimentId>.patch`.
 - Resolved experiments remove their worktree unless `--preserve` is set.
