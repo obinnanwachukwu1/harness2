@@ -88,6 +88,23 @@ function webSearchCallDone(
   };
 }
 
+function webSearchCallDoneWithoutQuery(
+  id: string,
+  sources: Array<{ type: 'url'; url: string }> = [{ type: 'url', url: 'https://example.com' }],
+  outputIndex = 0
+) {
+  return {
+    type: 'response.output_item.done',
+    output_index: outputIndex,
+    item: {
+      type: 'web_search_call',
+      id,
+      status: 'completed',
+      sources
+    }
+  };
+}
+
 function webSearchCallAdded(id: string, outputIndex = 0) {
   return {
     type: 'response.output_item.added',
@@ -490,6 +507,90 @@ test('CodexModelClient does not route provider-executed web search through the l
   assert.match(emitted[0]?.text ?? '', /^@@tool\tweb_search\tWebSearch\(weather seattle\)/);
   assert.equal(emitted[1]?.role, 'assistant');
   assert.equal(emitted[1]?.text, 'It is rainy.');
+});
+
+test('CodexModelClient does not leak provider web search fallback text when query metadata is missing', async (t) => {
+  const tempDir = await createTempDir('h2-model-provider-search-fallback-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-test', tempDir);
+
+  const now = 1_700_000_000_000;
+  notebook.upsertOpenAICodexAuth({
+    provider: 'openai-codex',
+    type: 'oauth',
+    accessToken: createUnsignedJwt({
+      exp: Math.floor((now + 3600_000) / 1000)
+    }),
+    refreshToken: 'refresh-token',
+    idToken: createUnsignedJwt({
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: 'acct_123'
+      }
+    }),
+    accountId: 'acct_123',
+    expiresAt: now + 3600_000,
+    createdAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString()
+  });
+
+  const emitted: Array<{ role: TranscriptRole; text: string }> = [];
+  const auth = new OpenAICodexAuth(notebook, { now: () => now });
+  const client = new CodexModelClient(notebook, auth, {
+    fetchImpl: async () =>
+      createResponsesStream([
+        responseCreated('resp_1'),
+        webSearchCallAdded('ws_1', 0),
+        webSearchCallDoneWithoutQuery('ws_1', [{ type: 'url', url: 'https://react.dev/blog' }], 0),
+        {
+          type: 'response.output_text.delta',
+          item_id: 'msg_1',
+          output_index: 1,
+          delta: 'Done.'
+        },
+        responseCompleted('resp_1')
+      ])
+  });
+
+  const tools: AgentTools = {
+    bash: async () => '',
+    read: async () => '',
+    ls: async () => '',
+    write: async () => '',
+    edit: async () => '',
+    glob: async () => [],
+    grep: async () => '',
+    spawnExperiment: async () => '',
+    readExperiment: async () => '',
+    authLogin: async () => '',
+    authStatus: async () => '',
+    authLogout: async () => '',
+    getModelSettings: async () => '',
+    setModel: async () => '',
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
+  };
+
+  await client.runTurn(
+    'session-test',
+    'Search the web.',
+    tools,
+    async (role, text) => {
+      emitted.push({ role, text });
+    },
+    undefined,
+    undefined,
+    false
+  );
+
+  assert.equal(emitted[0]?.role, 'tool');
+  assert.equal(
+    emitted[0]?.text,
+    '@@tool\tweb_search\tWebSearch\nsources: none returned'
+  );
 });
 
 test('CodexModelClient executes independent read-only tool calls in parallel while preserving output order', async (t) => {
@@ -949,9 +1050,14 @@ test('CodexModelClient injects a pre-edit guard hint after long investigation wi
         return createResponsesStream([
           responseCreated('resp_2'),
           functionCallDone('call_edit', 'edit', {
-            path: 'src/example.ts',
-            findText: 'old',
-            replaceText: 'new'
+            patch: [
+              '*** Begin Patch',
+              '*** Update File: src/example.ts',
+              '@@',
+              '-old',
+              '+new',
+              '*** End Patch'
+            ].join('\n')
           }),
           responseCompleted('resp_2')
         ]);

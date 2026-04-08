@@ -1,4 +1,5 @@
-import type { EngineSnapshot, ExperimentRecord, TranscriptEntry } from '../types.js';
+import path from 'node:path';
+import type { EngineSnapshot, ExperimentRecord, StudyDebtRecord, TranscriptEntry } from '../types.js';
 import type { OpenTuiExperimentSummary, OpenTuiRenderBlock, OpenTuiState } from './render-types.js';
 
 type ToolTone = Extract<OpenTuiRenderBlock, { kind: 'tool' }>['tone'];
@@ -47,7 +48,7 @@ function buildBlocks(snapshot: EngineSnapshot): OpenTuiRenderBlock[] {
     }
 
     if (event.transcriptText) {
-      const block = toolTranscriptToBlock(
+      const renderedBlocks = toolTranscriptToBlocks(
         {
           id: -1,
           sessionId: snapshot.session.id,
@@ -57,8 +58,12 @@ function buildBlocks(snapshot: EngineSnapshot): OpenTuiRenderBlock[] {
         },
         event.id
       );
-      block.live = event.live;
-      blocks.push(block);
+      for (const block of renderedBlocks) {
+        if ('live' in block) {
+          block.live = event.live;
+        }
+        blocks.push(block);
+      }
       continue;
     }
 
@@ -84,7 +89,7 @@ function transcriptEntryToBlocks(
   thinkingEnabled: boolean
 ): OpenTuiRenderBlock[] {
   if (entry.role === 'tool') {
-    return [toolTranscriptToBlock(entry)];
+    return toolTranscriptToBlocks(entry);
   }
 
   if (entry.role === 'assistant' && isExperimentNotice(entry.text)) {
@@ -124,26 +129,45 @@ function transcriptEntryToBlocks(
   ];
 }
 
-function toolTranscriptToBlock(
+function toolTranscriptToBlocks(
   entry: TranscriptEntry,
   forcedId?: string
-): Extract<OpenTuiRenderBlock, { kind: 'tool' }> {
+): OpenTuiRenderBlock[] {
   const metadataMatch = entry.text.match(/^@@tool\t([^\t\n]+)\t([^\n]+)\n?([\s\S]*)$/);
   const legacyMatch = entry.text.match(/^\[([^\]]+)\]\n?([\s\S]*)$/);
   const toolName = metadataMatch?.[1]?.trim() || legacyMatch?.[1]?.trim() || 'tool';
   const explicitLabel = metadataMatch?.[2]?.trim() || null;
   const body = metadataMatch?.[3] ?? legacyMatch?.[2] ?? entry.text;
+
+  if (toolName === 'edit_diff') {
+    const patches = splitUnifiedDiffPatches(body);
+    return patches.map((patch, index) => ({
+      id: `${forcedId ?? `tool-${entry.id}`}-diff-${index}`,
+      kind: 'diff',
+      title:
+        inferDiffTitle(patch) ||
+        (patches.length === 1
+          ? explicitLabel || 'Edit diff'
+          : `${explicitLabel || 'Edit diff'} ${index + 1}/${patches.length}`),
+      diff: patch,
+      filetype: inferDiffFiletype(patch),
+      view: 'unified'
+    }));
+  }
+
   const tone = getToolTone(toolName);
   const summary = summarizeToolTranscript(toolName, body, explicitLabel);
 
-  return {
-    id: forcedId ?? `tool-${entry.id}`,
-    kind: 'tool',
-    tone,
-    header: summary.label,
-    body: summary.previewLines,
-    footer: summary.footer ? [summary.footer] : []
-  };
+  return [
+    {
+      id: forcedId ?? `tool-${entry.id}`,
+      kind: 'tool',
+      tone,
+      header: summary.label,
+      body: summary.previewLines,
+      footer: summary.footer ? [summary.footer] : []
+    }
+  ];
 }
 
 function experimentNoticeToBlock(entry: TranscriptEntry): OpenTuiRenderBlock {
@@ -232,6 +256,7 @@ function summarizeToolTranscript(
     case 'wait_experiment':
     case 'search_experiments':
     case 'resolve_experiment':
+    case 'experiment_notice':
     case 'extend_experiment_budget':
       return summarizeExperimentTool(toolName, body, explicitLabel);
     case 'open_question':
@@ -242,6 +267,73 @@ function summarizeToolTranscript(
     default:
       return summarizeGenericTool(toolName, body, explicitLabel, false);
   }
+}
+
+function splitUnifiedDiffPatches(diffText: string): string[] {
+  const normalized = diffText.replace(/\r\n/g, '\n');
+  if (!normalized) {
+    return [];
+  }
+
+  const segments = normalized.split(/^diff --git /m);
+  if (segments.length === 1) {
+    return [stripSingleTrailingNewline(normalized)];
+  }
+
+  return segments
+    .slice(1)
+    .map((segment) => stripSingleTrailingNewline(`diff --git ${segment}`))
+    .filter(Boolean);
+}
+
+function stripSingleTrailingNewline(text: string): string {
+  return text.endsWith('\n') ? text.slice(0, -1) : text;
+}
+
+function inferDiffFiletype(diffText: string): string | undefined {
+  const plusPlusMatch = diffText.match(/^\+\+\+ b\/(.+)$/m) || diffText.match(/^--- a\/(.+)$/m);
+  const filePath = plusPlusMatch?.[1];
+  if (!filePath) {
+    return undefined;
+  }
+
+  const extension = path.extname(filePath).toLowerCase();
+  switch (extension) {
+    case '.ts':
+      return 'typescript';
+    case '.tsx':
+      return 'typescriptreact';
+    case '.js':
+      return 'javascript';
+    case '.jsx':
+      return 'javascriptreact';
+    case '.json':
+      return 'json';
+    case '.md':
+      return 'markdown';
+    case '.css':
+      return 'css';
+    case '.html':
+      return 'html';
+    case '.sh':
+      return 'bash';
+    case '.py':
+      return 'python';
+    case '.rs':
+      return 'rust';
+    default:
+      return undefined;
+  }
+}
+
+function inferDiffTitle(diffText: string): string | undefined {
+  const plusPlusMatch = diffText.match(/^\+\+\+ b\/(.+)$/m) || diffText.match(/^--- a\/(.+)$/m);
+  const filePath = plusPlusMatch?.[1]?.trim();
+  if (!filePath) {
+    return undefined;
+  }
+
+  return `Edit(${path.basename(filePath)})`;
 }
 
 function summarizeGlobTool(body: string, explicitLabel: string | null) {
@@ -316,6 +408,7 @@ function summarizeExperimentTool(
       wait_experiment: 'experiment wait',
       search_experiments: 'experiment search',
       resolve_experiment: 'experiment resolve',
+      experiment_notice: explicitLabel || 'experiment update',
       extend_experiment_budget: 'experiment budget'
     }[toolName] ||
     toolName;
@@ -339,11 +432,14 @@ function summarizeExperimentTool(
   if (typeof maybeObject.summary === 'string') {
     previewLines.push(compactText(maybeObject.summary, 92));
   }
-  if (typeof maybeObject.hypothesis === 'string' && previewLines.length < 3) {
+  if (typeof maybeObject.hypothesis === 'string' && previewLines.length < 4) {
     previewLines.push(compactText(maybeObject.hypothesis, 92));
   }
   if (typeof maybeObject.lastObservationSnippet === 'string' && previewLines.length < 4) {
     previewLines.push(`last  ${compactText(maybeObject.lastObservationSnippet, 88)}`);
+  }
+  if (typeof maybeObject.next === 'string' && previewLines.length < 4) {
+    previewLines.push(`next  ${compactText(maybeObject.next, 88)}`);
   }
 
   return {
@@ -377,21 +473,34 @@ function summarizeStudyDebtTool(
 
   const previewLines: string[] = [];
   const maybeObject = parsed as Record<string, unknown>;
+  const summary = typeof maybeObject.summary === 'string' ? maybeObject.summary : null;
+  const status = typeof maybeObject.status === 'string' ? maybeObject.status : null;
+  const resolution = typeof maybeObject.resolution === 'string' ? maybeObject.resolution : null;
+  const note = typeof maybeObject.note === 'string' ? maybeObject.note : null;
+  const questionId =
+    (typeof maybeObject.questionId === 'string' && maybeObject.questionId) ||
+    (typeof maybeObject.debtId === 'string' && maybeObject.debtId) ||
+    (typeof maybeObject.id === 'string' && maybeObject.id) ||
+    null;
 
-  if (typeof maybeObject.questionId === 'string') {
-    previewLines.push(maybeObject.questionId);
-  } else if (typeof maybeObject.debtId === 'string') {
-    previewLines.push(maybeObject.debtId);
-  } else if (typeof maybeObject.id === 'string') {
-    previewLines.push(maybeObject.id);
+  if (summary) {
+    previewLines.push(`note  ${compactText(summary, 88)}`);
+  } else if (questionId) {
+    previewLines.push(questionId);
   }
 
-  if (typeof maybeObject.status === 'string') {
-    previewLines.push(`status  ${maybeObject.status}`);
+  if (status) {
+    previewLines.push(`status  ${status}`);
+  }
+  if (resolution) {
+    previewLines.push(`resolution  ${resolution}`);
+  }
+  if (note) {
+    previewLines.push(`note  ${compactText(note, 88)}`);
   }
 
   return {
-    label,
+    label: explicitLabel || (questionId ? `${label}(${questionId})` : label),
     previewLines: previewLines.slice(0, 4),
     footer: null
   };

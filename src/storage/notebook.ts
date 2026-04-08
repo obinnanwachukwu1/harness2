@@ -1509,6 +1509,7 @@ export class Notebook {
       session,
       transcript: this.listTranscript(sessionId),
       experiments: this.listExperiments(sessionId),
+      studyDebts: this.listStudyDebts(sessionId),
       processingTurn,
       currentTurnStartedAt,
       statusText,

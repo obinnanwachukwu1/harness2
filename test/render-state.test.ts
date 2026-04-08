@@ -14,6 +14,7 @@ function createSnapshot(overrides: Partial<EngineSnapshot> = {}): EngineSnapshot
     },
     transcript: [],
     experiments: [],
+    studyDebts: [],
     processingTurn: false,
     currentTurnStartedAt: null,
     statusText: 'idle',
@@ -103,4 +104,65 @@ test('buildOpenTuiState includes live tool argument previews', () => {
   assert.ok(toolBlock && toolBlock.kind === 'tool');
   assert.deepEqual(toolBlock.body, ['running…', 'command: pwd']);
   assert.equal(toolBlock.live, true);
+});
+
+test('buildOpenTuiState shows question ids in headers and summaries in the body', () => {
+  const state = buildOpenTuiState(
+    createSnapshot({
+      transcript: [
+        {
+          id: 1,
+          sessionId: 'session-test',
+          role: 'tool',
+          text: '@@tool\tresolve_question\tresolve question(question-abc)\n{\n  "questionId": "question-abc",\n  "status": "closed",\n  "summary": "what streaming shape does the configured backend emit",\n  "resolution": "study_run",\n  "note": "Provider emits SSE but needs tolerant parsing."\n}',
+          createdAt: '2026-04-07T00:00:03.000Z'
+        }
+      ]
+    })
+  );
+
+  const toolBlock = state.blocks[0];
+  assert.ok(toolBlock && toolBlock.kind === 'tool');
+  assert.equal(toolBlock.header, 'resolve question(question-abc)');
+  assert.deepEqual(toolBlock.body, [
+    'note  what streaming shape does the configured backend emit',
+    'status  closed',
+    'resolution  study_run',
+    'note  Provider emits SSE but needs tolerant parsing.'
+  ]);
+});
+
+test('buildOpenTuiState renders experiment notices as experiment tool rows', () => {
+  const state = buildOpenTuiState(
+    createSnapshot({
+      processingTurn: true,
+      currentTurnStartedAt: '2026-04-07T00:00:03.000Z',
+      liveTurnEvents: [
+        {
+          id: 'live-tool-1',
+          kind: 'tool',
+          transcriptText:
+            '@@tool\texperiment_notice\tExperiment resolved\n{\n  "experimentId": "exp-123",\n  "status": "validated",\n  "summary": "Provider streams SSE content deltas.",\n  "hypothesis": "backend supports OpenAI-style streaming",\n  "next": "removed"\n}',
+          live: false,
+          callId: null,
+          toolName: null,
+          label: null,
+          detail: null,
+          body: [],
+          providerExecuted: false
+        }
+      ]
+    })
+  );
+
+  const toolBlock = state.blocks[0];
+  assert.ok(toolBlock && toolBlock.kind === 'tool');
+  assert.equal(toolBlock.tone, 'experiment');
+  assert.equal(toolBlock.header, 'Experiment resolved');
+  assert.deepEqual(toolBlock.body, [
+    'exp-123',
+    'status  validated',
+    'Provider streams SSE content deltas.',
+    'backend supports OpenAI-style streaming'
+  ]);
 });

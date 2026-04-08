@@ -623,11 +623,7 @@ async function executeToolCall(call: ToolCall, tools: AgentTools): Promise<strin
       }
       return tools.write(readStringArg(args, 'path'), readStringArg(args, 'content'));
     case 'edit':
-      return tools.edit(
-        readStringArg(args, 'path'),
-        readStringArg(args, 'findText'),
-        readStringArg(args, 'replaceText')
-      );
+      return tools.edit(readStringArg(args, 'patch'));
     case 'glob':
       return JSON.stringify(await tools.glob(readStringArg(args, 'pattern')), null, 2);
     case 'rg':
@@ -1019,24 +1015,20 @@ function buildProviderToolEventFromOutput(
     ?.map((source) => (source.type === 'url' ? source.url : source.name))
     .filter((value): value is string => typeof value === 'string' && value.length > 0);
   const sourceList = (outputSources && outputSources.length > 0 ? outputSources : fallbackSources).slice(0, 5);
-  const queryText = query ?? 'provider-executed web search';
-  const transcriptLines = [`query: ${queryText}`];
+  const transcriptLines = query ? [`query: ${query}`] : [];
   if (sourceList.length > 0) {
     transcriptLines.push('sources:');
     transcriptLines.push(...sourceList.map((source) => `- ${source}`));
   } else {
     transcriptLines.push('sources: none returned');
   }
+  const header = query ? `WebSearch(${compactTextForHeader(query, 72)})` : 'WebSearch';
 
   return {
     name: 'web_search',
     toolCallId,
-    transcript: `@@tool\tweb_search\tWebSearch(${compactTextForHeader(queryText, 72)})\n${transcriptLines.join('\n')}`,
-    historyNotice: [
-      'Built-in web_search executed.',
-      `query: ${queryText}`,
-      sourceList.length > 0 ? `sources: ${sourceList.join(', ')}` : 'sources: none returned'
-    ].join('\n')
+    transcript: `@@tool\tweb_search\t${header}\n${transcriptLines.join('\n')}`,
+    historyNotice: ['Built-in web_search executed.', ...transcriptLines].join('\n')
   };
 }
 
@@ -1087,11 +1079,15 @@ function buildAiSdkTools(
 
 function formatToolOutput(name: string, rawArguments: string, output: string): string {
   // TODO: spill oversized tool results to disk and replace them with a short inline pointer.
-  return `@@tool\t${name}\t${formatToolHeader(name, rawArguments)}\n${clampText(output, 2400)}`;
+  if (output.startsWith('@@tool\t')) {
+    return output;
+  }
+  return `@@tool\t${name}\t${formatToolHeader(name, rawArguments, output)}\n${clampText(output, 2400)}`;
 }
 
-function formatToolHeader(name: string, rawArguments: string): string {
+function formatToolHeader(name: string, rawArguments: string, output?: string): string {
   const args = parseArguments(rawArguments);
+  const parsedOutput = output ? safeJsonParse(output) : null;
 
   switch (name) {
     case 'bash':
@@ -1107,7 +1103,7 @@ function formatToolHeader(name: string, rawArguments: string): string {
     case 'write':
       return `Write(${readStringArg(args, 'path')})`;
     case 'edit':
-      return `Edit(${readStringArg(args, 'path')})`;
+      return summarizePatchForHeader(readStringArg(args, 'patch'));
     case 'glob':
       return `Glob(${readStringArg(args, 'pattern')})`;
     case 'rg': {
@@ -1145,10 +1141,17 @@ function formatToolHeader(name: string, rawArguments: string): string {
     }
     case 'open_question':
     case 'open_study_debt':
-      return `open question(${compactTextForHeader(readStringArg(args, 'summary'), 56)})`;
+      return `open question(${compactTextForHeader(
+        readOptionalOutputSummary(parsedOutput) ?? readStringArg(args, 'summary'),
+        56
+      )})`;
     case 'resolve_question':
     case 'resolve_study_debt':
-      return `resolve question(${readOptionalStringArg(args, 'questionId') ?? readStringArg(args, 'debtId')})`;
+      return `resolve question(${compactTextForHeader(
+        readOptionalOutputSummary(parsedOutput) ??
+          (readOptionalStringArg(args, 'questionId') ?? readStringArg(args, 'debtId')),
+        56
+      )})`;
     case 'extend_experiment_budget':
       return `experiment budget(${readStringArg(args, 'experimentId')})`;
     case 'resolve_experiment':
@@ -1158,6 +1161,60 @@ function formatToolHeader(name: string, rawArguments: string): string {
     default:
       return name;
   }
+}
+
+function readOptionalOutputSummary(value: unknown): string | null {
+  if (!value || typeof value !== 'object') {
+    return null;
+  }
+
+  const maybeObject = value as Record<string, unknown>;
+  return typeof maybeObject.summary === 'string' ? maybeObject.summary : null;
+}
+
+function safeJsonParse(body: string): unknown {
+  try {
+    return JSON.parse(body);
+  } catch {
+    return null;
+  }
+}
+
+function summarizePatchForHeader(patch: string): string {
+  const operations = extractPatchOperationSummaries(patch);
+  if (operations.length === 0) {
+    return 'Edit(patch)';
+  }
+  return `Edit(${compactTextForHeader(operations.join(', '), 64)})`;
+}
+
+function summarizePatchForBody(patch: string): string[] {
+  const operations = extractPatchOperationSummaries(patch);
+  if (operations.length === 0) {
+    return ['patch: custom diff'];
+  }
+  return operations.map((operation) => `patch: ${operation}`);
+}
+
+function extractPatchOperationSummaries(patch: string): string[] {
+  const lines = patch.split(/\r?\n/);
+  const operations: string[] = [];
+
+  for (const line of lines) {
+    if (line.startsWith('*** Add File: ')) {
+      operations.push(`add ${line.slice('*** Add File: '.length).trim()}`);
+      continue;
+    }
+    if (line.startsWith('*** Update File: ')) {
+      operations.push(`update ${line.slice('*** Update File: '.length).trim()}`);
+      continue;
+    }
+    if (line.startsWith('*** Delete File: ')) {
+      operations.push(`delete ${line.slice('*** Delete File: '.length).trim()}`);
+    }
+  }
+
+  return operations;
 }
 
 function formatLiveToolBody(name: string, rawArguments: string): string[] {
@@ -1179,8 +1236,9 @@ function formatLiveToolBody(name: string, rawArguments: string): string[] {
     case 'ls':
       return [`path: ${readOptionalStringArg(args, 'path') ?? '.'}`];
     case 'write':
-    case 'edit':
       return [`path: ${readStringArg(args, 'path')}`];
+    case 'edit':
+      return summarizePatchForBody(readStringArg(args, 'patch'));
     case 'glob':
       return [`pattern: ${readStringArg(args, 'pattern')}`];
     case 'rg':
@@ -1743,15 +1801,14 @@ export const MAIN_TOOL_DEFINITIONS = [
   {
     type: 'function',
     name: 'edit',
-    description: 'Replace the first matching text fragment in a file.',
+    description:
+      'Apply a patch-style edit to workspace files. The patch must use this exact format: begin with "*** Begin Patch" and end with "*** End Patch". Inside, use one or more operations: "*** Add File: path" followed by content lines prefixed with "+", "*** Delete File: path", or "*** Update File: path". An update may include optional "*** Move to: new/path" immediately after the update header, then one or more "@@" hunk markers followed by lines prefixed with space for context, "-" for removals, and "+" for additions. Prefer this over bash heredocs for creating or changing workspace files.',
     parameters: {
       type: 'object',
       properties: {
-        path: { type: 'string' },
-        findText: { type: 'string' },
-        replaceText: { type: 'string' }
+        patch: { type: 'string' }
       },
-      required: ['path', 'findText', 'replaceText'],
+      required: ['patch'],
       additionalProperties: false
     }
   },

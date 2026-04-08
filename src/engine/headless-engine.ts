@@ -1,8 +1,9 @@
-import { access, glob, mkdir, readFile, rename, writeFile } from 'node:fs/promises';
+import { access, glob, mkdir, readFile, rename, rm, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import { EventEmitter } from 'node:events';
 
 import { execa, execaCommand } from 'execa';
+import { createTwoFilesPatch } from 'diff';
 
 import { OpenAICodexAuth } from '../auth/openai-codex.js';
 import { migrateLegacyRepoLocalAuth, openGlobalAuthNotebook } from '../auth/storage.js';
@@ -130,7 +131,7 @@ export class HeadlessEngine {
       read: (filePath, startLine, endLine) => this.runRead(filePath, startLine, endLine),
       ls: (filePath, recursive) => this.runLs(filePath, recursive),
       write: (filePath, content) => this.runWrite(filePath, content),
-      edit: (filePath, findText, replaceText) => this.runEdit(filePath, findText, replaceText),
+      edit: (patchText) => this.runEdit(patchText),
       glob: (pattern) => this.runGlob(pattern),
       rg: (pattern, target) => this.runRg(pattern, target),
       grep: (pattern, target) => this.runRg(pattern, target),
@@ -491,8 +492,8 @@ export class HeadlessEngine {
     return this.runWriteAtRoot(this.options.cwd, filePath, content);
   }
 
-  private async runEdit(filePath: string, findText: string, replaceText: string): Promise<string> {
-    return this.runEditAtRoot(this.options.cwd, filePath, findText, replaceText);
+  private async runEdit(patchText: string): Promise<string> {
+    return this.runEditAtRoot(this.options.cwd, patchText);
   }
 
   private async runGlob(patternText: string): Promise<string[]> {
@@ -537,23 +538,47 @@ export class HeadlessEngine {
     ].join('\n');
   }
 
-  private async runEditAtRoot(
-    root: string,
-    filePath: string,
-    findText: string,
-    replaceText: string
-  ): Promise<string> {
-    const resolvedPath = this.resolveRootedPath(root, filePath);
-    this.assertStudyDebtAllowsMutation(root, resolvedPath);
-    const current = await readFile(resolvedPath, 'utf8');
+  private async runEditAtRoot(root: string, patchText: string): Promise<string> {
+    const operations = parseEditPatch(patchText);
+    const renderedDiffs: string[] = [];
 
-    if (!current.includes(findText)) {
-      throw new Error(`Could not find target text in ${filePath}.`);
+    for (const operation of operations) {
+      if (operation.kind === 'add') {
+        const resolvedPath = this.resolveRootedPath(root, operation.path);
+        this.assertStudyDebtAllowsMutation(root, resolvedPath);
+        await mkdir(path.dirname(resolvedPath), { recursive: true });
+        await writeFile(resolvedPath, operation.content, 'utf8');
+        renderedDiffs.push(renderFileDiff('/dev/null', operation.path, '', operation.content));
+        continue;
+      }
+
+      if (operation.kind === 'delete') {
+        const resolvedPath = this.resolveRootedPath(root, operation.path);
+        this.assertStudyDebtAllowsMutation(root, resolvedPath);
+        const current = await readFile(resolvedPath, 'utf8');
+        await rm(resolvedPath, { force: false });
+        renderedDiffs.push(renderFileDiff(operation.path, '/dev/null', current, ''));
+        continue;
+      }
+
+      const resolvedSourcePath = this.resolveRootedPath(root, operation.path);
+      this.assertStudyDebtAllowsMutation(root, resolvedSourcePath);
+      const current = await readFile(resolvedSourcePath, 'utf8');
+      const next = applyUpdatePatch(current, operation, operation.path);
+
+      if (operation.moveTo) {
+        const resolvedTargetPath = this.resolveRootedPath(root, operation.moveTo);
+        this.assertStudyDebtAllowsMutation(root, resolvedTargetPath);
+        await mkdir(path.dirname(resolvedTargetPath), { recursive: true });
+        await writeFile(resolvedTargetPath, next, 'utf8');
+        await rm(resolvedSourcePath, { force: false });
+      } else {
+        await writeFile(resolvedSourcePath, next, 'utf8');
+      }
+      renderedDiffs.push(renderFileDiff(operation.path, operation.moveTo ?? operation.path, current, next));
     }
 
-    const next = current.replace(findText, replaceText);
-    await writeFile(resolvedPath, next, 'utf8');
-    return `Edited ${relativeToWorkspace(root, resolvedPath)}.`;
+    return formatEditDiffToolTranscript(operations, renderedDiffs);
   }
 
   private async runGlobAtRoot(root: string, patternText: string): Promise<string[]> {
@@ -720,7 +745,12 @@ export class HeadlessEngine {
     kind?: StudyDebtKind;
     affectedPaths?: string[];
     recommendedStudy?: string;
-  }): Promise<{ questionId: string; status: 'open' }> {
+  }): Promise<{
+    questionId: string;
+    status: 'open';
+    summary: string;
+    kind: StudyDebtKind;
+  }> {
     const record = this.options.notebook.openStudyDebt({
       sessionId: this.options.sessionId,
       summary: input.summary,
@@ -732,7 +762,9 @@ export class HeadlessEngine {
     this.emitChange();
     return {
       questionId: record.id,
-      status: 'open'
+      status: 'open',
+      summary: record.summary,
+      kind: record.kind
     };
   }
 
@@ -740,7 +772,13 @@ export class HeadlessEngine {
     questionId: string;
     resolution: StudyDebtResolution;
     note: string;
-  }): Promise<{ questionId: string; status: 'closed' }> {
+  }): Promise<{
+    questionId: string;
+    status: 'closed';
+    summary: string;
+    resolution: StudyDebtResolution;
+    note: string;
+  }> {
     const record = this.options.notebook.resolveStudyDebt({
       questionId: input.questionId,
       resolution: input.resolution,
@@ -749,7 +787,10 @@ export class HeadlessEngine {
     this.emitChange();
     return {
       questionId: record.id,
-      status: 'closed'
+      status: 'closed',
+      summary: record.summary,
+      resolution: record.resolution ?? input.resolution,
+      note: record.resolutionNote ?? input.note
     };
   }
 
@@ -1004,13 +1045,8 @@ export class HeadlessEngine {
         await this.experimentManager.recordToolUsage(experiment.id, output);
         return output;
       },
-      edit: async (filePath, findText, replaceText) => {
-        const output = await this.runEditAtRoot(
-          experiment.worktreePath,
-          filePath,
-          findText,
-          replaceText
-        );
+      edit: async (patchText) => {
+        const output = await this.runEditAtRoot(experiment.worktreePath, patchText);
         await this.experimentManager.recordToolUsage(experiment.id, output);
         return output;
       },
@@ -1086,70 +1122,77 @@ export class HeadlessEngine {
   }
 
   private handleExperimentResolved(resolution: ExperimentResolution): void {
-    const lines = [
-      `Experiment resolved`,
-      `id: ${resolution.id}`,
-      `verdict: ${resolution.verdict}`,
-      `summary: ${resolution.summary}`,
-      `budget: ${resolution.tokensUsed}/${resolution.budget} estimated tokens`,
-      `budget_breakdown: context ${resolution.contextTokensUsed}, tool_output ${resolution.toolOutputTokensUsed}, observations ${resolution.observationTokensUsed}`,
-      resolution.discovered.length > 0
-        ? `discovered: ${resolution.discovered.join(' | ')}`
-        : null,
-      resolution.artifacts.length > 0
-        ? `artifacts: ${resolution.artifacts.join(' | ')}`
-        : null,
-      resolution.constraints.length > 0
-        ? `constraints: ${resolution.constraints.join(' | ')}`
-        : null,
-      resolution.confidenceNote
-        ? `confidence: ${resolution.confidenceNote}`
-        : null,
-      resolution.promote
-        ? `promote: inspect ${resolution.worktreePath} on branch ${resolution.branchName}`
-        : `cleanup: ${resolution.preserved ? 'preserved' : 'removed'}`
-    ].filter((line): line is string => Boolean(line));
-
-    const message = lines.join('\n');
-    this.appendTranscript('assistant', message);
-    this.appendExperimentLifecycleNotice(message);
+    const transcriptText = this.formatExperimentLifecycleTool(
+      'Experiment resolved',
+      {
+        experimentId: resolution.id,
+        status: resolution.verdict,
+        summary: resolution.summary,
+        hypothesis: resolution.hypothesis,
+        budget: `${resolution.tokensUsed}/${resolution.budget} estimated tokens`,
+        budgetBreakdown: `context ${resolution.contextTokensUsed}, tool_output ${resolution.toolOutputTokensUsed}, observations ${resolution.observationTokensUsed}`,
+        discovered: resolution.discovered,
+        artifacts: resolution.artifacts,
+        constraints: resolution.constraints,
+        confidenceNote: resolution.confidenceNote,
+        next: resolution.promote
+          ? `inspect ${resolution.worktreePath} on branch ${resolution.branchName}`
+          : resolution.preserved
+            ? 'preserved'
+            : 'removed'
+      }
+    );
+    this.appendExperimentLifecycleToolNotice(transcriptText);
   }
 
   private handleExperimentQualitySignal(notification: ExperimentQualityNotification): void {
-    const message = [
+    const transcriptText = this.formatExperimentLifecycleTool(
       'Experiment low-signal warning',
-      `id: ${notification.id}`,
-      `hypothesis: ${notification.hypothesis}`,
-      `message: ${notification.message}`,
-      `budget: ${notification.tokensUsed}/${notification.budget} estimated tokens`,
-      `tool_output: ${notification.toolOutputTokensUsed}`
-    ].join('\n');
-
-    this.appendTranscript('assistant', message);
-    this.appendExperimentLifecycleNotice(message);
+      {
+        experimentId: notification.id,
+        status: 'running',
+        hypothesis: notification.hypothesis,
+        summary: notification.message,
+        budget: `${notification.tokensUsed}/${notification.budget} estimated tokens`,
+        toolOutput: `${notification.toolOutputTokensUsed}`
+      }
+    );
+    this.appendExperimentLifecycleToolNotice(transcriptText);
   }
 
   private handleExperimentBudgetExceeded(notification: ExperimentBudgetNotification): void {
-    const message = [
+    const transcriptText = this.formatExperimentLifecycleTool(
       'Experiment budget exhausted',
-      `id: ${notification.id}`,
-      `hypothesis: ${notification.hypothesis}`,
-      `message: ${notification.message}`,
-      `budget: ${notification.tokensUsed}/${notification.budget} estimated tokens`,
-      `budget_breakdown: context ${notification.contextTokensUsed}, tool_output ${notification.toolOutputTokensUsed}, observations ${notification.observationTokensUsed}`,
-      `next: extend budget to continue, or leave unresolved and treat as inconclusive`
-    ].join('\n');
-
-    this.appendTranscript('assistant', message);
-    this.appendExperimentLifecycleNotice(message);
+      {
+        experimentId: notification.id,
+        status: 'budget_exhausted',
+        hypothesis: notification.hypothesis,
+        summary: notification.message,
+        budget: `${notification.tokensUsed}/${notification.budget} estimated tokens`,
+        budgetBreakdown: `context ${notification.contextTokensUsed}, tool_output ${notification.toolOutputTokensUsed}, observations ${notification.observationTokensUsed}`,
+        next: 'extend budget to continue, or leave unresolved and treat as inconclusive'
+      }
+    );
+    this.appendExperimentLifecycleToolNotice(transcriptText);
   }
 
-  private appendExperimentLifecycleNotice(message: string): void {
+  private appendExperimentLifecycleToolNotice(transcriptText: string): void {
+    if (this.processingTurn) {
+      this.appendCompletedToolEvent(transcriptText);
+    }
+    this.appendTranscript('tool', transcriptText);
     this.appendModelHistory({
       type: 'message',
       role: 'developer',
-      content: message
+      content: transcriptText
     });
+  }
+
+  private formatExperimentLifecycleTool(
+    title: string,
+    payload: Record<string, unknown>
+  ): string {
+    return `@@tool\texperiment_notice\t${title}\n${JSON.stringify(payload, null, 2)}`;
   }
 
   private resolveRootedPath(root: string, filePath: string): string {
@@ -1638,6 +1681,236 @@ function normalizeReadEndLine(startLine: number, endLine: number | undefined, to
   }
 
   return Math.min(maxLine, Math.max(startLine, Math.floor(endLine)));
+}
+
+type ParsedEditOperation =
+  | { kind: 'add'; path: string; content: string }
+  | { kind: 'delete'; path: string }
+  | { kind: 'update'; path: string; moveTo: string | null; hunks: ParsedPatchHunk[] };
+
+interface ParsedPatchHunk {
+  lines: Array<{ prefix: ' ' | '+' | '-'; text: string }>;
+}
+
+function parseEditPatch(patchText: string): ParsedEditOperation[] {
+  const lines = patchText.split(/\r?\n/);
+  if (lines[0] !== '*** Begin Patch') {
+    throw new Error('Patch must start with "*** Begin Patch".');
+  }
+
+  const operations: ParsedEditOperation[] = [];
+  let index = 1;
+
+  while (index < lines.length) {
+    const line = lines[index] ?? '';
+    if (line === '*** End Patch') {
+      return operations;
+    }
+
+    if (line.startsWith('*** Add File: ')) {
+      const pathText = line.slice('*** Add File: '.length).trim();
+      index += 1;
+      const contentLines: string[] = [];
+      while (index < lines.length) {
+        const nextLine = lines[index] ?? '';
+        if (nextLine === '*** End Patch' || nextLine.startsWith('*** ')) {
+          break;
+        }
+        if (!nextLine.startsWith('+')) {
+          throw new Error(`Invalid add-file line in ${pathText}: ${nextLine}`);
+        }
+        contentLines.push(nextLine.slice(1));
+        index += 1;
+      }
+      operations.push({ kind: 'add', path: pathText, content: contentLines.join('\n') });
+      continue;
+    }
+
+    if (line.startsWith('*** Delete File: ')) {
+      operations.push({ kind: 'delete', path: line.slice('*** Delete File: '.length).trim() });
+      index += 1;
+      continue;
+    }
+
+    if (line.startsWith('*** Update File: ')) {
+      const pathText = line.slice('*** Update File: '.length).trim();
+      index += 1;
+      let moveTo: string | null = null;
+      if ((lines[index] ?? '').startsWith('*** Move to: ')) {
+        moveTo = (lines[index] ?? '').slice('*** Move to: '.length).trim();
+        index += 1;
+      }
+
+      const hunks: ParsedPatchHunk[] = [];
+      let currentHunk: ParsedPatchHunk | null = null;
+
+      while (index < lines.length) {
+        const nextLine = lines[index] ?? '';
+        if (nextLine === '*** End Patch' || nextLine.startsWith('*** Add File: ') || nextLine.startsWith('*** Update File: ') || nextLine.startsWith('*** Delete File: ')) {
+          break;
+        }
+        if (nextLine === '*** End of File') {
+          index += 1;
+          continue;
+        }
+        if (nextLine.startsWith('@@')) {
+          currentHunk = { lines: [] };
+          hunks.push(currentHunk);
+          index += 1;
+          continue;
+        }
+        const prefix = nextLine[0];
+        if (prefix !== ' ' && prefix !== '+' && prefix !== '-') {
+          throw new Error(`Invalid patch line in ${pathText}: ${nextLine}`);
+        }
+        if (!currentHunk) {
+          currentHunk = { lines: [] };
+          hunks.push(currentHunk);
+        }
+        currentHunk.lines.push({
+          prefix,
+          text: nextLine.slice(1)
+        });
+        index += 1;
+      }
+
+      if (hunks.length === 0) {
+        throw new Error(`Update patch for ${pathText} did not contain any hunks.`);
+      }
+      operations.push({ kind: 'update', path: pathText, moveTo, hunks });
+      continue;
+    }
+
+    if (!line.trim()) {
+      index += 1;
+      continue;
+    }
+
+    throw new Error(`Invalid patch header: ${line}`);
+  }
+
+  throw new Error('Patch must end with "*** End Patch".');
+}
+
+function applyUpdatePatch(
+  currentContent: string,
+  operation: Extract<ParsedEditOperation, { kind: 'update' }>,
+  filePath: string
+): string {
+  const sourceLines = currentContent.split(/\r?\n/);
+  const outputLines: string[] = [];
+  let cursor = 0;
+
+  for (const hunk of operation.hunks) {
+    const oldLines = hunk.lines
+      .filter((line) => line.prefix === ' ' || line.prefix === '-')
+      .map((line) => line.text);
+    const matchIndex = findPatchMatchIndex(sourceLines, oldLines, cursor);
+    if (matchIndex === -1) {
+      throw new Error(`Could not apply patch hunk to ${filePath}.`);
+    }
+
+    outputLines.push(...sourceLines.slice(cursor, matchIndex));
+    let readIndex = matchIndex;
+    for (const line of hunk.lines) {
+      if (line.prefix === ' ') {
+        if (sourceLines[readIndex] !== line.text) {
+          throw new Error(`Patch context mismatch while applying ${filePath}.`);
+        }
+        outputLines.push(line.text);
+        readIndex += 1;
+        continue;
+      }
+      if (line.prefix === '-') {
+        if (sourceLines[readIndex] !== line.text) {
+          throw new Error(`Patch deletion mismatch while applying ${filePath}.`);
+        }
+        readIndex += 1;
+        continue;
+      }
+      outputLines.push(line.text);
+    }
+    cursor = readIndex;
+  }
+
+  outputLines.push(...sourceLines.slice(cursor));
+  return outputLines.join('\n');
+}
+
+function findPatchMatchIndex(sourceLines: string[], oldLines: string[], startIndex: number): number {
+  if (oldLines.length === 0) {
+    return startIndex;
+  }
+
+  for (let index = startIndex; index <= sourceLines.length - oldLines.length; index += 1) {
+    let matched = true;
+    for (let offset = 0; offset < oldLines.length; offset += 1) {
+      if (sourceLines[index + offset] !== oldLines[offset]) {
+        matched = false;
+        break;
+      }
+    }
+    if (matched) {
+      return index;
+    }
+  }
+
+  return -1;
+}
+
+function formatEditDiffToolTranscript(
+  operations: ParsedEditOperation[],
+  renderedDiffs: string[]
+): string {
+  const label =
+    operations.length === 1
+      ? describeEditOperation(operations[0]!)
+      : `Edit(${operations.length} files)`;
+  return `@@tool\tedit_diff\t${label}\n${renderedDiffs.join('\n\n')}`;
+}
+
+function describeEditOperation(operation: ParsedEditOperation): string {
+  if (operation.kind === 'add') {
+    return `Add(${operation.path})`;
+  }
+  if (operation.kind === 'delete') {
+    return `Delete(${operation.path})`;
+  }
+  if (operation.moveTo) {
+    return `Move(${operation.path} -> ${operation.moveTo})`;
+  }
+  return `Edit(${operation.path})`;
+}
+
+function renderFileDiff(oldPath: string, newPath: string, before: string, after: string): string {
+  const diffHeaderOld = oldPath === '/dev/null' ? '/dev/null' : `a/${oldPath}`;
+  const diffHeaderNew = newPath === '/dev/null' ? '/dev/null' : `b/${newPath}`;
+  const patch = sanitizeUnifiedDiff(
+    createTwoFilesPatch(diffHeaderOld, diffHeaderNew, before, after, '', '', {
+      context: 3
+    })
+  );
+
+  const metadata: string[] = [`diff --git ${diffHeaderOld} ${diffHeaderNew}`];
+  if (oldPath === '/dev/null') {
+    metadata.push('new file mode 100644');
+  } else if (newPath === '/dev/null') {
+    metadata.push('deleted file mode 100644');
+  }
+
+  const patchLines = patch.split('\n');
+  return [...metadata, ...patchLines].join('\n');
+}
+
+function sanitizeUnifiedDiff(patch: string): string {
+  const normalized = patch
+    .replace(/\r\n/g, '\n')
+    .split('\n')
+    .filter((line) => !/^=+$/.test(line))
+    .map((line) => line.replace(/\t+$/, ''))
+    .join('\n');
+
+  return normalized.endsWith('\n') ? normalized.slice(0, -1) : normalized;
 }
 
 function looksLikeTestCommand(command: string): boolean {

@@ -84,6 +84,36 @@ test('HeadlessEngine read defaults to 100 lines and supports explicit line range
   assert.match(transcript, /125: line 125/);
 });
 
+test('HeadlessEngine edit applies patch-style file creation and updates', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const createOutput = await (engine as any).runEdit(`*** Begin Patch
+*** Add File: src/example.ts
++export const answer = 41;
+*** End Patch`);
+  assert.match(createOutput, /^@@tool\tedit_diff\tAdd\(src\/example\.ts\)/);
+  assert.equal(
+    await readFile(path.join(repoDir, 'src', 'example.ts'), 'utf8'),
+    'export const answer = 41;'
+  );
+
+  const updateOutput = await (engine as any).runEdit(`*** Begin Patch
+*** Update File: src/example.ts
+@@
+-export const answer = 41;
++export const answer = 42;
+*** End Patch`);
+  assert.match(updateOutput, /^@@tool\tedit_diff\tEdit\(src\/example\.ts\)/);
+  assert.equal(
+    await readFile(path.join(repoDir, 'src', 'example.ts'), 'utf8'),
+    'export const answer = 42;'
+  );
+});
+
 test('HeadlessEngine bash supports multiline heredocs', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));

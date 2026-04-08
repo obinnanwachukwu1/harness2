@@ -270,6 +270,7 @@ export interface EngineSnapshot {
   session: SessionRecord;
   transcript: TranscriptEntry[];
   experiments: ExperimentRecord[];
+  studyDebts: StudyDebtRecord[];
   processingTurn: boolean;
   currentTurnStartedAt: string | null;
   statusText: string;
@@ -324,7 +325,7 @@ export interface AgentTools {
   read(filePath: string, startLine?: number, endLine?: number): Promise<string>;
   ls?(filePath?: string, recursive?: boolean): Promise<string>;
   write?(filePath: string, content: string): Promise<string>;
-  edit(filePath: string, findText: string, replaceText: string): Promise<string>;
+  edit(patch: string): Promise<string>;
   glob(pattern: string): Promise<string[]>;
   rg?(pattern: string, target?: string | string[]): Promise<string>;
   grep?(pattern: string, target?: string | string[]): Promise<string>;

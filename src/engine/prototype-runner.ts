@@ -125,23 +125,42 @@ export class PrototypeRunner {
 
       case 'edit': {
         const payload = trimmed.replace(/^\/edit\s+/, '');
-        const divider = payload.indexOf('::');
-        if (divider === -1) {
-          await context.emit('assistant', 'Usage: /edit <path> :: <find> => <replace>');
-          return;
+        let patchText = payload.trim();
+
+        if (!patchText.startsWith('*** Begin Patch')) {
+          const divider = payload.indexOf('::');
+          if (divider === -1) {
+            await context.emit(
+              'assistant',
+              'Usage: /edit <patch> or /edit <path> :: <find> => <replace>'
+            );
+            return;
+          }
+
+          const filePath = payload.slice(0, divider).trim();
+          const remainder = payload.slice(divider + 2).trimStart();
+          const replacementDivider = remainder.indexOf('=>');
+          if (replacementDivider === -1) {
+            await context.emit(
+              'assistant',
+              'Usage: /edit <patch> or /edit <path> :: <find> => <replace>'
+            );
+            return;
+          }
+
+          const findText = remainder.slice(0, replacementDivider).trim();
+          const replaceText = remainder.slice(replacementDivider + 2).trim();
+          patchText = [
+            '*** Begin Patch',
+            `*** Update File: ${filePath}`,
+            '@@',
+            ...findText.split('\n').map((line) => `-${line}`),
+            ...replaceText.split('\n').map((line) => `+${line}`),
+            '*** End Patch'
+          ].join('\n');
         }
 
-        const filePath = payload.slice(0, divider).trim();
-        const remainder = payload.slice(divider + 2).trimStart();
-        const replacementDivider = remainder.indexOf('=>');
-        if (replacementDivider === -1) {
-          await context.emit('assistant', 'Usage: /edit <path> :: <find> => <replace>');
-          return;
-        }
-
-        const findText = remainder.slice(0, replacementDivider).trim();
-        const replaceText = remainder.slice(replacementDivider + 2).trim();
-        const output = await context.tools.edit(filePath, findText, replaceText);
+        const output = await context.tools.edit(patchText);
         await context.emit('tool', output);
         return;
       }

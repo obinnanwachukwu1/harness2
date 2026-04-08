@@ -1,6 +1,7 @@
 import {
   BoxRenderable,
   type CliRenderer,
+  DiffRenderable,
   MarkdownRenderable,
   SyntaxStyle,
   RGBA,
@@ -27,12 +28,22 @@ const thinkingMarkdownSyntaxStyle = createMarkdownSyntaxStyle({
   strongItalic: true
 });
 
+const diffSyntaxStyle = SyntaxStyle.fromStyles({
+  default: { fg: RGBA.fromHex('#e4e4e7') },
+  string: { fg: RGBA.fromHex('#c4b5fd') },
+  keyword: { fg: RGBA.fromHex('#93c5fd'), bold: true },
+  comment: { fg: RGBA.fromHex('#71717a'), italic: true },
+  function: { fg: RGBA.fromHex('#f0abfc') },
+  type: { fg: RGBA.fromHex('#67e8f9') }
+});
+
 export interface BlockView {
   container: BoxRenderable;
   kind?: OpenTuiRenderBlock['kind'];
   userBubble?: BoxRenderable;
   userText?: TextRenderable;
   markdown?: MarkdownRenderable;
+  diff?: DiffRenderable;
 }
 
 export function createBlockView(
@@ -95,6 +106,7 @@ export function updateBlockView(
       view.userBubble = bubble;
       view.userText = userText;
       view.markdown = undefined;
+      view.diff = undefined;
       return;
     }
     case 'assistant': {
@@ -121,6 +133,7 @@ export function updateBlockView(
       view.userBubble = undefined;
       view.userText = undefined;
       view.markdown = markdown;
+      view.diff = undefined;
       return;
     }
     case 'thinking': {
@@ -140,13 +153,67 @@ export function updateBlockView(
         fg: RGBA.fromValues(0.24, 0.68, 0.78, 0.72),
         bg: '#111111',
         conceal: true,
-        streaming: false
+        streaming: block.live ?? false
       });
       view.container.add(markdown);
       view.kind = 'thinking';
       view.userBubble = undefined;
       view.userText = undefined;
       view.markdown = markdown;
+      view.diff = undefined;
+      return;
+    }
+    case 'diff': {
+      clearBlockChildren(view);
+      const wrapper = new BoxRenderable(renderer, {
+        id: `${baseId}-diff-wrapper`,
+        width: '100%',
+        marginTop: options.isFirst ? 1 : 0,
+        marginLeft: 1,
+        marginRight: 1,
+        flexDirection: 'column'
+      });
+      wrapper.add(
+        new TextRenderable(renderer, {
+          id: `${baseId}-diff-title`,
+          content: block.title,
+          fg: '#a1a1aa',
+          attributes: TextAttributes.BOLD,
+          wrapMode: 'word'
+        })
+      );
+      const diffShell = new BoxRenderable(renderer, {
+        id: `${baseId}-diff-shell`,
+        width: '100%',
+        height: estimateDiffHeight(block.diff),
+        flexDirection: 'column'
+      });
+      const diff = new DiffRenderable(renderer, {
+        id: `${baseId}-diff`,
+        width: '100%',
+        height: '100%',
+        diff: block.diff,
+        view: block.view ?? 'unified',
+        filetype: block.filetype,
+        syntaxStyle: diffSyntaxStyle,
+        showLineNumbers: true,
+        wrapMode: 'none',
+        fg: '#e4e4e7',
+        lineNumberFg: '#71717a',
+        addedBg: RGBA.fromValues(0.07, 0.18, 0.12, 0.65),
+        removedBg: RGBA.fromValues(0.22, 0.08, 0.08, 0.65),
+        contextBg: RGBA.fromValues(0, 0, 0, 0),
+        addedSignColor: '#4ade80',
+        removedSignColor: '#f87171'
+      });
+      diffShell.add(diff);
+      wrapper.add(diffShell);
+      view.container.add(wrapper);
+      view.kind = 'diff';
+      view.userBubble = undefined;
+      view.userText = undefined;
+      view.markdown = undefined;
+      view.diff = diff;
       return;
     }
     case 'tool': {
@@ -155,6 +222,7 @@ export function updateBlockView(
       view.userBubble = undefined;
       view.userText = undefined;
       view.markdown = undefined;
+      view.diff = undefined;
       const colors = getToolToneColors(block.tone);
       const headerRow = new BoxRenderable(renderer, {
         id: `${baseId}-tool-header-row`,
@@ -301,6 +369,13 @@ function toRgba(color: string | RGBA): RGBA {
   return typeof color === 'string' ? RGBA.fromHex(color) : color;
 }
 
+function estimateDiffHeight(diff: string): number {
+  const normalized = diff.replace(/\r\n/g, '\n');
+  const lines = normalized.split('\n');
+  const visibleLines = lines.filter((line) => /^( |[+-])/.test(line)).length;
+  return Math.max(1, visibleLines);
+}
+
 export function clearChildren(container: BoxRenderable): void {
   for (const childId of collectChildIds(container.id)) {
     container.remove(childId);
@@ -312,6 +387,7 @@ function clearBlockChildren(view: BlockView): void {
   view.userBubble = undefined;
   view.userText = undefined;
   view.markdown = undefined;
+  view.diff = undefined;
   view.kind = undefined;
 }
 
@@ -321,6 +397,10 @@ function collectChildIds(baseId: string): string[] {
     `${baseId}-user-text`,
     `${baseId}-assistant`,
     `${baseId}-thinking`,
+    `${baseId}-diff-wrapper`,
+    `${baseId}-diff-title`,
+    `${baseId}-diff-shell`,
+    `${baseId}-diff`,
     `${baseId}-tool-header-row`,
     `${baseId}-tool-header-dot`,
     `${baseId}-tool-header`,

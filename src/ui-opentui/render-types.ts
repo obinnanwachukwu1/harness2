@@ -24,6 +24,15 @@ export type OpenTuiRenderBlock =
       body: string[];
       footer: string[];
       live?: boolean;
+    }
+  | {
+      id: string;
+      kind: 'diff';
+      title: string;
+      diff: string;
+      filetype?: string;
+      view?: 'unified' | 'split';
+      live?: boolean;
     };
 
 export interface OpenTuiExperimentSummary {
