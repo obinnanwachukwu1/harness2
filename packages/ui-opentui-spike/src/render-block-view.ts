@@ -1,6 +1,9 @@
 import {
   BoxRenderable,
   type CliRenderer,
+  MarkdownRenderable,
+  SyntaxStyle,
+  RGBA,
   TextAttributes,
   TextRenderable
 } from '@opentui/core';
@@ -9,11 +12,34 @@ import type { OpenTuiRenderBlock } from '../../../src/ui-opentui/render-types.js
 
 type ToolTone = Extract<OpenTuiRenderBlock, { kind: 'tool' }>['tone'];
 
+const assistantMarkdownSyntaxStyle = createMarkdownSyntaxStyle({
+  text: '#ffffff',
+  accent: '#93c5fd',
+  quote: '#d1d5db',
+  code: '#c4b5fd'
+});
+
+const thinkingMarkdownSyntaxStyle = createMarkdownSyntaxStyle({
+  text: RGBA.fromValues(0.24, 0.68, 0.78, 0.72),
+  accent: RGBA.fromValues(0.22, 0.62, 0.72, 0.72),
+  quote: RGBA.fromValues(0.32, 0.74, 0.82, 0.62),
+  code: RGBA.fromValues(0.40, 0.78, 0.88, 0.72),
+  strongItalic: true
+});
+
 export interface BlockView {
   container: BoxRenderable;
+  kind?: OpenTuiRenderBlock['kind'];
+  userBubble?: BoxRenderable;
+  userText?: TextRenderable;
+  markdown?: MarkdownRenderable;
 }
 
-export function createBlockView(renderer: CliRenderer, block: OpenTuiRenderBlock): BlockView {
+export function createBlockView(
+  renderer: CliRenderer,
+  block: OpenTuiRenderBlock,
+  options: { isFirst: boolean }
+): BlockView {
   const container = new BoxRenderable(renderer, {
     id: `block-${block.id}`,
     width: '100%',
@@ -22,78 +48,144 @@ export function createBlockView(renderer: CliRenderer, block: OpenTuiRenderBlock
   });
 
   const view: BlockView = { container };
-  updateBlockView(renderer, view, block);
+  updateBlockView(renderer, view, block, options);
   return view;
 }
 
 export function updateBlockView(
   renderer: CliRenderer,
   view: BlockView,
-  block: OpenTuiRenderBlock
+  block: OpenTuiRenderBlock,
+  options: { isFirst: boolean }
 ): void {
-  clearBlockChildren(view);
   const baseId = view.container.id;
 
   switch (block.kind) {
     case 'user': {
+      if (view.kind === 'user' && view.userText && view.userBubble) {
+        view.userBubble.marginTop = options.isFirst ? 1 : 0;
+        view.userText.content = block.text;
+        return;
+      }
+
+      clearBlockChildren(view);
       const bubble = new BoxRenderable(renderer, {
         id: `${baseId}-user`,
         width: '100%',
-        backgroundColor: '#4b5563',
+        marginTop: options.isFirst ? 1 : 0,
+        marginLeft: 1,
+        marginRight: 1,
+        backgroundColor: '#27272a',
+        paddingTop: 1,
+        paddingBottom: 1,
         paddingLeft: 1,
         paddingRight: 1
       });
-      bubble.add(
-        new TextRenderable(renderer, {
-          id: `${baseId}-user-text`,
-          content: block.text,
-          fg: '#ffffff',
-          selectionBg: '#93c5fd',
-          selectionFg: '#111111',
-          wrapMode: 'word'
-        })
-      );
+      const userText = new TextRenderable(renderer, {
+        id: `${baseId}-user-text`,
+        content: block.text,
+        fg: '#ffffff',
+        selectionBg: '#93c5fd',
+        selectionFg: '#111111',
+        wrapMode: 'word'
+      });
+      bubble.add(userText);
       view.container.add(bubble);
+      view.kind = 'user';
+      view.userBubble = bubble;
+      view.userText = userText;
+      view.markdown = undefined;
       return;
     }
-    case 'assistant':
-      view.container.add(
-        new TextRenderable(renderer, {
-          id: `${baseId}-assistant`,
-          content: block.text,
-          fg: '#ffffff',
-          selectionBg: '#93c5fd',
-          selectionFg: '#111111',
-          wrapMode: 'word'
-        })
-      );
+    case 'assistant': {
+      if (view.kind === 'assistant' && view.markdown) {
+        view.markdown.content = block.text;
+        view.markdown.streaming = block.live ?? false;
+        view.markdown.fg = '#ffffff';
+        view.markdown.bg = '#111111';
+        return;
+      }
+
+      clearBlockChildren(view);
+      const markdown = new MarkdownRenderable(renderer, {
+        id: `${baseId}-assistant`,
+        content: block.text,
+        syntaxStyle: assistantMarkdownSyntaxStyle,
+        fg: '#ffffff',
+        bg: '#111111',
+        conceal: true,
+        streaming: block.live ?? false
+      });
+      view.container.add(markdown);
+      view.kind = 'assistant';
+      view.userBubble = undefined;
+      view.userText = undefined;
+      view.markdown = markdown;
       return;
-    case 'thinking':
-      view.container.add(
-        new TextRenderable(renderer, {
-          id: `${baseId}-thinking`,
-          content: block.text,
-          fg: '#5fd7ff',
-          selectionBg: '#67e8f9',
-          selectionFg: '#111111',
-          attributes: TextAttributes.DIM,
-          wrapMode: 'word'
-        })
-      );
+    }
+    case 'thinking': {
+      if (view.kind === 'thinking' && view.markdown) {
+        view.markdown.content = block.text;
+        view.markdown.streaming = block.live ?? false;
+        view.markdown.fg = RGBA.fromValues(0.24, 0.68, 0.78, 0.72);
+        view.markdown.bg = '#111111';
+        return;
+      }
+
+      clearBlockChildren(view);
+      const markdown = new MarkdownRenderable(renderer, {
+        id: `${baseId}-thinking`,
+        content: block.text,
+        syntaxStyle: thinkingMarkdownSyntaxStyle,
+        fg: RGBA.fromValues(0.24, 0.68, 0.78, 0.72),
+        bg: '#111111',
+        conceal: true,
+        streaming: false
+      });
+      view.container.add(markdown);
+      view.kind = 'thinking';
+      view.userBubble = undefined;
+      view.userText = undefined;
+      view.markdown = markdown;
       return;
+    }
     case 'tool': {
+      clearBlockChildren(view);
+      view.kind = 'tool';
+      view.userBubble = undefined;
+      view.userText = undefined;
+      view.markdown = undefined;
       const colors = getToolToneColors(block.tone);
-      view.container.add(
+      const headerRow = new BoxRenderable(renderer, {
+        id: `${baseId}-tool-header-row`,
+        width: '100%',
+        flexDirection: 'row'
+      });
+      headerRow.add(
+        new TextRenderable(renderer, {
+          id: `${baseId}-tool-header-dot`,
+          content: '⏺ ',
+          fg: colors.header,
+          selectionBg: colors.selectionBg,
+          selectionFg: '#111111',
+          attributes: block.live
+            ? TextAttributes.BOLD | TextAttributes.BLINK
+            : TextAttributes.BOLD
+        })
+      );
+      headerRow.add(
         new TextRenderable(renderer, {
           id: `${baseId}-tool-header`,
-          content: `⏺ ${block.header}`,
+          content: block.header,
           fg: colors.header,
           selectionBg: colors.selectionBg,
           selectionFg: '#111111',
           attributes: TextAttributes.BOLD,
-          wrapMode: 'word'
+          wrapMode: 'word',
+          flexGrow: 1
         })
       );
+      view.container.add(headerRow);
       if (block.body.length > 0) {
         const bodyRow = new BoxRenderable(renderer, {
           id: `${baseId}-tool-body-row`,
@@ -185,6 +277,30 @@ function getToolToneColors(tone: ToolTone): {
   }
 }
 
+function createMarkdownSyntaxStyle(colors: {
+  text: string | RGBA;
+  accent: string | RGBA;
+  quote: string | RGBA;
+  code: string | RGBA;
+  strongItalic?: boolean;
+}): SyntaxStyle {
+  return SyntaxStyle.fromStyles({
+    default: { fg: toRgba(colors.text) },
+    'markup.heading': { fg: toRgba(colors.text), bold: true },
+    'markup.list': { fg: toRgba(colors.accent) },
+    'markup.link': { fg: toRgba(colors.accent), underline: true },
+    'markup.quote': { fg: toRgba(colors.quote) },
+    'markup.raw': { fg: toRgba(colors.code) },
+    'markup.bold': { fg: toRgba(colors.text), bold: true },
+    'markup.strong': { fg: toRgba(colors.text), bold: true, italic: colors.strongItalic ?? false },
+    'markup.italic': { fg: toRgba(colors.text), italic: true }
+  });
+}
+
+function toRgba(color: string | RGBA): RGBA {
+  return typeof color === 'string' ? RGBA.fromHex(color) : color;
+}
+
 export function clearChildren(container: BoxRenderable): void {
   for (const childId of collectChildIds(container.id)) {
     container.remove(childId);
@@ -193,6 +309,10 @@ export function clearChildren(container: BoxRenderable): void {
 
 function clearBlockChildren(view: BlockView): void {
   clearChildren(view.container);
+  view.userBubble = undefined;
+  view.userText = undefined;
+  view.markdown = undefined;
+  view.kind = undefined;
 }
 
 function collectChildIds(baseId: string): string[] {
@@ -201,6 +321,8 @@ function collectChildIds(baseId: string): string[] {
     `${baseId}-user-text`,
     `${baseId}-assistant`,
     `${baseId}-thinking`,
+    `${baseId}-tool-header-row`,
+    `${baseId}-tool-header-dot`,
     `${baseId}-tool-header`,
     `${baseId}-tool-body-row`,
     `${baseId}-tool-body-gutter`,

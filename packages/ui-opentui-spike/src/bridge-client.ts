@@ -11,6 +11,11 @@ interface BridgeClientEvents {
   exit: [number | null];
 }
 
+const IGNORED_STDERR_PATTERNS = [
+  /ExperimentalWarning:.*SQLite/i,
+  /ExperimentalWarning:.*node:sqlite/i
+];
+
 export class BridgeClient extends EventEmitter<BridgeClientEvents> {
   private child: ChildProcessByStdio<Writable, Readable, Readable> | null = null;
   private rl: readline.Interface | null = null;
@@ -68,6 +73,9 @@ export class BridgeClient extends EventEmitter<BridgeClientEvents> {
       if (!message) {
         return;
       }
+      if (shouldIgnoreBridgeStderr(message)) {
+        return;
+      }
 
       this.emit('event', {
         type: 'error',
@@ -111,4 +119,8 @@ export class BridgeClient extends EventEmitter<BridgeClientEvents> {
       }, 200);
     });
   }
+}
+
+function shouldIgnoreBridgeStderr(message: string): boolean {
+  return IGNORED_STDERR_PATTERNS.some((pattern) => pattern.test(message));
 }

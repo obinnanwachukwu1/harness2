@@ -23,6 +23,7 @@ export type OpenTuiRenderBlock =
       header: string;
       body: string[];
       footer: string[];
+      live?: boolean;
     };
 
 export interface OpenTuiExperimentSummary {
@@ -35,7 +36,13 @@ export interface OpenTuiExperimentSummary {
 export interface OpenTuiState {
   sessionId: string;
   cwd: string;
-  statusLine: string;
+  status: {
+    label: string;
+    model: string;
+    contextText: string;
+    contextUsagePercent: number;
+    usageText: string;
+  };
   thinkingEnabled: boolean;
   inputPlaceholder: string;
   blocks: OpenTuiRenderBlock[];

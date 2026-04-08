@@ -3,13 +3,13 @@ import type { OpenTuiExperimentSummary, OpenTuiRenderBlock, OpenTuiState } from 
 
 type ToolTone = Extract<OpenTuiRenderBlock, { kind: 'tool' }>['tone'];
 
-const INPUT_PLACEHOLDER = 'Send a prompt…  ctrl-c quit  pageup/pagedown scroll  ctrl-t thinking';
+const INPUT_PLACEHOLDER = 'Send a prompt…';
 
 export function buildOpenTuiState(snapshot: EngineSnapshot): OpenTuiState {
   return {
     sessionId: snapshot.session.id,
     cwd: snapshot.session.cwd,
-    statusLine: formatStatus(snapshot),
+    status: formatStatus(snapshot),
     thinkingEnabled: snapshot.thinkingEnabled,
     inputPlaceholder: INPUT_PLACEHOLDER,
     blocks: buildBlocks(snapshot),
@@ -18,29 +18,59 @@ export function buildOpenTuiState(snapshot: EngineSnapshot): OpenTuiState {
 }
 
 function buildBlocks(snapshot: EngineSnapshot): OpenTuiRenderBlock[] {
-  const blocks = snapshot.transcript.flatMap((entry) =>
+  const currentTurnStartedAt =
+    snapshot.processingTurn && snapshot.currentTurnStartedAt ? snapshot.currentTurnStartedAt : null;
+  const historicalEntries = currentTurnStartedAt
+    ? snapshot.transcript.filter(
+        (entry) => !(entry.role !== 'user' && entry.createdAt >= currentTurnStartedAt)
+      )
+    : snapshot.transcript;
+
+  const blocks = historicalEntries.flatMap((entry) =>
     transcriptEntryToBlocks(entry, snapshot.thinkingEnabled)
   );
 
-  if (
-    snapshot.thinkingEnabled &&
-    snapshot.liveReasoningSummary &&
-    snapshot.liveReasoningSummary.trim()
-  ) {
-    blocks.push({
-      id: 'live-thinking',
-      kind: 'thinking',
-      text: snapshot.liveReasoningSummary,
-      live: true
-    });
-  }
+  for (const event of snapshot.liveTurnEvents) {
+    if (event.kind === 'assistant' || event.kind === 'thinking') {
+      if (event.kind === 'thinking' && !snapshot.thinkingEnabled) {
+        continue;
+      }
+      blocks.push({
+        id: event.id,
+        kind: event.kind,
+        text: event.text,
+        live: event.live
+      });
+      continue;
+    }
 
-  if (snapshot.liveAssistantText && snapshot.liveAssistantText.trim()) {
+    if (event.transcriptText) {
+      const block = toolTranscriptToBlock(
+        {
+          id: -1,
+          sessionId: snapshot.session.id,
+          role: 'tool',
+          text: event.transcriptText,
+          createdAt: currentTurnStartedAt ?? snapshot.session.lastActiveAt
+        },
+        event.id
+      );
+      block.live = event.live;
+      blocks.push(block);
+      continue;
+    }
+
     blocks.push({
-      id: 'live-assistant',
-      kind: 'assistant',
-      text: snapshot.liveAssistantText,
-      live: true
+      id: event.id,
+      kind: 'tool',
+      tone: getToolTone(event.toolName ?? 'tool'),
+      header: event.label ?? (event.toolName ?? 'tool'),
+      body:
+        event.body.length > 0
+          ? [event.detail ?? (event.providerExecuted ? 'searching…' : 'running…'), ...event.body]
+          : [event.detail ?? (event.providerExecuted ? 'searching…' : 'running…')],
+      footer: [],
+      live: event.live
     });
   }
 
@@ -92,7 +122,10 @@ function transcriptEntryToBlocks(
   ];
 }
 
-function toolTranscriptToBlock(entry: TranscriptEntry): OpenTuiRenderBlock {
+function toolTranscriptToBlock(
+  entry: TranscriptEntry,
+  forcedId?: string
+): Extract<OpenTuiRenderBlock, { kind: 'tool' }> {
   const metadataMatch = entry.text.match(/^@@tool\t([^\t\n]+)\t([^\n]+)\n?([\s\S]*)$/);
   const legacyMatch = entry.text.match(/^\[([^\]]+)\]\n?([\s\S]*)$/);
   const toolName = metadataMatch?.[1]?.trim() || legacyMatch?.[1]?.trim() || 'tool';
@@ -102,7 +135,7 @@ function toolTranscriptToBlock(entry: TranscriptEntry): OpenTuiRenderBlock {
   const summary = summarizeToolTranscript(toolName, body, explicitLabel);
 
   return {
-    id: `tool-${entry.id}`,
+    id: forcedId ?? `tool-${entry.id}`,
     kind: 'tool',
     tone,
     header: summary.label,
@@ -479,18 +512,15 @@ function formatTokenCount(value: number): string {
   return `${value}`;
 }
 
-function formatStatus(snapshot: EngineSnapshot): string {
-  const ctxText = `ctx ${formatTokenCount(snapshot.estimatedContextTokens)}/${formatTokenCount(snapshot.contextWindowTokens)}`;
-  const pricingText = snapshot.standardRateContextTokens
-    ? `std ${formatTokenCount(snapshot.standardRateContextTokens)}`
-    : null;
+function formatStatus(snapshot: EngineSnapshot): OpenTuiState['status'] {
+  const ctxLimit = snapshot.standardRateContextTokens || snapshot.contextWindowTokens;
+  const usedPercent = ctxLimit > 0 ? Math.max(0, Math.round((snapshot.estimatedContextTokens / ctxLimit) * 100)) : 0;
 
-  return [
-    snapshot.statusText,
-    `session ${snapshot.session.id}`,
-    `model ${snapshot.model}`,
-    pricingText ? `${ctxText} (${pricingText})` : ctxText,
-    `thinking ${snapshot.thinkingEnabled ? 'on' : 'off'}`,
-    `experiments ${snapshot.experiments.filter((experiment) => experiment.status === 'running').length}/${snapshot.experiments.length}`
-  ].join('  ');
+  return {
+    label: snapshot.statusText === 'running turn' ? 'running' : snapshot.statusText,
+    model: snapshot.model,
+    contextText: `${formatTokenCount(snapshot.estimatedContextTokens)}/${formatTokenCount(ctxLimit)}`,
+    contextUsagePercent: usedPercent,
+    usageText: `${usedPercent}% used`
+  };
 }

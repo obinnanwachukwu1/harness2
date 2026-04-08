@@ -18,7 +18,8 @@ import type {
   OpenTuiState
 } from '../../../src/ui-opentui/render-types.js';
 import { BridgeClient } from './bridge-client.js';
-import { clearChildren, createBlockView, updateBlockView, type BlockView } from './render-block-view.js';
+import { copyToClipboard } from './clipboard.js';
+import { createBlockView, updateBlockView, type BlockView } from './render-block-view.js';
 
 export class OpenTuiApp {
   static async open(options: { cwd: string; sessionId?: string }): Promise<OpenTuiApp> {
@@ -39,7 +40,7 @@ export class OpenTuiApp {
   private readonly transcriptScroll: ScrollBoxRenderable;
   private readonly transcriptContent: BoxRenderable;
   private readonly experimentRail: BoxRenderable;
-  private readonly statusLine: TextRenderable;
+  private readonly statusRow: BoxRenderable;
   private readonly input: InputRenderable;
   private readonly blockViews = new Map<string, BlockView>();
   private currentBlocks: OpenTuiRenderBlock[] = [];
@@ -47,7 +48,6 @@ export class OpenTuiApp {
   private destroyed = false;
   private resolveRun?: () => void;
   private transientStatus: { message: string; timeout: ReturnType<typeof setTimeout> | null } | null = null;
-  private lastCopiedSelection = '';
 
   private constructor(
     private readonly renderer: CliRenderer,
@@ -58,7 +58,7 @@ export class OpenTuiApp {
     this.transcriptScroll = this.root.findDescendantById('transcript-scroll') as ScrollBoxRenderable;
     this.transcriptContent = this.root.findDescendantById('transcript-content') as BoxRenderable;
     this.experimentRail = this.root.findDescendantById('experiment-rail') as BoxRenderable;
-    this.statusLine = this.root.findDescendantById('status-line') as TextRenderable;
+    this.statusRow = this.root.findDescendantById('status-row') as BoxRenderable;
     this.input = this.root.findDescendantById('composer-input') as InputRenderable;
 
     this.renderer.root.add(this.root);
@@ -93,9 +93,8 @@ export class OpenTuiApp {
     });
     header.add(
       new TextRenderable(this.renderer, {
-        content: ' h2',
-        fg: '#ffffff',
-        attributes: TextAttributes.BOLD
+        content: '  h2',
+        fg: '#71717a'
       })
     );
 
@@ -138,47 +137,53 @@ export class OpenTuiApp {
         width: 34,
         height: '100%',
         flexDirection: 'column',
+        marginBottom: 1,
         border: ['left'],
         borderColor: '#333333',
         paddingLeft: 1
       })
     );
 
-    const divider = new TextRenderable(this.renderer, {
-      content: '─'.repeat(Math.max(8, this.renderer.width || 80)),
-      fg: '#3a3a3a',
-      width: '100%',
-      truncate: true
-    });
-
     const footer = new BoxRenderable(this.renderer, {
       width: '100%',
-      height: 2,
+      height: 5,
       flexDirection: 'column'
     });
-    footer.add(
-      new TextRenderable(this.renderer, {
-        id: 'status-line',
-        content: '',
-        fg: '#8b8b8b',
-        truncate: true
-      })
-    );
-    footer.add(
+    const promptShell = new BoxRenderable(this.renderer, {
+      width: '100%',
+      marginLeft: 1,
+      marginRight: 1,
+      backgroundColor: '#27272a',
+      paddingTop: 1,
+      paddingBottom: 1,
+      paddingLeft: 1,
+      paddingRight: 1
+    });
+    promptShell.add(
       new InputRenderable(this.renderer, {
         id: 'composer-input',
-        placeholder: 'Send a prompt…  ctrl-c quit  pageup/pagedown scroll  ctrl-t thinking',
+        placeholder: 'Send a prompt…',
         textColor: '#ffffff',
-        placeholderColor: '#6b7280',
-        backgroundColor: '#111111',
+        placeholderColor: '#71717a',
+        backgroundColor: '#27272a',
         focusedTextColor: '#ffffff',
-        focusedBackgroundColor: '#111111'
+        focusedBackgroundColor: '#27272a'
+      })
+    );
+    footer.add(promptShell);
+    footer.add(
+      new BoxRenderable(this.renderer, {
+        id: 'status-row',
+        width: '100%',
+        flexDirection: 'row',
+        marginTop: 1,
+        marginLeft: 2,
+        marginRight: 2
       })
     );
 
     app.add(header);
     app.add(body);
-    app.add(divider);
     app.add(footer);
     return app;
   }
@@ -191,13 +196,25 @@ export class OpenTuiApp {
       if (this.destroyed) {
         return;
       }
-      this.statusLine.content = ` bridge exited (${code ?? 'unknown'})`;
+      this.renderStatusLine({
+        label: `bridge exited (${code ?? 'unknown'})`,
+        model: this.state?.status.model ?? 'gpt-5.4',
+        contextText: this.state?.status.contextText ?? '',
+        contextUsagePercent: this.state?.status.contextUsagePercent ?? 0,
+        usageText: this.state?.status.usageText ?? ''
+      });
       this.renderer.requestRender();
     });
   }
 
   private bindKeys(): void {
     this.renderer.keyInput.on('keypress', (key) => {
+      if (key.name === 'escape' && this.renderer.hasSelection) {
+        this.renderer.clearSelection();
+        this.renderer.requestRender();
+        return;
+      }
+
       if (key.ctrl && key.name === 'c') {
         void this.destroy();
         return;
@@ -259,23 +276,35 @@ export class OpenTuiApp {
         return;
       }
 
-      const text = selection.getSelectedText().trim();
-      if (!text) {
-        return;
-      }
-      if (text === this.lastCopiedSelection) {
+      const text = selection.getSelectedText();
+      if (text.length === 0) {
         return;
       }
 
-      const copied = this.renderer.copyToClipboardOSC52(text);
-      this.lastCopiedSelection = text;
-      this.setTransientStatus(copied ? 'copied selection' : 'copy unsupported in this terminal');
+      void this.copySelectionText(text);
     });
+  }
+
+  private async copySelectionText(text: string): Promise<void> {
+    const osc52Copied = this.renderer.copyToClipboardOSC52(text);
+    const nativeCopied = await copyToClipboard(text);
+
+    this.renderer.clearSelection();
+    this.renderer.requestRender();
+    this.setTransientStatus(
+      osc52Copied || nativeCopied ? 'copied selection' : 'copy unsupported in this terminal'
+    );
   }
 
   private handleBridgeEvent(event: OpenTuiBridgeEvent): void {
     if (event.type === 'error') {
-      this.statusLine.content = ` error  ${event.message}`;
+      this.renderStatusLine({
+        label: 'error',
+        model: this.state?.status.model ?? 'gpt-5.4',
+        contextText: this.state?.status.contextText ?? '',
+        contextUsagePercent: this.state?.status.contextUsagePercent ?? 0,
+        usageText: event.message
+      });
       this.renderer.requestRender();
       return;
     }
@@ -293,7 +322,7 @@ export class OpenTuiApp {
     this.input.placeholder = state.inputPlaceholder;
     this.syncTranscript(state.blocks);
     this.syncExperiments(state.experiments);
-    this.renderStatusLine(state.statusLine);
+    this.renderStatusLine(state.status);
     this.renderer.requestRender();
   }
 
@@ -307,14 +336,14 @@ export class OpenTuiApp {
       }
     }
 
-    for (const block of blocks) {
+    for (const [index, block] of blocks.entries()) {
       const existing = this.blockViews.get(block.id);
       if (existing) {
-        updateBlockView(this.renderer, existing, block);
+        updateBlockView(this.renderer, existing, block, { isFirst: index === 0 });
         continue;
       }
 
-      const view = createBlockView(this.renderer, block);
+      const view = createBlockView(this.renderer, block, { isFirst: index === 0 });
       this.transcriptContent.add(view.container);
       this.blockViews.set(block.id, view);
     }
@@ -395,9 +424,83 @@ export class OpenTuiApp {
     }
   }
 
-  private renderStatusLine(baseStatus: string): void {
-    const transient = this.transientStatus?.message;
-    this.statusLine.content = transient ? ` ${transient}  ·  ${baseStatus}` : ` ${baseStatus}`;
+  private renderStatusLine(status: OpenTuiState['status']): void {
+    clearStatusRow(this.statusRow);
+
+    const sessionLabel = this.state?.sessionId?.replace(/^session-/, '');
+    const leftIds = {
+      status: 'status-row-status',
+      model: 'status-row-model',
+      context: 'status-row-context',
+      usage: 'status-row-usage'
+    } as const;
+    const rightIds = {
+      transient: 'status-row-transient',
+      session: 'status-row-session'
+    } as const;
+
+    this.statusRow.add(
+      new TextRenderable(this.renderer, {
+        id: leftIds.status,
+        content: status.label,
+        fg: getStatusColor(status.label)
+      })
+    );
+    this.statusRow.add(newTextSpacer(this.renderer, 'status-row-gap-1'));
+    this.statusRow.add(
+      new TextRenderable(this.renderer, {
+        id: leftIds.model,
+        content: status.model,
+        fg: '#a1a1aa'
+      })
+    );
+    this.statusRow.add(newTextSpacer(this.renderer, 'status-row-gap-2'));
+    this.statusRow.add(
+      new TextRenderable(this.renderer, {
+        id: leftIds.context,
+        content: status.contextText,
+        fg: getContextColor(status.contextUsagePercent)
+      })
+    );
+    this.statusRow.add(newTextSpacer(this.renderer, 'status-row-gap-3'));
+    this.statusRow.add(
+      new TextRenderable(this.renderer, {
+        id: leftIds.usage,
+        content: status.usageText,
+        fg: getContextColor(status.contextUsagePercent)
+      })
+    );
+    this.statusRow.add(
+      new BoxRenderable(this.renderer, {
+        id: 'status-row-spacer',
+        flexGrow: 1
+      })
+    );
+
+    if (this.transientStatus?.message) {
+      this.statusRow.add(
+        new TextRenderable(this.renderer, {
+          id: rightIds.transient,
+          content: this.transientStatus.message,
+          fg: '#93c5fd'
+        })
+      );
+      if (sessionLabel) {
+        this.statusRow.add(newTextSpacer(this.renderer, 'status-row-gap-4'));
+      }
+    }
+
+    if (sessionLabel) {
+      this.statusRow.add(
+        new TextRenderable(this.renderer, {
+          id: rightIds.session,
+          content: sessionLabel,
+          fg: '#71717a',
+          truncate: true,
+          wrapMode: 'none'
+        })
+      );
+    }
   }
 
   private setTransientStatus(message: string): void {
@@ -410,14 +513,14 @@ export class OpenTuiApp {
       timeout: setTimeout(() => {
         this.transientStatus = null;
         if (this.state) {
-          this.renderStatusLine(this.state.statusLine);
+          this.renderStatusLine(this.state.status);
           this.renderer.requestRender();
         }
       }, 1500)
     };
 
     if (this.state) {
-      this.renderStatusLine(this.state.statusLine);
+      this.renderStatusLine(this.state.status);
       this.renderer.requestRender();
     }
   }
@@ -435,5 +538,51 @@ export class OpenTuiApp {
     await this.bridge.dispose();
     this.renderer.destroy();
     this.resolveRun?.();
+  }
+}
+
+function getStatusColor(status: string): string {
+  if (status === 'running turn') {
+    return '#60a5fa';
+  }
+  if (status === 'error') {
+    return '#f87171';
+  }
+  return '#71717a';
+}
+
+function getContextColor(usedPercent: number): string {
+  if (usedPercent >= 85) {
+    return '#f87171';
+  }
+  if (usedPercent >= 60) {
+    return '#fbbf24';
+  }
+  return '#71717a';
+}
+
+function newTextSpacer(renderer: CliRenderer, id: string): TextRenderable {
+  return new TextRenderable(renderer, {
+    id,
+    content: '  ',
+    fg: '#71717a'
+  });
+}
+
+function clearStatusRow(container: BoxRenderable): void {
+  for (const id of [
+    'status-row-status',
+    'status-row-gap-1',
+    'status-row-model',
+    'status-row-gap-2',
+    'status-row-context',
+    'status-row-gap-3',
+    'status-row-usage',
+    'status-row-spacer',
+    'status-row-transient',
+    'status-row-gap-4',
+    'status-row-session'
+  ]) {
+    container.remove(id);
   }
 }
