@@ -24,6 +24,7 @@ id = "core-12"
 reasoning_effort = "medium"
 thinking = false
 web_search_mode = "fixed"
+parallelism = 3
 
 [[fixtures]]
 id = "empty-node"
@@ -37,6 +38,7 @@ write_env_example = ".env.example"
 id = "B1"
 bucket = "B"
 fixture = "empty-node"
+profile = "existing"
 prompt = "first prompt"
 question_expected = true
 
@@ -50,7 +52,9 @@ prompt = "second prompt"
   const parsed = await parseEvalManifest(manifestPath);
   assert.equal(parsed.manifest.fixtures[0]?.path, fixtureDir);
   assert.equal(parsed.manifest.runtime.model, undefined);
+  assert.equal(parsed.manifest.runtime.parallelism, 3);
   assert.equal(parsed.manifest.cases[0]?.followups.length, 1);
   assert.equal(parsed.manifest.cases[0]?.followups[0]?.afterTurn, 1);
   assert.equal(parsed.manifest.cases[0]?.followups[0]?.prompt, 'second prompt');
+  assert.equal(parsed.manifest.cases[0]?.profile, 'existing');
 });

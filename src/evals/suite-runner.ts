@@ -24,25 +24,61 @@ export async function runEvalSuite(request: EvalRunRequest): Promise<EvalSuiteRu
   await mkdir(runRoot, { recursive: true });
   const lockedManifestPath = path.join(runRoot, 'manifest.lock.json');
   await writeFile(lockedManifestPath, JSON.stringify(parsed.manifest, null, 2), 'utf8');
+  request.onProgress?.({
+    type: 'suite_started',
+    runId,
+    suiteId: parsed.manifest.suite.id,
+    totalCases: selectedCases.length,
+    runRoot
+  });
 
-  const results = [];
-  for (const testCase of selectedCases) {
-    const fixture = parsed.manifest.fixtures.find((entry) => entry.id === testCase.fixture);
+  const fixtureById = new Map(parsed.manifest.fixtures.map((entry) => [entry.id, entry]));
+  const plannedCases = selectedCases.map((testCase, index) => {
+    const fixture = fixtureById.get(testCase.fixture);
     if (!fixture) {
       throw new Error(`Case ${testCase.id} references unknown fixture ${testCase.fixture}.`);
     }
-
-    results.push(
-      await runEvalCase({
+    return { index, testCase, fixture };
+  });
+  const results = await runCasesWithConcurrency(
+    plannedCases,
+    normalizeParallelism(request.parallelism ?? parsed.manifest.runtime.parallelism),
+    async (planned) => {
+      request.onProgress?.({
+        type: 'case_started',
         runId,
-        caseDefinition: testCase,
-        fixture,
+        suiteId: parsed.manifest.suite.id,
+        caseId: planned.testCase.id,
+        fixtureId: planned.fixture.id,
+        profile: planned.testCase.profile,
+        index: planned.index + 1,
+        totalCases: selectedCases.length
+      });
+
+      const caseResult = await runEvalCase({
+        runId,
+        caseDefinition: planned.testCase,
+        fixture: planned.fixture,
         runRoot,
         runtime: parsed.manifest.runtime,
         clarification: parsed.manifest.clarification
-      })
-    );
-  }
+      });
+      request.onProgress?.({
+        type: 'case_completed',
+        runId,
+        suiteId: parsed.manifest.suite.id,
+        caseId: planned.testCase.id,
+        fixtureId: planned.fixture.id,
+        profile: planned.testCase.profile,
+        index: planned.index + 1,
+        totalCases: selectedCases.length,
+        overall: caseResult.autoScore.overall,
+        questionActual: caseResult.autoScore.questionActual,
+        experimentActual: caseResult.autoScore.experimentActual
+      });
+      return caseResult;
+    }
+  );
 
   const output: EvalSuiteRunResult = {
     runId,
@@ -61,4 +97,56 @@ export async function runEvalSuite(request: EvalRunRequest): Promise<EvalSuiteRu
 function createRunId(): string {
   const stamp = nowIso().replace(/[:.]/g, '-');
   return `run-${stamp}-${createSessionId().slice(-6)}`;
+}
+
+function normalizeParallelism(value: number | undefined): number {
+  if (!value || !Number.isFinite(value)) {
+    return 1;
+  }
+
+  return Math.max(1, Math.floor(value));
+}
+
+async function runCasesWithConcurrency<TCase, TResult>(
+  cases: TCase[],
+  parallelism: number,
+  worker: (entry: TCase) => Promise<TResult>
+): Promise<TResult[]> {
+  if (cases.length === 0) {
+    return [];
+  }
+
+  const results = new Array<TResult>(cases.length);
+  let nextIndex = 0;
+  let firstError: unknown = null;
+
+  const runWorker = async (): Promise<void> => {
+    while (true) {
+      if (firstError) {
+        return;
+      }
+
+      const currentIndex = nextIndex;
+      nextIndex += 1;
+      if (currentIndex >= cases.length) {
+        return;
+      }
+
+      try {
+        results[currentIndex] = await worker(cases[currentIndex]!);
+      } catch (error) {
+        firstError ??= error;
+        return;
+      }
+    }
+  };
+
+  const workerCount = Math.min(parallelism, cases.length);
+  await Promise.all(Array.from({ length: workerCount }, () => runWorker()));
+
+  if (firstError) {
+    throw firstError;
+  }
+
+  return results;
 }

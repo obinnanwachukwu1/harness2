@@ -4,6 +4,7 @@ import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import test from 'node:test';
 
 import { runEvalSuite } from '../src/evals/suite-runner.js';
+import { createEvalReviewPack } from '../src/evals/pack-run.js';
 import { cleanupDir, createGitRepo, createTempDir } from '../test-support/helpers.js';
 
 test('runEvalSuite materializes template fixture env and exports artifacts', async (t) => {
@@ -54,6 +55,7 @@ write_env_example = ".env.example"
 id = "A1"
 bucket = "A"
 fixture = "tiny-app"
+profile = "backend"
 prompt = "/write note.txt :: hello from eval"
 question_expected = false
 experiment_expected = false
@@ -125,6 +127,7 @@ ref = "HEAD"
 id = "A2"
 bucket = "A"
 fixture = "repo-fixture"
+profile = "existing"
 prompt = "/read README.md"
 question_expected = false
 experiment_expected = false
@@ -139,4 +142,130 @@ experiment_expected = false
 
   const transcript = JSON.parse(await readFile(result.cases[0]!.artifacts.transcriptJsonPath, 'utf8')) as Array<{ text: string }>;
   assert.ok(transcript.some((entry) => entry.text.includes('README.md')));
+});
+
+test('runEvalSuite supports bounded case parallelism', async (t) => {
+  const tempDir = await createTempDir('h2-eval-parallel-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const originalH2Home = process.env.H2_HOME;
+  process.env.H2_HOME = path.join(tempDir, 'h2-home');
+  t.after(() => {
+    if (originalH2Home === undefined) {
+      delete process.env.H2_HOME;
+    } else {
+      process.env.H2_HOME = originalH2Home;
+    }
+  });
+
+  const fixtureDir = path.join(tempDir, 'fixtures', 'tiny-app');
+  await mkdir(fixtureDir, { recursive: true });
+  await writeFile(path.join(fixtureDir, 'README.md'), '# fixture\n', 'utf8');
+
+  const manifestPath = path.join(tempDir, 'suite.toml');
+  await writeFile(
+    manifestPath,
+    `
+[suite]
+id = "core-12"
+
+[runtime]
+reasoning_effort = "medium"
+thinking = false
+web_search_mode = "fixed"
+parallelism = 2
+
+[[fixtures]]
+id = "tiny-app"
+type = "template"
+path = "./fixtures/tiny-app"
+
+[[cases]]
+id = "A1"
+bucket = "A"
+fixture = "tiny-app"
+profile = "backend"
+prompt = "/write one.txt :: one"
+
+[[cases]]
+id = "A2"
+bucket = "A"
+fixture = "tiny-app"
+profile = "backend"
+prompt = "/write two.txt :: two"
+`,
+    'utf8'
+  );
+
+  const result = await runEvalSuite({
+    manifestPath
+  });
+
+  assert.equal(result.cases.length, 2);
+  assert.equal(await readFile(path.join(result.cases[0]!.workspacePath, 'one.txt'), 'utf8'), 'one');
+  assert.equal(await readFile(path.join(result.cases[1]!.workspacePath, 'two.txt'), 'utf8'), 'two');
+});
+
+test('createEvalReviewPack resolves a short run suffix and excludes workspaces', async (t) => {
+  const tempDir = await createTempDir('h2-eval-pack-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const originalH2Home = process.env.H2_HOME;
+  process.env.H2_HOME = path.join(tempDir, 'h2-home');
+  t.after(() => {
+    if (originalH2Home === undefined) {
+      delete process.env.H2_HOME;
+    } else {
+      process.env.H2_HOME = originalH2Home;
+    }
+  });
+
+  const fixtureDir = path.join(tempDir, 'fixtures', 'tiny-app');
+  await mkdir(fixtureDir, { recursive: true });
+  await writeFile(path.join(fixtureDir, 'README.md'), '# fixture\n', 'utf8');
+
+  const manifestPath = path.join(tempDir, 'suite.toml');
+  await writeFile(
+    manifestPath,
+    `
+[suite]
+id = "core-12"
+
+[runtime]
+reasoning_effort = "medium"
+thinking = false
+web_search_mode = "fixed"
+
+[[fixtures]]
+id = "tiny-app"
+type = "template"
+path = "./fixtures/tiny-app"
+
+[[cases]]
+id = "A1"
+bucket = "A"
+fixture = "tiny-app"
+profile = "backend"
+prompt = "/write note.txt :: hello"
+`,
+    'utf8'
+  );
+
+  const result = await runEvalSuite({
+    manifestPath,
+    runId: 'run-2026-04-09T02-17-35-426Z-0e5484'
+  });
+
+  const outputDir = path.join(tempDir, 'packs');
+  const pack = await createEvalReviewPack({
+    selector: '0e5484',
+    outputDir
+  });
+
+  assert.equal(pack.runId, result.runId);
+  await assert.doesNotReject(() => access(pack.zipPath));
+  assert.ok(pack.includedFiles.includes('manifest.lock.json'));
+  assert.ok(pack.includedFiles.includes('score-sheet.csv'));
+  assert.ok(pack.includedFiles.includes(path.join('A1', 'artifacts', 'session.md')));
+  assert.ok(!pack.includedFiles.some((entry) => entry.includes('workspace')));
 });

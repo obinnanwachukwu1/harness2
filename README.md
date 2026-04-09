@@ -45,6 +45,8 @@ npm run dev -- resume <sessionId> -thinking -p "continue from here"
 npm run dev -- resume <sessionId>
 npm run dev -- opentui
 npm run dev -- opentui <sessionId>
+npm run dev -- eval run evals/wide-suite.toml --case A1
+npm run dev -- eval score ~/.h2/evals/<run-id>
 ```
 
 Build and test:
@@ -57,7 +59,7 @@ npm test
 
 `npm run typecheck` covers both the core CLI/engine code and `packages/ui-opentui`.
 
-Eval runner design notes live under `docs/evals/`.
+Eval runner design notes live under `docs/evals/`. The committed wide suite lives in `evals/wide-suite.toml`.
 
 ## Interactive commands
 
@@ -119,39 +121,15 @@ H2_DEBUG_RESPONSES=1 npm run dev -- -p "inspect the repo"
 
 This writes JSONL debug records to `.h2/debug/responses.jsonl`. Override the path with `H2_DEBUG_RESPONSES_FILE=/absolute/path.jsonl` if needed.
 
-## Eval Prompts
+## Eval Suites
 
-Keep these prompts stable when checking mechanism choice regressions.
+The committed eval fixtures and suite definitions live under `evals/`.
 
-Inside the experiment boundary: should usually spawn at least one real experiment.
-
-```text
-I want to know whether a temporary dependency install done inside an isolated side-task workspace can stay fully confined there.
-
-Do not edit code.
-
-Investigate whether this harness can verify that behavior reliably, what the main uncertainty is, and what evidence most reduces uncertainty before implementation.
-```
-
-Outside the experiment boundary: should usually stay with direct reading or inline probes.
-
-```text
-I want to know how this harness should recover if the main process crashes while a side task is still running.
-
-Do not edit code.
-
-Investigate whether the current architecture can recover that state cleanly, what the riskiest assumptions are, and what evidence most reduces uncertainty before implementation.
-```
-
-Ambiguous boundary: should at least produce grounded evidence, and often one narrow experiment is reasonable.
-
-```text
-I’m considering allowing multiple side tasks to run at once in this harness.
-
-Do not edit code.
-
-Investigate whether the current system can support that safely, the main constraints, the smallest viable path, and what evidence most reduces uncertainty before implementation.
-```
+- `evals/wide-suite.toml` is the current 15-session suite.
+- `evals/fixtures/` contains the committed reusable fixture repos.
+- `npm run dev -- eval run evals/wide-suite.toml` runs the full suite.
+- `npm run dev -- eval run evals/wide-suite.toml --case C3` runs one case.
+- `npm run dev -- eval score ~/.h2/evals/<run-id>` recomputes the score sheet from artifacts.
 
 ## OpenAI Codex OAuth
 

@@ -135,13 +135,28 @@ for i in range(2):
 PY`
     })
   ) as {
+    processId: number | null;
     exitCode: number | null;
+    running: boolean;
     stdout: string;
   };
 
-  assert.equal(output.exitCode, 0);
-  assert.match(output.stdout, /hello/);
-  assert.match(output.stdout, /\n0\n1/);
+  const finalOutput =
+    output.running && output.processId !== null
+      ? (JSON.parse(
+          await engine.runWriteStdin({
+            processId: output.processId,
+            yieldTimeMs: 1_000
+          })
+        ) as {
+          exitCode: number | null;
+          stdout: string;
+        })
+      : output;
+
+  assert.equal(finalOutput.exitCode, 0);
+  assert.match(`${output.stdout}${finalOutput.stdout}`, /hello/);
+  assert.match(`${output.stdout}${finalOutput.stdout}`, /\n0\n1/);
 });
 
 test('HeadlessEngine exec_command can keep a background process alive across polls', async (t) => {
@@ -947,14 +962,42 @@ test('HeadlessEngine searchExperiments returns a guardrail when no current quest
   const engine = await HeadlessEngine.open({ cwd: repoDir });
   t.after(async () => engine.dispose());
 
-  const result = await engine.searchExperiments('oauth');
+  const result = await engine.searchExperiments('question-missing', 'oauth');
   assert.deepEqual(result, {
     ok: false,
     guardrail:
-      'search_experiments is subordinate to the current task. Open the live question first, or explicitly say why no question is needed before searching prior experiments.',
+      'search_experiments is subordinate to the current task. Open the live question first, then search from that question context.',
     suggestedNext: [
       'Name the implementation-changing uncertainty.',
       'Open the question if dependent edits rely on it.',
+      'Then search for prior findings only if they may answer or narrow that same question.'
+    ]
+  });
+});
+
+test('HeadlessEngine searchExperiments requires an explicit current open question id', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const notebook = engine.notebook;
+  const question = notebook.openStudyDebt({
+    sessionId: engine.snapshot.session.id,
+    summary: 'oauth callback behavior is unclear',
+    whyItMatters: 'The implementation path depends on whether prior experiment evidence already answers it.',
+    kind: 'runtime'
+  });
+
+  const result = await engine.searchExperiments('question-other', 'oauth');
+  assert.deepEqual(result, {
+    ok: false,
+    guardrail:
+      'search_experiments requires the current open questionId. Tie the search to one live question before looking up prior experiments.',
+    suggestedNext: [
+      `Open questions: ${question.id}`,
+      'Choose the question whose claim this search is trying to answer.',
       'Then search for prior findings only if they may answer or narrow that same question.'
     ]
   });

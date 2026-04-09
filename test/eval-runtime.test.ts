@@ -35,6 +35,7 @@ path = "./fixtures/tiny-app"
 id = "A1"
 bucket = "A"
 fixture = "tiny-app"
+profile = "backend"
 prompt = "/read README.md"
 `,
     'utf8'

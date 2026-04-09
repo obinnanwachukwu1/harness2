@@ -36,7 +36,6 @@ const DEFAULT_MODEL = process.env.H2_CODEX_MODEL ?? 'gpt-5.4';
 const DEFAULT_REASONING_EFFORT = normalizeReasoningEffort(process.env.H2_REASONING_EFFORT) ?? 'medium';
 const DEFAULT_ENDPOINT =
   process.env.H2_CODEX_BASE_URL ?? 'https://chatgpt.com/backend-api/codex/responses';
-const MAX_MODEL_STEPS = normalizeMaxModelSteps(process.env.H2_MAX_MODEL_STEPS);
 const MAX_TRANSIENT_MODEL_RETRIES = 2;
 const DEBUG_RESPONSES_ENABLED = process.env.H2_DEBUG_RESPONSES === '1';
 const DEBUG_RESPONSES_FILE =
@@ -82,6 +81,7 @@ export class CodexModelClient {
     onAssistantStream?: (text: string) => Promise<void>,
     onReasoningSummaryStream?: (text: string) => Promise<void>,
     thinkingEnabled = false,
+    webSearchMode: 'disabled' | 'cached' | 'live' | undefined = undefined,
     toolDefinitions: readonly ToolDefinition[] = MAIN_TOOL_DEFINITIONS,
     instructions = MAIN_AGENT_PROMPT,
     onToolCallStart?: (toolCall: {
@@ -119,15 +119,7 @@ export class CodexModelClient {
       requestItems = this.notebook.buildModelRequestHistory(sessionId);
     }
 
-    for (let step = 0; ; step += 1) {
-      if (MAX_MODEL_STEPS !== null && step >= MAX_MODEL_STEPS) {
-        await emit(
-          'assistant',
-          `Stopped after ${MAX_MODEL_STEPS} model/tool steps. Increase H2_MAX_MODEL_STEPS if this turn needs more tool work.`
-        );
-        return;
-      }
-
+    for (;;) {
       const hints = [
         shouldInjectObservationHint(requestItems, toolDefinitions) ? buildObservationHint() : null
       ].filter((value): value is string => Boolean(value));
@@ -146,6 +138,7 @@ export class CodexModelClient {
         onAssistantStream,
         onReasoningSummaryStream,
         thinkingEnabled,
+        webSearchMode,
         toolDefinitions,
         instructions,
         onToolCallStart,
@@ -344,6 +337,7 @@ export class CodexModelClient {
     }) => Promise<void>;
     onProviderToolEvent?: (event: ProviderToolEvent) => Promise<void>;
     thinkingEnabled: boolean;
+    webSearchMode?: 'disabled' | 'cached' | 'live';
     toolDefinitions: readonly ToolDefinition[];
     instructions: string;
   }): Promise<ModelStepResponse> {
@@ -459,19 +453,6 @@ function normalizeReasoningEffort(value: string | undefined): 'low' | 'medium' |
   }
 
   return null;
-}
-
-function normalizeMaxModelSteps(value: string | undefined): number | null {
-  if (!value) {
-    return null;
-  }
-
-  const parsed = Number.parseInt(value, 10);
-  if (Number.isNaN(parsed) || parsed < 1) {
-    return null;
-  }
-
-  return parsed;
 }
 
 async function debugResponseShape(

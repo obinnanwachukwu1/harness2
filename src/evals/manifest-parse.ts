@@ -21,6 +21,7 @@ const runtimeSchema = z.object({
   thinking: z.boolean().optional().default(false),
   web_search_mode: z.enum(['disabled', 'cached', 'live', 'fixed']).optional().default('fixed'),
   max_steps: z.number().int().positive().optional(),
+  parallelism: z.number().int().positive().optional(),
   default_experiment_budget: z.number().int().positive().optional()
 });
 
@@ -62,10 +63,12 @@ const caseSchema = z.object({
   id: z.string().trim().min(1),
   bucket: z.enum(['A', 'B', 'C', 'W']),
   fixture: z.string().trim().min(1),
+  profile: z.string().trim().min(1),
   prompt: z.string().trim().min(1),
   notes: z.string().optional(),
   question_expected: z.boolean().optional(),
   experiment_expected: z.boolean().optional(),
+  web_search_expected: z.enum(['yes', 'no', 'optional']).optional(),
   runtime_override: runtimeOverrideSchema.optional(),
   env_override: caseEnvOverrideSchema,
   followups: z.array(followupSchema).optional().default([]),
@@ -105,7 +108,7 @@ export async function parseEvalManifest(manifestPath: string): Promise<ParsedEva
     reasoningEffort: parsed.runtime.reasoning_effort,
     thinking: parsed.runtime.thinking,
     webSearchMode: parsed.runtime.web_search_mode,
-    maxSteps: parsed.runtime.max_steps,
+    parallelism: parsed.runtime.parallelism,
     defaultExperimentBudget: parsed.runtime.default_experiment_budget
   };
   const clarification: EvalClarificationPolicy | undefined = parsed.clarification
@@ -129,10 +132,12 @@ export async function parseEvalManifest(manifestPath: string): Promise<ParsedEva
     id: entry.id,
     bucket: entry.bucket,
     fixture: entry.fixture,
+    profile: entry.profile,
     prompt: entry.prompt,
     notes: entry.notes,
     questionExpected: entry.question_expected,
     experimentExpected: entry.experiment_expected,
+    webSearchExpected: entry.web_search_expected,
     runtimeOverride: entry.runtime_override
       ? normalizeRuntimeOverride(entry.runtime_override)
       : undefined,
@@ -179,7 +184,7 @@ function normalizeRuntimeOverride(
     reasoningEffort: input.reasoning_effort,
     thinking: input.thinking,
     webSearchMode: input.web_search_mode,
-    maxSteps: input.max_steps,
+    parallelism: input.parallelism,
     defaultExperimentBudget: input.default_experiment_budget
   };
 }

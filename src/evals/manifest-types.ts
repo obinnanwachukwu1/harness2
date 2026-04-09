@@ -1,6 +1,7 @@
 export type EvalReasoningEffort = 'off' | 'low' | 'medium' | 'high';
 
 export type EvalWebSearchMode = 'disabled' | 'cached' | 'live' | 'fixed';
+export type EvalWebSearchExpectation = 'yes' | 'no' | 'optional';
 
 export interface EvalSuiteMeta {
   id: string;
@@ -12,7 +13,7 @@ export interface EvalRuntimeConfig {
   reasoningEffort: EvalReasoningEffort;
   thinking: boolean;
   webSearchMode: EvalWebSearchMode;
-  maxSteps?: number;
+  parallelism?: number;
   defaultExperimentBudget?: number;
 }
 
@@ -52,10 +53,12 @@ export interface EvalCaseDefinition {
   id: string;
   bucket: EvalBucket;
   fixture: string;
+  profile: string;
   prompt: string;
   notes?: string;
   questionExpected?: boolean;
   experimentExpected?: boolean;
+  webSearchExpected?: EvalWebSearchExpectation;
   runtimeOverride?: Partial<EvalRuntimeConfig>;
   envOverride?: EvalCaseEnvOverride;
   followups: EvalFollowupTurn[];
@@ -74,7 +77,41 @@ export interface EvalRunRequest {
   manifestPath: string;
   runId?: string;
   selectedCaseIds?: string[];
+  parallelism?: number;
+  onProgress?: (event: EvalRunProgressEvent) => void;
 }
+
+export type EvalRunProgressEvent =
+  | {
+      type: 'suite_started';
+      runId: string;
+      suiteId: string;
+      totalCases: number;
+      runRoot: string;
+    }
+  | {
+      type: 'case_started';
+      runId: string;
+      suiteId: string;
+      caseId: string;
+      fixtureId: string;
+      profile: string;
+      index: number;
+      totalCases: number;
+    }
+  | {
+      type: 'case_completed';
+      runId: string;
+      suiteId: string;
+      caseId: string;
+      fixtureId: string;
+      profile: string;
+      index: number;
+      totalCases: number;
+      overall: 'pass' | 'soft fail' | 'hard fail';
+      questionActual: boolean;
+      experimentActual: 0 | 1 | '2+';
+    };
 
 export interface EvalRunContext {
   runId: string;
@@ -113,11 +150,16 @@ export type EvalResolutionMode =
 
 export interface EvalAutoScore {
   testId: string;
+  fixture: string;
+  profile: string;
   questionExpected: boolean | null;
   questionActual: boolean;
   questionQuality: 0 | 1 | 2 | null;
   experimentExpected: boolean | null;
   experimentActual: 0 | 1 | '2+';
+  webSearchExpected: EvalWebSearchExpectation | null;
+  webSearchActual: boolean;
+  questionBeforeWebSearch: 'yes' | 'no' | 'n/a';
   localPassBeforeExperiment: 'yes' | 'no' | 'n/a';
   experimentHypothesisFalsifiable: 'yes' | 'no' | 'n/a';
   duplicateInlineProbingAfterSpawn: 'yes' | 'no' | 'n/a';

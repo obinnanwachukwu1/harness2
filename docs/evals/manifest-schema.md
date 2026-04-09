@@ -15,8 +15,8 @@ Secret values are never stored in the manifest. The manifest describes env shape
 
 ```toml
 [suite]
-id = "core-12"
-description = "Question vs experiment decision evals"
+id = "wide-15"
+description = "Wide decision-boundary eval suite"
 
 [runtime]
 reasoning_effort = "medium"
@@ -30,47 +30,34 @@ auto_reply = "Make the best grounded minimal choice and proceed. Keep the contra
 mark_as_unnecessary = true
 
 [[fixtures]]
-id = "empty-node"
+id = "node-minimal"
 type = "template"
-path = "evals/fixtures/empty-node"
-env_source = "~/.h2/eval-env/empty-node.env"
-write_env_file = ".env"
-write_env_example = ".env.example"
+path = "evals/fixtures/node-minimal"
 
 [[fixtures]]
-id = "run-harness2"
-type = "git_checkout"
-path = "."
-ref = "HEAD"
-env_source = "~/.h2/eval-env/run-harness2.env"
-write_env_file = ".env.local"
-write_env_example = ".env.example"
+id = "next-app-router"
+type = "template"
+path = "evals/fixtures/next-app-router"
 
 [[cases]]
 id = "A1"
 bucket = "A"
-fixture = "empty-node"
-prompt = """
-In this empty repo, build a tiny single-user local notes app...
-"""
+fixture = "node-minimal"
+profile = "backend/cli"
+prompt = "In this Node repo, build a tiny CLI..."
 question_expected = false
 experiment_expected = false
+web_search_expected = "no"
 
 [[cases]]
 id = "B1"
-bucket = "B"
-fixture = "run-harness2"
-prompt = """
-Can you add cancellation and replay to this app? ...
-"""
+bucket = "C"
+fixture = "next-app-router"
+profile = "ai/full-stack"
+prompt = "In this Next.js repo, build a minimal chatbot using .env.local..."
 question_expected = true
-experiment_expected = false
-
-[[cases.followups]]
-after_turn = 1
-prompt = """
-One refinement: I do want stop to abort already-claimed in-flight comparisons...
-"""
+experiment_expected = true
+web_search_expected = "yes"
 ```
 
 ## Sections
@@ -206,6 +193,7 @@ Optional:
 - `notes`
 - `question_expected`
 - `experiment_expected`
+- `web_search_expected`
 - `runtime_override.*`
 - `review_hints`
 
@@ -215,6 +203,19 @@ Optional:
 - `B`
 - `C`
 - `W`
+
+`profile` is a required freeform label used in the score sheet, for example:
+
+- `frontend`
+- `backend`
+- `full-stack history contract`
+- `ai/runtime`
+
+`web_search_expected` values:
+
+- `yes`
+- `no`
+- `optional`
 
 Expected flags:
 

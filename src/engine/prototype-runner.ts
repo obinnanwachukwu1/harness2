@@ -360,8 +360,14 @@ export class PrototypeRunner {
           return;
         }
 
-        const query = rawArgs.join(' ').trim();
-        const matches = await context.tools.searchExperiments(query || undefined);
+        const [questionId, ...queryParts] = rawArgs;
+        if (!questionId) {
+          await context.emit('assistant', 'Usage: /experiments <questionId> [query]');
+          return;
+        }
+
+        const query = queryParts.join(' ').trim();
+        const matches = await context.tools.searchExperiments(questionId, query || undefined);
         if (!Array.isArray(matches)) {
           await context.emit('assistant', [matches.guardrail, ...matches.suggestedNext].join('\n'));
           return;

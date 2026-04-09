@@ -67,6 +67,7 @@ export async function createModelStepResponse(input: {
   }) => Promise<void>;
   onProviderToolEvent?: (event: ProviderToolEvent) => Promise<void>;
   thinkingEnabled: boolean;
+  webSearchMode?: 'disabled' | 'cached' | 'live';
   toolDefinitions: readonly ToolDefinition[];
   instructions: string;
   debugResponse?: (kind: string, payload: unknown) => Promise<void>;
@@ -98,7 +99,11 @@ export async function createModelStepResponse(input: {
   });
   const model = provider.responses(input.settings.model);
   const messages = buildAiSdkMessages(input.input);
-  const tools = buildAiSdkTools(input.toolDefinitions, provider, getWebSearchMode());
+  const tools = buildAiSdkTools(
+    input.toolDefinitions,
+    provider,
+    getWebSearchMode(input.webSearchMode)
+  );
   let liveAssistantText = '';
   let liveReasoningSummary = '';
 
@@ -290,7 +295,12 @@ function buildAiSdkMessages(items: ResponseInputItem[]): ModelMessage[] {
   return messages;
 }
 
-function getWebSearchMode(): 'disabled' | 'cached' | 'live' {
+function getWebSearchMode(
+  override?: 'disabled' | 'cached' | 'live'
+): 'disabled' | 'cached' | 'live' {
+  if (override) {
+    return override;
+  }
   const raw = process.env.H2_WEB_SEARCH_MODE?.trim().toLowerCase();
   if (raw === 'disabled' || raw === 'cached' || raw === 'live') {
     return raw;

@@ -87,7 +87,10 @@ export function formatToolHeader(name: string, rawArguments: string, output?: st
       return `experiment wait(${readStringArg(args, 'experimentId')})`;
     case 'search_experiments': {
       const query = readOptionalStringArg(args, 'query');
-      return query ? `experiment search(${compactTextForHeader(query, 56)})` : 'experiment search()';
+      const questionId = readStringArg(args, 'questionId');
+      return query
+        ? `experiment search(${questionId}: ${compactTextForHeader(query, 44)})`
+        : `experiment search(${questionId})`;
     }
     case 'open_question':
     case 'open_study_debt':
@@ -166,6 +169,14 @@ export function formatLiveToolBody(name: string, rawArguments: string): string[]
       const query = readOptionalStringArg(args, 'query');
       return query ? [`query: ${query}`] : [];
     }
+    case 'search_experiments': {
+      const body = [`questionId: ${readStringArg(args, 'questionId')}`];
+      const query = readOptionalStringArg(args, 'query');
+      if (query) {
+        body.push(`query: ${query}`);
+      }
+      return body;
+    }
     default:
       return formatJsonArgumentPreview(args);
   }
@@ -240,7 +251,7 @@ export const MAIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     type: 'function',
     name: 'exec_command',
     description:
-      'Start a shell command in the current workspace and wait briefly for output. Fast commands behave like a one-shot shell call; long-running commands return a processId that you can continue with write_stdin. Prefer this for repo inspection, targeted tests, small local probes, or launching a local process you need to poll. If the command is a live external or secret-backed runtime probe whose result could materially change the implementation, declare an open question first.',
+      'Start a shell command in the current workspace and wait briefly for output. Fast commands behave like a one-shot shell call; long-running commands return a processId that you can continue with write_stdin. Use this for targeted shell probes, builds/tests, and short-lived local process checks. A small inline probe may include one short-lived local process started here and briefly observed with write_stdin. If answering the question requires repeated polling, multiple process lifecycles, concurrency orchestration, restart simulation, or a secret-backed or external observation loop that could materially change the implementation, open a question first and prefer spawn_experiment for the residual uncertainty.',
     parameters: {
       type: 'object',
       properties: {
@@ -257,7 +268,7 @@ export const MAIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     type: 'function',
     name: 'write_stdin',
     description:
-      'Send stdin to a running exec_command process, poll for more output, close stdin, or terminate the process. Leave input empty to poll only. Use terminate when the process should be stopped.',
+      'Send stdin to a running exec_command process, poll for more output, close stdin, or terminate the process. Leave input empty to poll only. Use this to briefly observe a short-lived local process, send input, close stdin, or terminate it. If the same claim needs repeated polling or multiple process lifecycles, that is no longer a small inline probe and should usually move to an open question plus spawn_experiment.',
     parameters: {
       type: 'object',
       properties: {
@@ -305,7 +316,7 @@ export const MAIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     type: 'function',
     name: 'edit',
     description:
-      'Apply file changes with the explicit patch grammar. Use this for normal workspace file creation, updates, moves, and deletions. The patch must start with "*** Begin Patch" and end with "*** End Patch". Use "*** Add File: path", "*** Update File: path", or "*** Delete File: path"; updates may include "*** Move to: new/path" and one or more "@@" hunks with context lines prefixed by space, removals by "-", and additions by "+". Prefer small, exact hunks. Do not use bash heredocs or ad hoc string replacement for normal file edits, and do not edit through a still-open load-bearing question.',
+      'Apply file changes with the explicit patch grammar. Use this for normal workspace file creation, updates, moves, and deletions. The patch must start with "*** Begin Patch" and end with "*** End Patch". Use "*** Add File: path", "*** Update File: path", or "*** Delete File: path"; updates may include "*** Move to: new/path" and one or more "@@" hunks with context lines prefixed by space, removals by "-", and additions by "+". Prefer small, exact hunks. Do not use shell heredocs or ad hoc string replacement for normal file edits, and do not edit through a still-open load-bearing question.',
     parameters: {
       type: 'object',
       properties: {
@@ -413,12 +424,14 @@ export const MAIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     type: 'function',
     name: 'search_experiments',
     description:
-      'Search prior experiment history for evidence relevant to the current named question. This is never the first step on a new task and never freeform memory lookup. First have a live question, an explicitly resumed question, or an explicit decision that no question is needed; then search for prior experiments that may answer or narrow that current uncertainty. Query for the claim, not the broad topic. Treat hits as candidate evidence only; read the specific experiment before relying on it.',
+      'Search prior experiment history for evidence relevant to the current named question. This is never the first step on a new task and never freeform memory lookup. Use it only when a live question already exists or you are explicitly resuming a previously opened question. Query for the claim, not the broad topic. Treat hits as candidate evidence only; read the specific experiment before relying on it.',
     parameters: {
       type: 'object',
       properties: {
+        questionId: { type: 'string' },
         query: { type: 'string' }
       },
+      required: ['questionId'],
       additionalProperties: false
     }
   },
@@ -782,7 +795,14 @@ async function executeToolCall(call: ToolCall, tools: AgentTools): Promise<strin
       if (!tools.searchExperiments) {
         throw new Error('search_experiments is not available in this session.');
       }
-      return JSON.stringify(await tools.searchExperiments(readOptionalStringArg(args, 'query')), null, 2);
+      return JSON.stringify(
+        await tools.searchExperiments(
+          readStringArg(args, 'questionId'),
+          readOptionalStringArg(args, 'query')
+        ),
+        null,
+        2
+      );
     case 'open_question':
     case 'open_study_debt':
       if (!tools.openStudyDebt) {

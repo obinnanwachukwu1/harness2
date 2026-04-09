@@ -58,86 +58,73 @@ export async function runEvalCase(input: {
 
   const promptsSent: string[] = [];
   let clarificationFallbackUsed = false;
-  const previousSearchMode = process.env.H2_WEB_SEARCH_MODE;
-  const previousMaxSteps = process.env.H2_MAX_MODEL_STEPS;
+  const engine = await HeadlessEngine.open({
+    cwd: workspacePath,
+    revealExportsInFinder: false,
+    webSearchMode: runtime.webSearchMode === 'fixed' ? undefined : runtime.webSearchMode
+  });
   try {
-    if (runtime.webSearchMode !== 'fixed') {
-      process.env.H2_WEB_SEARCH_MODE = runtime.webSearchMode;
+    const sessionId = engine.snapshot.session.id;
+    const context: EvalCaseRunContext = {
+      runId: input.runId,
+      caseId: input.caseDefinition.id,
+      caseRoot,
+      workspacePath,
+      artifactRoot,
+      sessionId,
+      runtime
+    };
+
+    if (runtime.model) {
+      engine.modelClient.setModel(sessionId, runtime.model);
     }
-    if (runtime.maxSteps !== undefined) {
-      process.env.H2_MAX_MODEL_STEPS = String(runtime.maxSteps);
+    engine.modelClient.setReasoningEffort(sessionId, runtime.reasoningEffort);
+    engine.setThinkingEnabled(runtime.thinking);
+
+    await submitPrompt(engine, input.caseDefinition.prompt);
+    promptsSent.push(input.caseDefinition.prompt);
+
+    for (const followup of input.caseDefinition.followups) {
+      if (followup.afterTurn !== promptsSent.length) {
+        continue;
+      }
+      await submitPrompt(engine, followup.prompt);
+      promptsSent.push(followup.prompt);
     }
 
-    const engine = await HeadlessEngine.open({
-      cwd: workspacePath,
-      revealExportsInFinder: false
+    const studyDebts = engine.notebook.listStudyDebts(sessionId);
+    const experiments = engine.notebook.listExperiments(sessionId);
+    const modelHistory = engine.notebook.listModelHistory(sessionId);
+    const autoScore = buildAutoScore(
+      input.caseDefinition,
+      modelHistory,
+      studyDebts,
+      experiments,
+      clarificationFallbackUsed
+    );
+    const artifacts = await exportEvalCaseArtifacts({
+      artifactRoot,
+      notebook: engine.notebook,
+      sessionId,
+      runtime,
+      autoScore,
+      workspacePath
     });
-    try {
-      const sessionId = engine.snapshot.session.id;
-      const context: EvalCaseRunContext = {
-        runId: input.runId,
-        caseId: input.caseDefinition.id,
-        caseRoot,
-        workspacePath,
-        artifactRoot,
-        sessionId,
-        runtime
-      };
 
-      if (runtime.model) {
-        engine.modelClient.setModel(sessionId, runtime.model);
-      }
-      engine.modelClient.setReasoningEffort(sessionId, runtime.reasoningEffort);
-      engine.setThinkingEnabled(runtime.thinking);
-
-      await submitPrompt(engine, input.caseDefinition.prompt);
-      promptsSent.push(input.caseDefinition.prompt);
-
-      for (const followup of input.caseDefinition.followups) {
-        if (followup.afterTurn !== promptsSent.length) {
-          continue;
-        }
-        await submitPrompt(engine, followup.prompt);
-        promptsSent.push(followup.prompt);
-      }
-
-      const studyDebts = engine.notebook.listStudyDebts(sessionId);
-      const experiments = engine.notebook.listExperiments(sessionId);
-      const modelHistory = engine.notebook.listModelHistory(sessionId);
-      const autoScore = buildAutoScore(
-        input.caseDefinition,
-        modelHistory,
-        studyDebts,
-        experiments,
-        clarificationFallbackUsed
-      );
-      const artifacts = await exportEvalCaseArtifacts({
-        artifactRoot,
-        notebook: engine.notebook,
-        sessionId,
-        runtime,
-        autoScore,
-        workspacePath
-      });
-
-      return {
-        caseId: input.caseDefinition.id,
-        bucket: input.caseDefinition.bucket,
-        fixtureId: input.fixture.id,
-        workspacePath: context.workspacePath,
-        sessionId: context.sessionId,
-        runtime,
-        promptsSent,
-        clarificationFallbackUsed,
-        artifacts,
-        autoScore
-      };
-    } finally {
-      await engine.dispose();
-    }
+    return {
+      caseId: input.caseDefinition.id,
+      bucket: input.caseDefinition.bucket,
+      fixtureId: input.fixture.id,
+      workspacePath: context.workspacePath,
+      sessionId: context.sessionId,
+      runtime,
+      promptsSent,
+      clarificationFallbackUsed,
+      artifacts,
+      autoScore
+    };
   } finally {
-    restoreEnvVar('H2_WEB_SEARCH_MODE', previousSearchMode);
-    restoreEnvVar('H2_MAX_MODEL_STEPS', previousMaxSteps);
+    await engine.dispose();
   }
 }
 
@@ -153,12 +140,4 @@ function mergeRuntime(
     ...baseRuntime,
     ...override
   };
-}
-
-function restoreEnvVar(key: string, previousValue: string | undefined): void {
-  if (previousValue === undefined) {
-    delete process.env[key];
-    return;
-  }
-  process.env[key] = previousValue;
 }

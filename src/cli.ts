@@ -258,7 +258,7 @@ function printDoctor(report: {
 }
 
 function printUsage(): void {
-  console.log('Usage: h2 [resume [sessionId]] [opentui] | h2 auth <login|status|access|logout> | h2 doctor | h2 paths | h2 eval run <manifest> [--case <id>] | h2 eval score <run-dir>');
+  console.log('Usage: h2 [resume [sessionId]] [opentui] | h2 auth <login|status|access|logout> | h2 doctor | h2 paths | h2 eval run <manifest> [--case <id>] [--parallel <n>] | h2 eval score <run-dir> | h2 eval pack [run-id-or-suffix]');
   console.log('');
   console.log('Examples:');
   console.log('h2');
@@ -267,14 +267,15 @@ function printUsage(): void {
   console.log('h2 resume <sessionId>');
   console.log('h2 auth login');
   console.log('h2 doctor');
-  console.log('h2 eval run evals/core-suite.toml --case A1');
+  console.log('h2 eval run evals/wide-suite.toml --parallel 4');
   console.log('h2 eval score ~/.h2/evals/<run-id>');
+  console.log('h2 eval pack 0e5484');
 }
 
 async function runEvalCommand(args: string[]): Promise<void> {
   const action = args[0];
-  if (action !== 'run' && action !== 'score') {
-    throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>] | h2 eval score <run-dir>');
+  if (action !== 'run' && action !== 'score' && action !== 'pack') {
+    throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>] [--parallel <n>] | h2 eval score <run-dir> | h2 eval pack [run-id-or-suffix]');
   }
 
   if (action === 'score') {
@@ -293,20 +294,45 @@ async function runEvalCommand(args: string[]): Promise<void> {
     return;
   }
 
+  if (action === 'pack') {
+    const selector = args[1];
+    const { createEvalReviewPack } = await import('./evals/pack-run.js');
+    const result = await createEvalReviewPack({ selector });
+    console.log(`packed run: ${result.runId}`);
+    console.log(`source: ${result.runDir}`);
+    console.log(`zip: ${result.zipPath}`);
+    console.log(`files: ${result.includedFiles.length}`);
+    return;
+  }
+
   const manifestPath = args[1];
   if (!manifestPath) {
-    throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>]');
+    throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>] [--parallel <n>]');
   }
 
   const selectedCaseIds: string[] = [];
+  let parallelism: number | undefined;
   for (let index = 2; index < args.length; index += 1) {
     const token = args[index];
     if (token === '--case') {
       const caseId = args[index + 1];
       if (!caseId) {
-        throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>]');
+        throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>] [--parallel <n>]');
       }
       selectedCaseIds.push(caseId);
+      index += 1;
+      continue;
+    }
+    if (token === '--parallel') {
+      const value = args[index + 1];
+      if (!value) {
+        throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>] [--parallel <n>]');
+      }
+      const parsed = Number.parseInt(value, 10);
+      if (!Number.isFinite(parsed) || parsed < 1) {
+        throw new CliUsageError(`Invalid parallelism: ${value}`);
+      }
+      parallelism = parsed;
       index += 1;
       continue;
     }
@@ -316,9 +342,30 @@ async function runEvalCommand(args: string[]): Promise<void> {
   const { runEvalSuite } = await import('./evals/suite-runner.js');
   const result = await runEvalSuite({
     manifestPath,
-    selectedCaseIds: selectedCaseIds.length > 0 ? selectedCaseIds : undefined
+    selectedCaseIds: selectedCaseIds.length > 0 ? selectedCaseIds : undefined,
+    parallelism,
+    onProgress: (event) => {
+      if (event.type === 'suite_started') {
+        console.log(
+          `running suite ${event.suiteId}  cases=${event.totalCases}  results=${event.runRoot}`
+        );
+        return;
+      }
+      if (event.type === 'case_started') {
+        console.log(
+          `[${event.index}/${event.totalCases}] ${event.caseId}  fixture=${event.fixtureId}  profile=${event.profile}`
+        );
+        return;
+      }
+      console.log(
+        `  done ${event.caseId}  overall=${event.overall}  question=${
+          event.questionActual ? 'yes' : 'no'
+        }  experiments=${event.experimentActual}`
+      );
+    }
   });
 
+  console.log('');
   console.log(`eval run: ${result.runId}`);
   console.log(`suite: ${result.suiteId}`);
   console.log(`results: ${path.dirname(result.lockedManifestPath)}`);

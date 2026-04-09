@@ -63,11 +63,16 @@ async function readJson<T>(filePath: string): Promise<T> {
 function renderScoreCsv(scores: EvalAutoScore[]): string {
   const headers = [
     'test_id',
+    'fixture',
+    'profile',
     'question_expected',
     'question_actual',
     'question_quality',
     'experiment_expected',
     'experiment_actual',
+    'web_search_expected',
+    'web_search_actual',
+    'question_before_web_search',
     'local_pass_before_experiment',
     'experiment_hypothesis_falsifiable',
     'duplicate_inline_probing_after_spawn',
@@ -83,11 +88,16 @@ function renderScoreCsv(scores: EvalAutoScore[]): string {
     rows.push(
       [
         score.testId,
-        stringifyNullable(score.questionExpected),
-        String(score.questionActual),
+        score.fixture,
+        score.profile,
+        yesNoNullable(score.questionExpected),
+        yesNo(score.questionActual),
         stringifyNullable(score.questionQuality),
-        stringifyNullable(score.experimentExpected),
+        yesNoNullable(score.experimentExpected),
         String(score.experimentActual),
+        score.webSearchExpected ?? '',
+        yesNo(score.webSearchActual),
+        score.questionBeforeWebSearch,
         score.localPassBeforeExperiment,
         score.experimentHypothesisFalsifiable,
         score.duplicateInlineProbingAfterSpawn,
@@ -105,8 +115,16 @@ function renderScoreCsv(scores: EvalAutoScore[]): string {
   return `${rows.join('\n')}\n`;
 }
 
-function stringifyNullable(value: boolean | number | null): string {
+function stringifyNullable(value: number | null): string {
   return value === null ? '' : String(value);
+}
+
+function yesNo(value: boolean): string {
+  return value ? 'yes' : 'no';
+}
+
+function yesNoNullable(value: boolean | null): string {
+  return value === null ? '' : yesNo(value);
 }
 
 function csvCell(value: string): string {

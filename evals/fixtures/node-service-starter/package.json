@@ -1,0 +1,9 @@
+{
+  "name": "h2-node-service-starter",
+  "private": true,
+  "type": "commonjs",
+  "scripts": {
+    "start": "node src/server.js",
+    "test": "node --test"
+  }
+}

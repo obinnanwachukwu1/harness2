@@ -48,6 +48,7 @@ interface OpenEngineOptions {
   cwd: string;
   sessionId?: string;
   revealExportsInFinder?: boolean;
+  webSearchMode?: 'disabled' | 'cached' | 'live';
 }
 
 const DEFAULT_EXPERIMENT_MODEL = process.env.H2_EXPERIMENT_MODEL ?? 'gpt-5.4-mini';
@@ -107,6 +108,7 @@ export class HeadlessEngine {
       stateDir,
       experimentStateDir,
       revealExportsInFinder: options.revealExportsInFinder ?? true,
+      webSearchMode: options.webSearchMode,
       notebook,
       authNotebook,
       runner: new PrototypeRunner()
@@ -141,6 +143,7 @@ export class HeadlessEngine {
       stateDir: string;
       experimentStateDir: string;
       revealExportsInFinder: boolean;
+      webSearchMode?: 'disabled' | 'cached' | 'live';
       notebook: Notebook;
       authNotebook: Notebook;
       runner: AgentRunner;
@@ -174,7 +177,7 @@ export class HeadlessEngine {
         this.extendExperimentBudget(experimentId, additionalTokens),
       readExperiment: (experimentId) => this.readExperiment(experimentId),
       waitExperiment: (experimentId, timeoutMs) => this.waitExperiment(experimentId, timeoutMs),
-      searchExperiments: (query) => this.searchExperiments(query),
+      searchExperiments: (questionId, query) => this.searchExperiments(questionId, query),
       openStudyDebt: (input) => this.openStudyDebt(input),
       resolveStudyDebt: (input) => this.resolveStudyDebt(input),
       exportSession: (sessionId) => this.exportSession(sessionId),
@@ -292,6 +295,7 @@ export class HeadlessEngine {
                 await options.onReasoningSummaryStream?.(text);
               },
               this.thinkingEnabled,
+              this.options.webSearchMode,
               undefined,
               undefined,
               async (toolCall) => {
@@ -998,6 +1002,7 @@ export class HeadlessEngine {
   }
 
   async searchExperiments(
+    questionId: string,
     query?: string
   ): Promise<ExperimentSearchResult[] | ExperimentSearchGuardrail> {
     const openDebts = this.options.notebook.listOpenStudyDebts(this.options.sessionId);
@@ -1005,10 +1010,24 @@ export class HeadlessEngine {
       return {
         ok: false,
         guardrail:
-          'search_experiments is subordinate to the current task. Open the live question first, or explicitly say why no question is needed before searching prior experiments.',
+          'search_experiments is subordinate to the current task. Open the live question first, then search from that question context.',
         suggestedNext: [
           'Name the implementation-changing uncertainty.',
           'Open the question if dependent edits rely on it.',
+          'Then search for prior findings only if they may answer or narrow that same question.'
+        ]
+      };
+    }
+
+    const currentDebt = openDebts.find((debt) => debt.id === questionId);
+    if (!currentDebt) {
+      return {
+        ok: false,
+        guardrail:
+          'search_experiments requires the current open questionId. Tie the search to one live question before looking up prior experiments.',
+        suggestedNext: [
+          `Open questions: ${openDebts.map((debt) => debt.id).join(', ')}`,
+          'Choose the question whose claim this search is trying to answer.',
           'Then search for prior findings only if they may answer or narrow that same question.'
         ]
       };
@@ -1399,6 +1418,7 @@ export class HeadlessEngine {
       undefined,
       undefined,
       false,
+      undefined,
       EXPERIMENT_TOOL_DEFINITIONS,
       EXPERIMENT_SUBAGENT_PROMPT
     );

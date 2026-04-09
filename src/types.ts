@@ -387,6 +387,7 @@ export interface AgentTools {
     lowSignalWarningEmitted: boolean;
   }>;
   searchExperiments?(
+    questionId: string,
     query?: string
   ): Promise<ExperimentSearchResult[] | ExperimentSearchGuardrail>;
   openStudyDebt?(input: {

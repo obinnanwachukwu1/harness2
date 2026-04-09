@@ -16,6 +16,8 @@ export function buildAutoScore(
   const experimentCount = experiments.length;
   const experimentActual: 0 | 1 | '2+' =
     experimentCount <= 0 ? 0 : experimentCount === 1 ? 1 : '2+';
+  const webSearchActual = readWebSearchActual(modelHistory);
+  const questionBeforeWebSearch = readQuestionBeforeWebSearch(modelHistory);
   const finalResolutionMode = readFinalResolutionMode(studyDebts);
   const localPassBeforeExperiment = readLocalPassBeforeExperiment(modelHistory);
   const experimentHypothesisFalsifiable = readExperimentHypothesisFalsifiable(modelHistory);
@@ -25,6 +27,8 @@ export function buildAutoScore(
     testCase,
     questionActual,
     experimentCount,
+    webSearchActual,
+    questionBeforeWebSearch,
     localPassBeforeExperiment,
     duplicateInlineProbingAfterSpawn,
     modelHistory
@@ -44,17 +48,31 @@ export function buildAutoScore(
       `Expected experiment=${String(testCase.experimentExpected)} but saw experiment=${String(experimentCount > 0)}.`
     );
   }
+  if (
+    testCase.webSearchExpected !== undefined &&
+    testCase.webSearchExpected !== 'optional' &&
+    testCase.webSearchExpected !== (webSearchActual ? 'yes' : 'no')
+  ) {
+    notes.push(
+      `Expected web_search=${testCase.webSearchExpected} but saw web_search=${webSearchActual ? 'yes' : 'no'}.`
+    );
+  }
   if (hardFailReasons.length > 0) {
     notes.push(...hardFailReasons);
   }
 
   return {
     testId: testCase.id,
+    fixture: testCase.fixture,
+    profile: testCase.profile,
     questionExpected: testCase.questionExpected ?? null,
     questionActual,
     questionQuality: null,
     experimentExpected: testCase.experimentExpected ?? null,
     experimentActual,
+    webSearchExpected: testCase.webSearchExpected ?? null,
+    webSearchActual,
+    questionBeforeWebSearch,
     localPassBeforeExperiment,
     experimentHypothesisFalsifiable,
     duplicateInlineProbingAfterSpawn,
@@ -102,6 +120,35 @@ function readExperimentHypothesisFalsifiable(
     : 'no';
 }
 
+function readWebSearchActual(modelHistory: ModelHistoryItem[]): boolean {
+  return modelHistory.some(
+    (item) => item.type === 'function_call' && item.name === 'web_search'
+  );
+}
+
+function readQuestionBeforeWebSearch(
+  modelHistory: ModelHistoryItem[]
+): 'yes' | 'no' | 'n/a' {
+  let openedQuestion = false;
+  let sawWebSearch = false;
+
+  for (const item of modelHistory) {
+    if (!isFunctionCall(item)) {
+      continue;
+    }
+    if (item.name === 'open_question' || item.name === 'open_study_debt') {
+      openedQuestion = true;
+      continue;
+    }
+    if (item.name === 'web_search') {
+      sawWebSearch = true;
+      return openedQuestion ? 'yes' : 'no';
+    }
+  }
+
+  return sawWebSearch ? 'no' : 'n/a';
+}
+
 function readDuplicateInlineProbingAfterSpawn(
   modelHistory: ModelHistoryItem[]
 ): 'yes' | 'no' | 'n/a' {
@@ -142,6 +189,8 @@ function readHardFailReasons(input: {
   testCase: EvalCaseDefinition;
   questionActual: boolean;
   experimentCount: number;
+  webSearchActual: boolean;
+  questionBeforeWebSearch: 'yes' | 'no' | 'n/a';
   localPassBeforeExperiment: 'yes' | 'no' | 'n/a';
   duplicateInlineProbingAfterSpawn: 'yes' | 'no' | 'n/a';
   modelHistory: ModelHistoryItem[];
@@ -154,6 +203,9 @@ function readHardFailReasons(input: {
     }
     if (input.experimentCount > 0) {
       failures.push('Bucket A spawned an experiment.');
+    }
+    if (input.webSearchActual) {
+      failures.push('Bucket A used web search for a local-only task.');
     }
   }
 
@@ -170,6 +222,13 @@ function readHardFailReasons(input: {
     }
     if (input.localPassBeforeExperiment === 'no') {
       failures.push('Bucket C spawned without a local evidence pass.');
+    }
+    if (
+      input.testCase.webSearchExpected === 'yes' &&
+      input.webSearchActual &&
+      input.questionBeforeWebSearch === 'no'
+    ) {
+      failures.push('Bucket C used web search before naming the question.');
     }
   }
 
