@@ -285,6 +285,122 @@ test('HeadlessEngine blocks same-question write_stdin probing while a linked exp
   );
 });
 
+test('HeadlessEngine enforces one inline probe episode per open question', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const debt = engine.notebook.openStudyDebt({
+    sessionId: engine.snapshot.session.id,
+    summary: 'streaming stop semantics are still under study',
+    whyItMatters: 'Being wrong would materially change the product contract.',
+    kind: 'runtime',
+    affectedPaths: ['.']
+  });
+
+  const started = JSON.parse(
+    await engine.runExecCommand({
+      command: 'echo ready; sleep 30',
+      yieldTimeMs: 100
+    })
+  ) as {
+    processId: number | null;
+    running: boolean;
+    stdout: string;
+  };
+
+  assert.equal(started.running, true);
+  assert.equal(typeof started.processId, 'number');
+  assert.match(started.stdout, /ready/);
+
+  await assert.doesNotReject(() =>
+    engine.runWriteStdin({
+      processId: started.processId!,
+      yieldTimeMs: 100
+    })
+  );
+
+  await assert.rejects(
+    () =>
+      engine.runExecCommand({
+        command: 'echo second probe',
+        yieldTimeMs: 100
+      }),
+    /After one bounded inline probe episode on the same question, either resolve_question, spawn_experiment, or explicitly narrow\/override the claim before more inline probing\./
+  );
+
+  await engine.resolveStudyDebt({
+    questionId: debt.id,
+    resolution: 'static_evidence_sufficient',
+    note: 'The first bounded inline probe was enough to settle the question.'
+  });
+
+  await assert.doesNotReject(() =>
+    engine.runWriteStdin({
+      processId: started.processId!,
+      terminate: true,
+      yieldTimeMs: 100
+    })
+  );
+});
+
+test('HeadlessEngine blocks read-only orientation only when evidencePaths are explicitly scoped', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  await mkdir(path.join(repoDir, 'src', 'auth'), { recursive: true });
+  await writeFile(path.join(repoDir, 'src', 'auth', 'flow.ts'), 'export const flow = true;\n', 'utf8');
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const question = engine.notebook.openStudyDebt({
+    sessionId: engine.snapshot.session.id,
+    summary: 'guest continuity survives auth transitions',
+    whyItMatters: 'Being wrong would materially change the runtime path.',
+    kind: 'runtime',
+    affectedPaths: ['src/auth'],
+    evidencePaths: ['src/auth']
+  });
+  const timestamp = nowIso();
+  engine.notebook.upsertExperiment({
+    id: 'exp-auth-evidence-running',
+    sessionId: engine.snapshot.session.id,
+    studyDebtId: question.id,
+    hypothesis: 'the auth runtime path is still safe',
+    command: 'subagent',
+    context: '',
+    baseCommitSha: 'abc123',
+    branchName: 'h2-exp-auth-evidence-running',
+    worktreePath: path.join(repoDir, '.h2', 'worktrees', 'exp-auth-evidence-running'),
+    status: 'running',
+    budget: 5000,
+    tokensUsed: 100,
+    contextTokensUsed: 10,
+    toolOutputTokensUsed: 80,
+    observationTokensUsed: 10,
+    preserve: false,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    resolvedAt: null,
+    finalVerdict: null,
+    finalSummary: null,
+    discovered: [],
+    artifacts: [],
+    constraints: [],
+    confidenceNote: null,
+    lowSignalWarningEmitted: false,
+    promote: false
+  });
+
+  await assert.rejects(
+    () => engine.runRead('src/auth/flow.ts'),
+    /An active linked experiment already owns this evidence path for read/
+  );
+});
+
 test('HeadlessEngine rg accepts whitespace-separated multi-target strings', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));
@@ -339,19 +455,86 @@ test('HeadlessEngine compact persists harness checkpoint with git state and acti
     lowSignalWarningEmitted: false,
     promote: false
   });
-  notebook.openStudyDebt({
+  notebook.upsertExperiment({
+    id: 'exp-budget-exhausted',
+    sessionId: engine.snapshot.session.id,
+    studyDebtId: null,
+    hypothesis: 'verify checkpoint captures paused experiments',
+    command: 'subagent',
+    context: '',
+    baseCommitSha: 'abc123',
+    branchName: 'h2-exp-budget-exhausted',
+    worktreePath: path.join(repoDir, '.h2', 'worktrees', 'exp-budget-exhausted'),
+    status: 'budget_exhausted',
+    budget: 5000,
+    tokensUsed: 1200,
+    contextTokensUsed: 400,
+    toolOutputTokensUsed: 500,
+    observationTokensUsed: 300,
+    preserve: true,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    resolvedAt: null,
+    finalVerdict: null,
+    finalSummary: null,
+    discovered: [],
+    artifacts: [],
+    constraints: [],
+    confidenceNote: null,
+    lowSignalWarningEmitted: false,
+    promote: false
+  });
+  const debt = notebook.openStudyDebt({
     sessionId: engine.snapshot.session.id,
     summary: 'runtime continuity is unproven',
     whyItMatters: 'Being wrong would change the next implementation step.',
     kind: 'runtime',
     affectedPaths: ['src/engine']
   });
+  notebook.openStudyDebt({
+    sessionId: engine.snapshot.session.id,
+    summary: 'history semantics remain underdetermined',
+    whyItMatters: 'Being wrong would change how future replay stays safe.',
+    kind: 'scope',
+    affectedPaths: ['src/history']
+  });
+  notebook.upsertExperiment({
+    id: 'exp-invalidated',
+    sessionId: engine.snapshot.session.id,
+    studyDebtId: debt.id,
+    hypothesis: 'the old continuity path is still safe',
+    command: 'subagent',
+    context: '',
+    baseCommitSha: 'abc123',
+    branchName: 'h2-exp-invalidated',
+    worktreePath: path.join(repoDir, '.h2', 'worktrees', 'exp-invalidated'),
+    status: 'invalidated',
+    budget: 5000,
+    tokensUsed: 400,
+    contextTokensUsed: 120,
+    toolOutputTokensUsed: 180,
+    observationTokensUsed: 100,
+    preserve: false,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    resolvedAt: timestamp,
+    finalVerdict: 'invalidated',
+    finalSummary: 'The old continuity path is unsafe.',
+    discovered: ['replay drifts after prompt edits'],
+    artifacts: [],
+    constraints: [],
+    confidenceNote: null,
+    lowSignalWarningEmitted: false,
+    promote: false
+  });
 
   const result = await engine.runCompact(
     'verify checkpointing',
     'seeded a running experiment',
     'continue with shorter replay',
-    'subagent may still fail'
+    'subagent may still fail',
+    'runs remain historical snapshots',
+    'do not add prompt migration work in this pass'
   );
   assert.equal(result.ok, true);
   assert.equal(typeof result.checkpointId, 'number');
@@ -360,8 +543,20 @@ test('HeadlessEngine compact persists harness checkpoint with git state and acti
   assert.ok(checkpoint);
   assert.match(checkpoint?.gitLog ?? '', /\b[0-9a-f]{7,}\b/);
   assert.match(checkpoint?.checkpointBlock ?? '', /active_experiments:/);
+  assert.match(checkpoint?.checkpointBlock ?? '', /invalidated_experiments:/);
   assert.match(checkpoint?.checkpointBlock ?? '', /open_questions:/);
+  assert.match(checkpoint?.checkpointBlock ?? '', /current_commitments: runs remain historical snapshots/);
+  assert.match(
+    checkpoint?.checkpointBlock ?? '',
+    /important_non_goals: do not add prompt migration work in this pass/
+  );
   assert.equal(checkpoint?.activeExperimentSummaries[0]?.experimentId, 'exp-running');
+  assert.ok(
+    checkpoint?.activeExperimentSummaries.some(
+      (experiment) => experiment.experimentId === 'exp-budget-exhausted'
+    )
+  );
+  assert.equal(checkpoint?.invalidatedExperimentSummaries[0]?.experimentId, 'exp-invalidated');
 });
 
 test('HeadlessEngine submit can stream transcript callbacks for noninteractive callers', async (t) => {
@@ -1252,10 +1447,7 @@ test('HeadlessEngine blocks overlapping inline read probes while a linked experi
     promote: false
   });
 
-  await assert.rejects(
-    () => engine.runRead('src/auth/flow.ts'),
-    /Use wait_experiment or read_experiment before more inline probing on the same question/i
-  );
+  await assert.doesNotReject(() => engine.runRead('src/auth/flow.ts'));
 
   await assert.doesNotReject(() => engine.runRead('notes.txt'));
 });

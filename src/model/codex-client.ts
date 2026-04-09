@@ -1,4 +1,4 @@
-import { appendFile, mkdir } from 'node:fs/promises';
+import { appendFile, mkdir, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 
@@ -41,6 +41,24 @@ const DEBUG_RESPONSES_ENABLED = process.env.H2_DEBUG_RESPONSES === '1';
 const DEBUG_RESPONSES_FILE =
   process.env.H2_DEBUG_RESPONSES_FILE ??
   path.join(process.cwd(), '.h2', 'debug', 'responses.jsonl');
+const COMPACTION_ADVISORY_RATIO = 0.75;
+const COMPACTION_WARNING_RATIO = 0.85;
+const COMPACTION_RESERVED_TOKEN_FLOOR = 24_000;
+const COMPACTION_RESERVED_TOKEN_RATIO = 0.08;
+const TOOL_OUTPUT_SPILL_THRESHOLD_TOKENS = 5_000;
+const TOOL_OUTPUT_PREVIEW_CHAR_LIMIT = 1_600;
+const SPILLABLE_TOOL_OUTPUT_NAMES = new Set([
+  'exec_command',
+  'write_stdin',
+  'ls',
+  'glob',
+  'rg',
+  'grep',
+  'web_search',
+  'read_experiment',
+  'wait_experiment',
+  'search_experiments'
+]);
 
 export { EXPERIMENT_TOOL_DEFINITIONS, MAIN_TOOL_DEFINITIONS } from './codex-tooling.js';
 
@@ -54,6 +72,15 @@ interface ContextWindowUsage {
   usedTokens: number;
   totalTokens: number;
   standardRateTokens: number | null;
+}
+
+interface CompactionWindowState extends ContextWindowUsage {
+  remainingTokens: number;
+  reservedTokens: number;
+  usageRatio: number;
+  shouldSuggestCompact: boolean;
+  shouldWarnCompact: boolean;
+  forceCompactOnly: boolean;
 }
 
 export class CodexModelClient {
@@ -119,9 +146,21 @@ export class CodexModelClient {
       requestItems = this.notebook.buildModelRequestHistory(sessionId);
     }
 
-    for (;;) {
+    turnLoop: for (;;) {
+      const compactionState = this.getCompactionWindowState(
+        sessionId,
+        instructions,
+        toolDefinitions
+      );
+      const effectiveToolDefinitions =
+        compactionState.forceCompactOnly && toolDefinitions.some((tool) => tool.name === 'compact')
+          ? toolDefinitions.filter((tool) => tool.name === 'compact')
+          : toolDefinitions;
       const hints = [
-        shouldInjectObservationHint(requestItems, toolDefinitions) ? buildObservationHint() : null
+        shouldInjectObservationHint(requestItems, effectiveToolDefinitions)
+          ? buildObservationHint()
+          : null,
+        buildCompactionHint(compactionState, effectiveToolDefinitions)
       ].filter((value): value is string => Boolean(value));
       const response = await this.createResponse({
         accessToken,
@@ -139,7 +178,7 @@ export class CodexModelClient {
         onReasoningSummaryStream,
         thinkingEnabled,
         webSearchMode,
-        toolDefinitions,
+        toolDefinitions: effectiveToolDefinitions,
         instructions,
         onToolCallStart,
         onProviderToolEvent: async (event) => {
@@ -220,6 +259,27 @@ export class CodexModelClient {
           }
         }
 
+        const preflightCompactionState = this.getCompactionWindowState(
+          sessionId,
+          instructions,
+          toolDefinitions
+        );
+        if (
+          preflightCompactionState.forceCompactOnly &&
+          batchCalls.some((call) => call.name !== 'compact') &&
+          toolDefinitions.some((tool) => tool.name === 'compact')
+        ) {
+          const guardrail = buildForcedCompactionGuardrail(preflightCompactionState);
+          this.persistHistoryItem(sessionId, {
+            type: 'message',
+            role: 'developer',
+            content: guardrail
+          });
+          await emit('system', guardrail);
+          requestItems = this.notebook.buildModelRequestHistory(sessionId);
+          continue turnLoop;
+        }
+
         for (const call of batchCalls) {
           await onToolCallStart?.({
             toolCallId: call.callId,
@@ -236,6 +296,12 @@ export class CodexModelClient {
         for (let batchIndex = 0; batchIndex < batchCalls.length; batchIndex += 1) {
           const call = batchCalls[batchIndex]!;
           const result = results[batchIndex]!;
+          const compactedOutput = await this.materializeToolOutput(
+            sessionId,
+            call.name,
+            call.callId,
+            result.output
+          );
           const functionCallItem: ModelHistoryItem = {
             type: 'function_call',
             call_id: call.callId,
@@ -245,7 +311,7 @@ export class CodexModelClient {
           const functionCallOutputItem: ModelHistoryItem = {
             type: 'function_call_output',
             call_id: call.callId,
-            output: result.output
+            output: compactedOutput
           };
 
           this.persistHistoryItem(sessionId, functionCallItem);
@@ -253,7 +319,7 @@ export class CodexModelClient {
           const transcriptText = formatToolOutput(
             call.name,
             call.rawArguments,
-            result.failed ? `${result.output}\nTool execution failed.` : result.output
+            result.failed ? `${compactedOutput}\nTool execution failed.` : compactedOutput
           );
           await emit('tool', transcriptText);
           await onToolCallFinish?.(call.callId, transcriptText);
@@ -301,18 +367,12 @@ export class CodexModelClient {
   }
 
   getContextWindowUsage(sessionId: string): ContextWindowUsage {
-    const settings = this.getSessionSettings(sessionId);
-    const historyItems = this.notebook.buildModelRequestHistory(sessionId);
-    const usedTokens =
-      estimateTokens(MAIN_AGENT_PROMPT) +
-      estimateTokens(JSON.stringify(MAIN_TOOL_DEFINITIONS)) +
-      historyItems.reduce((total, item) => total + estimateHistoryItemTokens(item), 0);
-
-    return {
-      usedTokens,
-      totalTokens: getModelContextWindow(settings.model),
-      standardRateTokens: getModelStandardRateThreshold(settings.model)
-    };
+    const { usedTokens, totalTokens, standardRateTokens } = this.getCompactionWindowState(
+      sessionId,
+      MAIN_AGENT_PROMPT,
+      MAIN_TOOL_DEFINITIONS
+    );
+    return { usedTokens, totalTokens, standardRateTokens };
   }
 
   private async createResponse(input: {
@@ -357,6 +417,80 @@ export class CodexModelClient {
 
   private persistHistoryItem(sessionId: string, item: ModelHistoryItem): void {
     this.notebook.appendModelHistoryItem(sessionId, item);
+  }
+
+  private getCompactionWindowState(
+    sessionId: string,
+    instructions: string,
+    toolDefinitions: readonly ToolDefinition[]
+  ): CompactionWindowState {
+    const settings = this.getSessionSettings(sessionId);
+    const historyItems = this.notebook.buildModelRequestHistory(sessionId);
+    const usedTokens =
+      estimateTokens(instructions) +
+      estimateTokens(JSON.stringify(toolDefinitions)) +
+      historyItems.reduce((total, item) => total + estimateHistoryItemTokens(item), 0);
+    const totalTokens = getModelContextWindow(settings.model);
+    const standardRateTokens = getModelStandardRateThreshold(settings.model);
+    const reservedTokens = Math.max(
+      1,
+      Math.min(
+        Math.max(1, totalTokens - 1),
+        Math.max(
+          COMPACTION_RESERVED_TOKEN_FLOOR,
+          Math.ceil(totalTokens * COMPACTION_RESERVED_TOKEN_RATIO)
+        )
+      )
+    );
+    const remainingTokens = Math.max(0, totalTokens - usedTokens);
+    const usageRatio = totalTokens > 0 ? usedTokens / totalTokens : 1;
+
+    return {
+      usedTokens,
+      totalTokens,
+      standardRateTokens,
+      remainingTokens,
+      reservedTokens,
+      usageRatio,
+      shouldSuggestCompact: usageRatio >= COMPACTION_ADVISORY_RATIO,
+      shouldWarnCompact: usageRatio >= COMPACTION_WARNING_RATIO,
+      forceCompactOnly: remainingTokens <= reservedTokens
+    };
+  }
+
+  private async materializeToolOutput(
+    sessionId: string,
+    toolName: string,
+    toolCallId: string,
+    output: string
+  ): Promise<string> {
+    if (
+      output.startsWith('@@tool\t') ||
+      !SPILLABLE_TOOL_OUTPUT_NAMES.has(toolName) ||
+      estimateTokens(output) < TOOL_OUTPUT_SPILL_THRESHOLD_TOKENS
+    ) {
+      return output;
+    }
+
+    const session = this.notebook.getSession(sessionId);
+    if (!session) {
+      return output;
+    }
+
+    const spillDir = path.join(session.cwd, '.h2', 'tool-output', sessionId);
+    const spillFileName = `${Date.now()}-${sanitizeFileComponent(toolCallId)}-${sanitizeFileComponent(toolName)}.txt`;
+    const spillPath = path.join(spillDir, spillFileName);
+    await mkdir(spillDir, { recursive: true });
+    await writeFile(spillPath, output, 'utf8');
+
+    const relativePath = path.relative(session.cwd, spillPath) || spillFileName;
+    return [
+      `Large ${toolName} output spilled to ${relativePath} (${output.length} chars, ~${estimateTokens(output)} tokens).`,
+      'Use read on that file if the full output is still needed.',
+      '',
+      'Preview:',
+      clampText(output, TOOL_OUTPUT_PREVIEW_CHAR_LIMIT)
+    ].join('\n');
   }
 
   private getSessionSettings(sessionId: string): ModelSessionRecord {
@@ -405,6 +539,50 @@ function estimateHistoryItemTokens(item: ModelHistoryItem): number {
   }
 
   return estimateTokens(item.output);
+}
+
+function buildCompactionHint(
+  state: CompactionWindowState,
+  toolDefinitions: readonly ToolDefinition[]
+): string | null {
+  if (!toolDefinitions.some((tool) => tool.name === 'compact')) {
+    return null;
+  }
+
+  if (state.forceCompactOnly) {
+    return buildForcedCompactionGuardrail(state);
+  }
+
+  if (state.shouldWarnCompact) {
+    return [
+      `Context is tight (${formatCompactionUsage(state)}).`,
+      'Compact soon so the session can checkpoint state before the reserve buffer is exhausted.'
+    ].join(' ');
+  }
+
+  if (state.shouldSuggestCompact) {
+    return [
+      `Context is getting tight (${formatCompactionUsage(state)}).`,
+      'Compact is available once you have a clean checkpoint boundary.'
+    ].join(' ');
+  }
+
+  return null;
+}
+
+function buildForcedCompactionGuardrail(state: CompactionWindowState): string {
+  return [
+    `Context reserve is exhausted (${formatCompactionUsage(state)}; reserve ${state.reservedTokens} tokens).`,
+    'Only compact is available until the session checkpoints and trims replay.'
+  ].join(' ');
+}
+
+function formatCompactionUsage(state: CompactionWindowState): string {
+  return `${state.usedTokens}/${state.totalTokens} estimated tokens`;
+}
+
+function sanitizeFileComponent(value: string): string {
+  return value.replace(/[^a-zA-Z0-9._-]+/g, '-');
 }
 
 function getModelContextWindow(model: string): number {

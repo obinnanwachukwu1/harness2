@@ -126,10 +126,14 @@ This writes JSONL debug records to `.h2/debug/responses.jsonl`. Override the pat
 The committed eval fixtures and suite definitions live under `evals/`.
 
 - `evals/wide-suite.toml` is the current 15-session suite.
+- `evals/stability-pack.toml` is the 6-case stability pack and defaults to 5 fresh runs.
 - `evals/fixtures/` contains the committed reusable fixture repos.
 - `npm run dev -- eval run evals/wide-suite.toml` runs the full suite.
 - `npm run dev -- eval run evals/wide-suite.toml --case C3` runs one case.
+- `npm run dev -- eval run evals/stability-pack.toml` runs the stability pack 5 times by default.
+- `npm run dev -- eval run evals/stability-pack.toml --repeat 3` overrides the manifest repeat count.
 - `npm run dev -- eval score ~/.h2/evals/<run-id>` recomputes the score sheet from artifacts.
+- `npm run dev -- eval pack --latest-batch` packs the latest repeated-run batch into one review zip.
 
 ## OpenAI Codex OAuth
 

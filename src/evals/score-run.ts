@@ -93,7 +93,7 @@ function renderScoreCsv(scores: EvalAutoScore[]): string {
         yesNoNullable(score.questionExpected),
         yesNo(score.questionActual),
         stringifyNullable(score.questionQuality),
-        yesNoNullable(score.experimentExpected),
+        score.experimentExpected ?? '',
         String(score.experimentActual),
         score.webSearchExpected ?? '',
         yesNo(score.webSearchActual),

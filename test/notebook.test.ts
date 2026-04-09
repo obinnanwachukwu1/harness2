@@ -325,6 +325,8 @@ test('Notebook persists checkpoints and rebuilds compacted request history from 
     completed: 'persist checkpoint',
     next: 'rebuild next request',
     openRisks: 'tail length too short',
+    currentCommitments: 'runs remain historical snapshots',
+    importantNonGoals: 'avoid schema redesign during the checkpoint pass',
     gitLog: 'abc123 first commit',
     gitStatus: ' M src/storage/notebook.ts',
     gitDiffStat: ' src/storage/notebook.ts | 10 +++++-----',
@@ -338,13 +340,25 @@ test('Notebook persists checkpoints and rebuilds compacted request history from 
         discovered: []
       }
     ],
+    invalidatedExperimentSummaries: [
+      {
+        experimentId: 'exp-invalidated',
+        hypothesis: 'the previous path is still safe',
+        status: 'invalidated',
+        summary: 'The old path was invalidated.',
+        discovered: ['replay mixes drifted prompt state']
+      }
+    ],
     checkpointBlock: 'Harness checkpoint v1',
     tailStartHistoryId: 3
   });
 
   assert.equal(firstCheckpoint.goal, 'ship compaction');
+  assert.equal(firstCheckpoint.currentCommitments, 'runs remain historical snapshots');
+  assert.equal(firstCheckpoint.importantNonGoals, 'avoid schema redesign during the checkpoint pass');
   assert.match(firstCheckpoint.gitLog, /abc123/);
   assert.equal(firstCheckpoint.activeExperimentSummaries.length, 1);
+  assert.equal(firstCheckpoint.invalidatedExperimentSummaries.length, 1);
 
   assert.deepEqual(notebook.buildModelRequestHistory(session.id), [
     {
@@ -369,10 +383,13 @@ test('Notebook persists checkpoints and rebuilds compacted request history from 
     goal: 'ship compaction',
     completed: 'persist newer checkpoint',
     next: 'trim replay further',
+    currentCommitments: 'stop remains cooperative',
+    importantNonGoals: 'do not widen replay semantics',
     gitLog: 'def456 second commit',
     gitStatus: '(clean)',
     gitDiffStat: '(clean)',
     activeExperimentSummaries: [],
+    invalidatedExperimentSummaries: [],
     checkpointBlock: 'Harness checkpoint v2',
     tailStartHistoryId: 4
   });
@@ -413,10 +430,12 @@ test('Notebook persists open questions without injecting reminder developer mess
     whyItMatters: 'Being wrong would change the auth transfer implementation.',
     kind: 'runtime',
     affectedPaths: ['app/(auth)', 'lib/db/queries.ts'],
+    evidencePaths: ['app/api/chat', 'lib/runtime-probes'],
     recommendedStudy: 'guest creates chat, signs in, returns to same chat'
   });
 
   assert.equal(debt.status, 'open');
+  assert.deepEqual(debt.evidencePaths, ['app/api/chat', 'lib/runtime-probes']);
   assert.equal(notebook.listOpenStudyDebts(session.id).length, 1);
 
   const requestHistory = notebook.buildModelRequestHistory(session.id);
@@ -462,10 +481,12 @@ test('Notebook persists open questions without injecting reminder developer mess
     goal: 'preserve continuity',
     completed: 'identified guest/login ambiguity',
     next: 'run bounded study',
+    importantNonGoals: 'do not add cross-device sync',
     gitLog: 'abc123 checkpoint',
     gitStatus: '(clean)',
     gitDiffStat: '(clean)',
     activeExperimentSummaries: [],
+    invalidatedExperimentSummaries: [],
     checkpointBlock: 'Harness checkpoint with debt',
     tailStartHistoryId: 1
   });

@@ -24,7 +24,6 @@ export interface ToolCall {
 }
 
 export function formatToolOutput(name: string, rawArguments: string, output: string): string {
-  // TODO: spill oversized tool results to disk and replace them with a short inline pointer.
   if (output.startsWith('@@tool\t')) {
     return output;
   }
@@ -187,6 +186,26 @@ export function formatLiveToolBody(name: string, rawArguments: string): string[]
         const query = readOptionalStringArg(args, 'query');
         if (query) {
           body.push(`query: ${query}`);
+        }
+        return body;
+      }
+      case 'compact': {
+        const body = [
+          `goal: ${readStringArg(args, 'goal')}`,
+          `completed: ${readStringArg(args, 'completed')}`,
+          `next: ${readStringArg(args, 'next')}`
+        ];
+        const openRisks = readOptionalStringArg(args, 'openRisks');
+        if (openRisks) {
+          body.push(`openRisks: ${openRisks}`);
+        }
+        const currentCommitments = readOptionalStringArg(args, 'currentCommitments');
+        if (currentCommitments) {
+          body.push(`currentCommitments: ${currentCommitments}`);
+        }
+        const importantNonGoals = readOptionalStringArg(args, 'importantNonGoals');
+        if (importantNonGoals) {
+          body.push(`importantNonGoals: ${importantNonGoals}`);
         }
         return body;
       }
@@ -455,7 +474,7 @@ export const MAIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     type: 'function',
     name: 'open_question',
     description:
-      'Declare a load-bearing unresolved claim that blocks dependent edits. Use this when being wrong could materially change architecture, interfaces, protocol behavior, recovery, durability, retry, ownership, history, or integration behavior. summary should name the concrete claim. whyItMatters should say what would change if the answer goes the other way. In greenfield work, do not open a question merely because several designs exist; open one only when the prompt leaves a product contract underdetermined. If the unresolved choice is a product contract about history, recovery, retry, durability, or ownership semantics, use open_question instead of only stating a commitment note. Do not spend a question on routine implementation taste or on a capability check that one focused read or tiny local probe can settle immediately unless that check is the true blocker. Open the question before any live external, secret-backed, or runtime probe that could change the implementation.',
+      'Declare a load-bearing unresolved claim that blocks dependent edits. Use this when being wrong could materially change architecture, interfaces, protocol behavior, recovery, durability, retry, ownership, history, or integration behavior. summary should name the concrete claim. whyItMatters should say what would change if the answer goes the other way. In greenfield work, do not open a question merely because several designs exist; open one only when the prompt leaves a product contract underdetermined. If the unresolved choice is a product contract about history, recovery, retry, durability, or ownership semantics, use open_question instead of only stating a commitment note. Keep questions narrow; if one umbrella question would gate most of the feature, split or narrow it before spawning. affectedPaths should list only files whose edits depend on the claim, not the whole feature area. evidencePaths should list only the paths whose same-question inline probing should pause while a linked experiment is active. Do not spend a question on routine implementation taste or on a capability check that one focused read or tiny local probe can settle immediately unless that check is the true blocker. Open the question before any live external, secret-backed, or runtime probe that could change the implementation.',
     parameters: {
       type: 'object',
       properties: {
@@ -466,6 +485,10 @@ export const MAIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
           enum: ['runtime', 'scope', 'architecture']
         },
         affectedPaths: {
+          type: 'array',
+          items: { type: 'string' }
+        },
+        evidencePaths: {
           type: 'array',
           items: { type: 'string' }
         },
@@ -497,14 +520,17 @@ export const MAIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   {
     type: 'function',
     name: 'compact',
-    description: 'Checkpoint current state before context compression.',
+    description:
+      'Checkpoint current state before context compression. goal should restate the current objective, completed should capture durable progress, next should name the next concrete step after compaction, openRisks may note unresolved risks, currentCommitments may preserve the active product or implementation contract the work now depends on, and importantNonGoals may preserve the deliberate scope exclusions that still matter for consistency.',
     parameters: {
       type: 'object',
       properties: {
         goal: { type: 'string' },
         completed: { type: 'string' },
         next: { type: 'string' },
-        openRisks: { type: 'string' }
+        openRisks: { type: 'string' },
+        currentCommitments: { type: 'string' },
+        importantNonGoals: { type: 'string' }
       },
       required: ['goal', 'completed', 'next'],
       additionalProperties: false
@@ -830,6 +856,7 @@ async function executeToolCall(call: ToolCall, tools: AgentTools): Promise<strin
           whyItMatters: readStringArg(args, 'whyItMatters'),
           kind: readOptionalStringArg(args, 'kind') as StudyDebtKind | undefined,
           affectedPaths: readOptionalStringArrayArg(args, 'affectedPaths'),
+          evidencePaths: readOptionalStringArrayArg(args, 'evidencePaths'),
           recommendedStudy: readOptionalStringArg(args, 'recommendedStudy')
         }),
         null,
@@ -859,7 +886,9 @@ async function executeToolCall(call: ToolCall, tools: AgentTools): Promise<strin
           readStringArg(args, 'goal'),
           readStringArg(args, 'completed'),
           readStringArg(args, 'next'),
-          readOptionalStringArg(args, 'openRisks')
+          readOptionalStringArg(args, 'openRisks'),
+          readOptionalStringArg(args, 'currentCommitments'),
+          readOptionalStringArg(args, 'importantNonGoals')
         ),
         null,
         2

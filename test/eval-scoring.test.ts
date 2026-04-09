@@ -15,7 +15,7 @@ test('buildAutoScore marks hard-fail structural issues for bucket C', () => {
     followups: [],
     reviewHints: [],
     questionExpected: true,
-    experimentExpected: true
+    experimentExpected: 'yes'
   };
   const modelHistory: ModelHistoryItem[] = [
     {
@@ -60,7 +60,7 @@ test('buildAutoScore marks silent contract choice for bucket B without a questio
     followups: [],
     reviewHints: [],
     questionExpected: true,
-    experimentExpected: false
+    experimentExpected: 'no'
   };
   const modelHistory: ModelHistoryItem[] = [];
   const score = buildAutoScore(testCase, modelHistory, [] as StudyDebtRecord[], [] as ExperimentRecord[], false);
@@ -79,7 +79,7 @@ test('buildAutoScore tracks web search ordering when docs shape the path', () =>
     followups: [],
     reviewHints: [],
     questionExpected: true,
-    experimentExpected: true,
+    experimentExpected: 'yes',
     webSearchExpected: 'yes'
   };
   const modelHistory: ModelHistoryItem[] = [
@@ -114,7 +114,7 @@ test('buildAutoScore counts provider-executed web search as web search activity'
     followups: [],
     reviewHints: [],
     questionExpected: true,
-    experimentExpected: true,
+    experimentExpected: 'yes',
     webSearchExpected: 'yes'
   };
   const modelHistory: ModelHistoryItem[] = [
@@ -140,7 +140,7 @@ test('buildAutoScore ignores blocked inline probing after spawn when the engine 
     followups: [],
     reviewHints: [],
     questionExpected: true,
-    experimentExpected: true
+    experimentExpected: 'yes'
   };
   const modelHistory: ModelHistoryItem[] = [
     {
@@ -233,4 +233,109 @@ test('buildAutoScore ignores blocked inline probing after spawn when the engine 
 
   const score = buildAutoScore(testCase, modelHistory, studyDebts, experiments, false);
   assert.equal(score.duplicateInlineProbingAfterSpawn, 'no');
+});
+
+test('buildAutoScore treats a bounded inline live check as acceptable bucket C evidence', () => {
+  const testCase: EvalCaseDefinition = {
+    id: 'C1',
+    bucket: 'C',
+    fixture: 'next-app-router',
+    profile: 'ai/full-stack',
+    prompt: 'verify docs and runtime',
+    followups: [],
+    reviewHints: [],
+    questionExpected: true,
+    experimentExpected: 'yes',
+    webSearchExpected: 'yes'
+  };
+  const modelHistory: ModelHistoryItem[] = [
+    {
+      type: 'function_call',
+      call_id: 'call-1',
+      name: 'open_question',
+      arguments: JSON.stringify({
+        summary: 'what streaming and stop contract does this stack support',
+        whyItMatters: 'it changes the client and route design'
+      })
+    },
+    {
+      type: 'function_call_output',
+      call_id: 'call-1',
+      output: JSON.stringify({ id: 'question-1', ok: true })
+    },
+    {
+      type: 'message',
+      role: 'developer',
+      content: 'Built-in web_search executed.\nquery: openai responses streaming stop'
+    },
+    {
+      type: 'function_call',
+      call_id: 'call-2',
+      name: 'exec_command',
+      arguments: JSON.stringify({
+        command: 'node scripts/check-streaming.js'
+      })
+    },
+    {
+      type: 'function_call_output',
+      call_id: 'call-2',
+      output: JSON.stringify({ ok: true, processId: 42, running: true })
+    },
+    {
+      type: 'function_call',
+      call_id: 'call-3',
+      name: 'write_stdin',
+      arguments: JSON.stringify({ processId: 42, yieldTimeMs: 250 })
+    },
+    {
+      type: 'function_call_output',
+      call_id: 'call-3',
+      output: JSON.stringify({ ok: true, processId: 42, running: false, exitCode: 0 })
+    },
+    {
+      type: 'function_call',
+      call_id: 'call-4',
+      name: 'resolve_question',
+      arguments: JSON.stringify({
+        questionId: 'question-1',
+        resolution: 'study_run',
+        note: 'Docs and one runtime check support incremental chunks with explicit cancel caveat.'
+      })
+    },
+    {
+      type: 'function_call_output',
+      call_id: 'call-4',
+      output: JSON.stringify({ ok: true })
+    }
+  ];
+  const studyDebts: StudyDebtRecord[] = [
+    {
+      id: 'question-1',
+      sessionId: 'session-1',
+      status: 'closed',
+      summary: 'what streaming and stop contract does this stack support',
+      whyItMatters: 'it changes the client and route design',
+      kind: 'runtime',
+      affectedPaths: ['app/api/chat'],
+      recommendedStudy: null,
+      createdAt: '2026-04-08T00:00:00.000Z',
+      updatedAt: '2026-04-08T00:00:00.000Z',
+      resolution: 'study_run',
+      resolutionNote: 'Docs and one runtime check support incremental chunks with explicit cancel caveat.',
+      resolvedAt: '2026-04-08T00:01:00.000Z'
+    }
+  ];
+
+  const score = buildAutoScore(testCase, modelHistory, studyDebts, [] as ExperimentRecord[], false);
+  assert.equal(score.overall, 'pass');
+  assert.equal(score.webSearchActual, true);
+  assert.equal(score.questionBeforeWebSearch, 'yes');
+  assert.ok(
+    score.notes.includes(
+      'Bucket C used a bounded inline live check instead of spawning an experiment.'
+    )
+  );
+  assert.ok(
+    !score.hardFailReasons.some((reason) => reason.includes('Bucket C did not produce an experiment.'))
+  );
 });

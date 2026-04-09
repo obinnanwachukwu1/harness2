@@ -2,6 +2,7 @@ export type EvalReasoningEffort = 'off' | 'low' | 'medium' | 'high';
 
 export type EvalWebSearchMode = 'disabled' | 'cached' | 'live' | 'fixed';
 export type EvalWebSearchExpectation = 'yes' | 'no' | 'optional';
+export type EvalExperimentExpectation = 'yes' | 'no' | 'optional';
 
 export interface EvalSuiteMeta {
   id: string;
@@ -14,6 +15,7 @@ export interface EvalRuntimeConfig {
   thinking: boolean;
   webSearchMode: EvalWebSearchMode;
   parallelism?: number;
+  repeatCount?: number;
   defaultExperimentBudget?: number;
 }
 
@@ -57,7 +59,7 @@ export interface EvalCaseDefinition {
   prompt: string;
   notes?: string;
   questionExpected?: boolean;
-  experimentExpected?: boolean;
+  experimentExpected?: EvalExperimentExpectation;
   webSearchExpected?: EvalWebSearchExpectation;
   runtimeOverride?: Partial<EvalRuntimeConfig>;
   envOverride?: EvalCaseEnvOverride;
@@ -78,6 +80,7 @@ export interface EvalRunRequest {
   runId?: string;
   selectedCaseIds?: string[];
   parallelism?: number;
+  repeatCount?: number;
   onProgress?: (event: EvalRunProgressEvent) => void;
 }
 
@@ -155,7 +158,7 @@ export interface EvalAutoScore {
   questionExpected: boolean | null;
   questionActual: boolean;
   questionQuality: 0 | 1 | 2 | null;
-  experimentExpected: boolean | null;
+  experimentExpected: EvalExperimentExpectation | null;
   experimentActual: 0 | 1 | '2+';
   webSearchExpected: EvalWebSearchExpectation | null;
   webSearchActual: boolean;

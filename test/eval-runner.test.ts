@@ -5,6 +5,7 @@ import test from 'node:test';
 
 import { runEvalSuite } from '../src/evals/suite-runner.js';
 import { createEvalReviewPack } from '../src/evals/pack-run.js';
+import { createEvalRunBatchRecord } from '../src/evals/repeat-batches.js';
 import { cleanupDir, createGitRepo, createTempDir } from '../test-support/helpers.js';
 
 test('runEvalSuite materializes template fixture env and exports artifacts', async (t) => {
@@ -262,10 +263,91 @@ prompt = "/write note.txt :: hello"
     outputDir
   });
 
+  assert.equal(pack.kind, 'run');
   assert.equal(pack.runId, result.runId);
+  assert.deepEqual(pack.runIds, [result.runId]);
+  assert.deepEqual(pack.sourcePaths, [path.join(process.env.H2_HOME!, 'evals', result.runId)]);
   await assert.doesNotReject(() => access(pack.zipPath));
   assert.ok(pack.includedFiles.includes('manifest.lock.json'));
   assert.ok(pack.includedFiles.includes('score-sheet.csv'));
   assert.ok(pack.includedFiles.includes(path.join('A1', 'artifacts', 'session.md')));
+  assert.ok(!pack.includedFiles.some((entry) => entry.includes('workspace')));
+});
+
+test('createEvalReviewPack can package the latest repeat batch', async (t) => {
+  const tempDir = await createTempDir('h2-eval-pack-batch-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const originalH2Home = process.env.H2_HOME;
+  process.env.H2_HOME = path.join(tempDir, 'h2-home');
+  t.after(() => {
+    if (originalH2Home === undefined) {
+      delete process.env.H2_HOME;
+    } else {
+      process.env.H2_HOME = originalH2Home;
+    }
+  });
+
+  const fixtureDir = path.join(tempDir, 'fixtures', 'tiny-app');
+  await mkdir(fixtureDir, { recursive: true });
+  await writeFile(path.join(fixtureDir, 'README.md'), '# fixture\n', 'utf8');
+
+  const manifestPath = path.join(tempDir, 'suite.toml');
+  await writeFile(
+    manifestPath,
+    `
+[suite]
+id = "stability-6"
+
+[runtime]
+reasoning_effort = "medium"
+thinking = false
+web_search_mode = "fixed"
+
+[[fixtures]]
+id = "tiny-app"
+type = "template"
+path = "./fixtures/tiny-app"
+
+[[cases]]
+id = "A1"
+bucket = "A"
+fixture = "tiny-app"
+profile = "backend"
+prompt = "/write note.txt :: hello"
+`,
+    'utf8'
+  );
+
+  const first = await runEvalSuite({
+    manifestPath,
+    runId: 'run-2026-04-09T03-00-00-000Z-aaaaaa'
+  });
+  const second = await runEvalSuite({
+    manifestPath,
+    runId: 'run-2026-04-09T03-00-01-000Z-bbbbbb'
+  });
+  const batch = await createEvalRunBatchRecord({
+    suiteId: first.suiteId,
+    manifestPath,
+    runIds: [first.runId, second.runId]
+  });
+
+  const outputDir = path.join(tempDir, 'packs');
+  const pack = await createEvalReviewPack({
+    latestBatch: true,
+    outputDir
+  });
+
+  assert.equal(pack.kind, 'batch');
+  assert.equal(pack.batchId, batch.batchId);
+  assert.deepEqual(pack.runIds, [first.runId, second.runId]);
+  await assert.doesNotReject(() => access(pack.zipPath));
+  assert.ok(pack.includedFiles.includes(path.join('batches', `${batch.batchId}.json`)));
+  assert.ok(pack.includedFiles.includes(path.join(first.runId, 'manifest.lock.json')));
+  assert.ok(pack.includedFiles.includes(path.join(second.runId, 'score-sheet.csv')));
+  assert.ok(
+    pack.includedFiles.includes(path.join(first.runId, 'A1', 'artifacts', 'session.md'))
+  );
   assert.ok(!pack.includedFiles.some((entry) => entry.includes('workspace')));
 });

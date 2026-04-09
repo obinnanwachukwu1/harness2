@@ -3,6 +3,8 @@
 Committed eval assets live here.
 
 - `wide-suite.toml` is the current 15-session suite.
+- `stability-pack.toml` is the 6-case repeatability pack and defaults to 5 fresh runs.
+- `npm run dev -- eval pack --latest-batch` packs the latest repeat batch into one review zip.
 - `fixtures/node-minimal` is `F1`.
 - `fixtures/node-service-starter` is `F2`.
 - `fixtures/next-app-router` is `F3`.

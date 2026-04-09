@@ -25,6 +25,7 @@ reasoning_effort = "medium"
 thinking = false
 web_search_mode = "fixed"
 parallelism = 3
+repeat_count = 5
 
 [[fixtures]]
 id = "empty-node"
@@ -41,6 +42,7 @@ fixture = "empty-node"
 profile = "existing"
 prompt = "first prompt"
 question_expected = true
+experiment_expected = "optional"
 
 [[cases.followups]]
 after_turn = 1
@@ -53,8 +55,10 @@ prompt = "second prompt"
   assert.equal(parsed.manifest.fixtures[0]?.path, fixtureDir);
   assert.equal(parsed.manifest.runtime.model, undefined);
   assert.equal(parsed.manifest.runtime.parallelism, 3);
+  assert.equal(parsed.manifest.runtime.repeatCount, 5);
   assert.equal(parsed.manifest.cases[0]?.followups.length, 1);
   assert.equal(parsed.manifest.cases[0]?.followups[0]?.afterTurn, 1);
   assert.equal(parsed.manifest.cases[0]?.followups[0]?.prompt, 'second prompt');
   assert.equal(parsed.manifest.cases[0]?.profile, 'existing');
+  assert.equal(parsed.manifest.cases[0]?.experimentExpected, 'optional');
 });

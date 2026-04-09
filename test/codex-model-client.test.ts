@@ -1,4 +1,5 @@
 import assert from 'node:assert/strict';
+import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 
@@ -1142,6 +1143,7 @@ test('CodexModelClient rebuilds requests from latest checkpoint plus recent tail
     gitStatus: '(clean)',
     gitDiffStat: '(clean)',
     activeExperimentSummaries: [],
+    invalidatedExperimentSummaries: [],
     checkpointBlock: 'Harness checkpoint block',
     tailStartHistoryId: 3
   });
@@ -1243,6 +1245,7 @@ test('CodexModelClient estimates context usage from compacted replay state', asy
     gitStatus: '(clean)',
     gitDiffStat: '(clean)',
     activeExperimentSummaries: [],
+    invalidatedExperimentSummaries: [],
     checkpointBlock: 'Checkpoint summary',
     tailStartHistoryId: 3
   });
@@ -1810,4 +1813,217 @@ test('CodexModelClient formats ranged read tool headers', async (t) => {
 
   assert.equal(emitted[0]?.role, 'tool');
   assert.match(emitted[0]?.text ?? '', /^@@tool\tread\tRead\(README\.md:10-20\)/);
+});
+
+test('CodexModelClient exposes only compact when the reserve buffer is exhausted', async (t) => {
+  const tempDir = await createTempDir('h2-model-compact-only-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const previousContextWindow = process.env.H2_CONTEXT_WINDOW_TOKENS;
+  process.env.H2_CONTEXT_WINDOW_TOKENS = '50000';
+  t.after(() => {
+    if (previousContextWindow === undefined) {
+      delete process.env.H2_CONTEXT_WINDOW_TOKENS;
+    } else {
+      process.env.H2_CONTEXT_WINDOW_TOKENS = previousContextWindow;
+    }
+  });
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-test', tempDir);
+  notebook.appendModelHistoryItem('session-test', {
+    type: 'message',
+    role: 'user',
+    content: 'x'.repeat(120_000)
+  });
+
+  const now = 1_700_000_000_000;
+  notebook.upsertOpenAICodexAuth({
+    provider: 'openai-codex',
+    type: 'oauth',
+    accessToken: createUnsignedJwt({
+      exp: Math.floor((now + 3600_000) / 1000)
+    }),
+    refreshToken: 'refresh-token',
+    idToken: createUnsignedJwt({
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: 'acct_123'
+      }
+    }),
+    accountId: 'acct_123',
+    expiresAt: now + 3600_000,
+    createdAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString()
+  });
+
+  const requests: Array<Record<string, unknown>> = [];
+  let responseCount = 0;
+  const auth = new OpenAICodexAuth(notebook, { now: () => now });
+  const client = new CodexModelClient(notebook, auth, {
+    fetchImpl: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      requests.push(body);
+      responseCount += 1;
+
+      if (responseCount === 1) {
+        return createResponsesStream([
+          responseCreated('resp_1'),
+          functionCallDone('call_1', 'compact', {
+            goal: 'stay inside the reserve',
+            completed: 'captured current state',
+            next: 'resume once replay is trimmed',
+            currentCommitments: 'runs remain historical snapshots',
+            importantNonGoals: 'do not expand scope while compacting'
+          }),
+          responseCompleted('resp_1')
+        ]);
+      }
+
+      return createResponsesStream([
+        responseCreated('resp_2'),
+        { type: 'response.output_text.delta', item_id: 'msg_2', delta: 'Compacted.' },
+        responseCompleted('resp_2')
+      ]);
+    }
+  });
+
+  let compactCalls = 0;
+  const emitted: Array<{ role: TranscriptRole; text: string }> = [];
+  const tools: AgentTools = {
+    execCommand: async () => {
+      throw new Error('exec_command should not be available once compaction is forced.');
+    },
+    writeStdin: async () => '',
+    read: async () => '',
+    write: async () => '',
+    edit: async () => '',
+    glob: async () => [],
+    grep: async () => '',
+    spawnExperiment: async () => {
+      throw new Error('not used');
+    },
+    readExperiment: async () => {
+      throw new Error('not used');
+    },
+    compact: async () => {
+      compactCalls += 1;
+      return { ok: true, checkpointId: 1 };
+    },
+    authLogin: async () => '',
+    authStatus: async () => '',
+    authLogout: async () => '',
+    getModelSettings: async () => '',
+    setModel: async () => '',
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
+  };
+
+  await client.runTurn('session-test', 'keep going', tools, async (role, text) => {
+    emitted.push({ role, text });
+  });
+
+  assert.equal(compactCalls, 1);
+  assert.equal(requests.length, 2);
+  assert.equal(JSON.stringify(requests[0]).includes('"name":"compact"'), true);
+  assert.equal(JSON.stringify(requests[0]).includes('"name":"read"'), false);
+  assert.ok(
+    requests[0]?.input &&
+      JSON.stringify(requests[0].input).includes('Only compact is available until the session checkpoints and trims replay.')
+  );
+  assert.equal(emitted[0]?.role, 'tool');
+  assert.match(emitted[1]?.text ?? '', /Compacted/);
+});
+
+test('CodexModelClient spills oversized tool outputs to disk before replaying them', async (t) => {
+  const tempDir = await createTempDir('h2-model-tool-spill-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-test', tempDir);
+
+  const now = 1_700_000_000_000;
+  notebook.upsertOpenAICodexAuth({
+    provider: 'openai-codex',
+    type: 'oauth',
+    accessToken: createUnsignedJwt({
+      exp: Math.floor((now + 3600_000) / 1000)
+    }),
+    refreshToken: 'refresh-token',
+    idToken: createUnsignedJwt({
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: 'acct_123'
+      }
+    }),
+    accountId: 'acct_123',
+    expiresAt: now + 3600_000,
+    createdAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString()
+  });
+
+  const requests: Array<Record<string, unknown>> = [];
+  let responseCount = 0;
+  const largeOutput = '0123456789abcdef'.repeat(1_600);
+  const auth = new OpenAICodexAuth(notebook, { now: () => now });
+  const client = new CodexModelClient(notebook, auth, {
+    fetchImpl: async (_input, init) => {
+      requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
+      responseCount += 1;
+
+      if (responseCount === 1) {
+        return createResponsesStream([
+          responseCreated('resp_1'),
+          functionCallDone('call_1', 'exec_command', { command: 'npm test' }),
+          responseCompleted('resp_1')
+        ]);
+      }
+
+      return createResponsesStream([
+        responseCreated('resp_2'),
+        { type: 'response.output_text.delta', item_id: 'msg_2', delta: 'Done.' },
+        responseCompleted('resp_2')
+      ]);
+    }
+  });
+
+  const emitted: Array<{ role: TranscriptRole; text: string }> = [];
+  const tools: AgentTools = {
+    execCommand: async () => largeOutput,
+    writeStdin: async () => '',
+    read: async () => '',
+    write: async () => '',
+    edit: async () => '',
+    glob: async () => [],
+    grep: async () => '',
+    spawnExperiment: async () => {
+      throw new Error('not used');
+    },
+    readExperiment: async () => {
+      throw new Error('not used');
+    },
+    authLogin: async () => '',
+    authStatus: async () => '',
+    authLogout: async () => '',
+    getModelSettings: async () => '',
+    setModel: async () => '',
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
+  };
+
+  await client.runTurn('session-test', 'run the command', tools, async (role, text) => {
+    emitted.push({ role, text });
+  });
+
+  const secondRequest = requests[1];
+  const serializedSecondRequest = JSON.stringify(secondRequest);
+  assert.match(serializedSecondRequest, /\.h2\/tool-output\/session-test\//);
+  const spilledPathMatch = serializedSecondRequest.match(/\.h2\/tool-output\/session-test\/[^"]+\.txt/);
+  assert.ok(spilledPathMatch);
+  const spilledFile = path.join(tempDir, spilledPathMatch[0]!);
+  assert.equal(await readFile(spilledFile, 'utf8'), largeOutput);
+  assert.equal(emitted[0]?.role, 'tool');
+  assert.match(emitted[0]?.text ?? '', /Large exec_command output spilled to/);
 });

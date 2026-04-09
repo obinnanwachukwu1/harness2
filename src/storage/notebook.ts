@@ -95,12 +95,20 @@ interface StudyDebtRow {
   summary: string;
   why_it_matters: string;
   affected_paths_json: string | null;
+  evidence_paths_json: string | null;
   recommended_study: string | null;
   opened_at: string;
   updated_at: string;
   closed_at: string | null;
   resolution: StudyDebtResolution | null;
   resolution_note: string | null;
+}
+
+interface StudyDebtProbeBudgetRow {
+  question_id: string;
+  session_id: string;
+  episodes_used: number;
+  updated_at: string;
 }
 
 interface SessionCheckpointRow {
@@ -111,11 +119,14 @@ interface SessionCheckpointRow {
   completed: string;
   next: string;
   open_risks: string | null;
+  current_commitments: string | null;
+  important_non_goals: string | null;
   git_log: string;
   git_status: string;
   git_diff_stat: string;
   last_test_status: string | null;
   active_experiments_json: string;
+  invalidated_experiments_json: string;
   checkpoint_block: string;
   tail_start_history_id: number | null;
 }
@@ -203,6 +214,7 @@ export class Notebook {
         summary TEXT NOT NULL,
         why_it_matters TEXT NOT NULL,
         affected_paths_json TEXT,
+        evidence_paths_json TEXT,
         recommended_study TEXT,
         opened_at TEXT NOT NULL,
         updated_at TEXT NOT NULL,
@@ -214,6 +226,16 @@ export class Notebook {
       CREATE INDEX IF NOT EXISTS idx_study_debts_session_status
       ON study_debts(session_id, status, updated_at DESC);
 
+      CREATE TABLE IF NOT EXISTS study_debt_probe_budgets (
+        question_id TEXT PRIMARY KEY REFERENCES study_debts(id) ON DELETE CASCADE,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        episodes_used INTEGER NOT NULL DEFAULT 0,
+        updated_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_study_debt_probe_budgets_session_id
+      ON study_debt_probe_budgets(session_id, updated_at DESC);
+
       CREATE TABLE IF NOT EXISTS session_checkpoints (
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -222,11 +244,14 @@ export class Notebook {
         completed TEXT NOT NULL,
         next TEXT NOT NULL,
         open_risks TEXT,
+        current_commitments TEXT,
+        important_non_goals TEXT,
         git_log TEXT NOT NULL,
         git_status TEXT NOT NULL,
         git_diff_stat TEXT NOT NULL,
         last_test_status TEXT,
         active_experiments_json TEXT NOT NULL,
+        invalidated_experiments_json TEXT NOT NULL DEFAULT '[]',
         checkpoint_block TEXT NOT NULL,
         tail_start_history_id INTEGER
       );
@@ -243,7 +268,33 @@ export class Notebook {
       this.db.exec(`ALTER TABLE model_sessions ADD COLUMN reasoning_effort TEXT`);
     }
 
+    const sessionCheckpointColumns = this.db
+      .prepare(`PRAGMA table_info(session_checkpoints)`)
+      .all() as unknown as TableInfoRow[];
+
+    if (!sessionCheckpointColumns.some((column) => column.name === 'current_commitments')) {
+      this.db.exec(`ALTER TABLE session_checkpoints ADD COLUMN current_commitments TEXT`);
+    }
+
+    if (!sessionCheckpointColumns.some((column) => column.name === 'important_non_goals')) {
+      this.db.exec(`ALTER TABLE session_checkpoints ADD COLUMN important_non_goals TEXT`);
+    }
+
+    if (!sessionCheckpointColumns.some((column) => column.name === 'invalidated_experiments_json')) {
+      this.db.exec(
+        `ALTER TABLE session_checkpoints ADD COLUMN invalidated_experiments_json TEXT NOT NULL DEFAULT '[]'`
+      );
+    }
+
     migrateExperimentTables(this.db);
+
+    const studyDebtColumns = this.db
+      .prepare(`PRAGMA table_info(study_debts)`)
+      .all() as unknown as TableInfoRow[];
+
+    if (!studyDebtColumns.some((column) => column.name === 'evidence_paths_json')) {
+      this.db.exec(`ALTER TABLE study_debts ADD COLUMN evidence_paths_json TEXT`);
+    }
   }
 
   createSession(sessionId: string, cwd: string): SessionRecord {
@@ -662,6 +713,7 @@ export class Notebook {
     whyItMatters: string;
     kind?: StudyDebtKind;
     affectedPaths?: string[];
+    evidencePaths?: string[];
     recommendedStudy?: string;
   }): StudyDebtRecord {
     const timestamp = nowIso();
@@ -669,6 +721,10 @@ export class Notebook {
     const affectedPaths =
       input.affectedPaths && input.affectedPaths.length > 0
         ? input.affectedPaths.map((item) => item.trim()).filter(Boolean)
+        : null;
+    const evidencePaths =
+      input.evidencePaths && input.evidencePaths.length > 0
+        ? input.evidencePaths.map((item) => item.trim()).filter(Boolean)
         : null;
 
     this.db
@@ -682,6 +738,7 @@ export class Notebook {
             summary,
             why_it_matters,
             affected_paths_json,
+            evidence_paths_json,
             recommended_study,
             opened_at,
             updated_at,
@@ -689,7 +746,7 @@ export class Notebook {
             resolution,
             resolution_note
           )
-          VALUES (?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
+          VALUES (?, ?, 'open', ?, ?, ?, ?, ?, ?, ?, ?, NULL, NULL, NULL)
         `
       )
       .run(
@@ -699,6 +756,7 @@ export class Notebook {
         input.summary.trim(),
         input.whyItMatters.trim(),
         affectedPaths ? JSON.stringify(affectedPaths) : null,
+        evidencePaths ? JSON.stringify(evidencePaths) : null,
         input.recommendedStudy?.trim() || null,
         timestamp,
         timestamp
@@ -766,6 +824,45 @@ export class Notebook {
     return this.getStudyDebt(input.questionId) as StudyDebtRecord;
   }
 
+  getStudyDebtProbeEpisodeCount(questionId: string): number {
+    const row = this.db
+      .prepare(
+        `
+          SELECT question_id, session_id, episodes_used, updated_at
+          FROM study_debt_probe_budgets
+          WHERE question_id = ?
+        `
+      )
+      .get(questionId) as StudyDebtProbeBudgetRow | undefined;
+    return row?.episodes_used ?? 0;
+  }
+
+  incrementStudyDebtProbeEpisodeCount(questionId: string): number {
+    const existing = this.getStudyDebt(questionId);
+    if (!existing) {
+      throw new Error(`Unknown question: ${questionId}`);
+    }
+    const timestamp = nowIso();
+    this.db
+      .prepare(
+        `
+          INSERT INTO study_debt_probe_budgets (
+            question_id,
+            session_id,
+            episodes_used,
+            updated_at
+          )
+          VALUES (?, ?, 1, ?)
+          ON CONFLICT(question_id) DO UPDATE SET
+            episodes_used = episodes_used + 1,
+            updated_at = excluded.updated_at
+        `
+      )
+      .run(questionId, existing.sessionId, timestamp);
+    this.touchSession(existing.sessionId);
+    return this.getStudyDebtProbeEpisodeCount(questionId);
+  }
+
   listOpenStudyDebts(sessionId: string): StudyDebtRecord[] {
     const rows = this.db
       .prepare(
@@ -778,6 +875,7 @@ export class Notebook {
             summary,
             why_it_matters,
             affected_paths_json,
+            evidence_paths_json,
             recommended_study,
             opened_at,
             updated_at,
@@ -807,6 +905,7 @@ export class Notebook {
             summary,
             why_it_matters,
             affected_paths_json,
+            evidence_paths_json,
             recommended_study,
             opened_at,
             updated_at,
@@ -835,6 +934,7 @@ export class Notebook {
             summary,
             why_it_matters,
             affected_paths_json,
+            evidence_paths_json,
             recommended_study,
             opened_at,
             updated_at,
@@ -897,11 +997,14 @@ export class Notebook {
     completed: string;
     next: string;
     openRisks?: string;
+    currentCommitments?: string;
+    importantNonGoals?: string;
     gitLog: string;
     gitStatus: string;
     gitDiffStat: string;
     lastTestStatus?: string | null;
     activeExperimentSummaries: ExperimentSearchResult[];
+    invalidatedExperimentSummaries: ExperimentSearchResult[];
     checkpointBlock: string;
     tailStartHistoryId: number | null;
   }): SessionCheckpointRecord {
@@ -916,15 +1019,18 @@ export class Notebook {
             completed,
             next,
             open_risks,
+            current_commitments,
+            important_non_goals,
             git_log,
             git_status,
             git_diff_stat,
             last_test_status,
             active_experiments_json,
+            invalidated_experiments_json,
             checkpoint_block,
             tail_start_history_id
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `
       )
       .run(
@@ -934,11 +1040,14 @@ export class Notebook {
         input.completed,
         input.next,
         input.openRisks ?? null,
+        input.currentCommitments ?? null,
+        input.importantNonGoals ?? null,
         input.gitLog,
         input.gitStatus,
         input.gitDiffStat,
         input.lastTestStatus ?? null,
         JSON.stringify(input.activeExperimentSummaries),
+        JSON.stringify(input.invalidatedExperimentSummaries),
         input.checkpointBlock,
         input.tailStartHistoryId
       );
@@ -954,11 +1063,14 @@ export class Notebook {
             completed,
             next,
             open_risks,
+            current_commitments,
+            important_non_goals,
             git_log,
             git_status,
             git_diff_stat,
             last_test_status,
             active_experiments_json,
+            invalidated_experiments_json,
             checkpoint_block,
             tail_start_history_id
           FROM session_checkpoints
@@ -983,11 +1095,14 @@ export class Notebook {
             completed,
             next,
             open_risks,
+            current_commitments,
+            important_non_goals,
             git_log,
             git_status,
             git_diff_stat,
             last_test_status,
             active_experiments_json,
+            invalidated_experiments_json,
             checkpoint_block,
             tail_start_history_id
           FROM session_checkpoints
@@ -1118,6 +1233,7 @@ function mapStudyDebt(row: StudyDebtRow): StudyDebtRecord {
     summary: row.summary,
     whyItMatters: row.why_it_matters,
     affectedPaths: parseNullableJsonArray(row.affected_paths_json, 'study_debts.affected_paths_json'),
+    evidencePaths: parseNullableJsonArray(row.evidence_paths_json, 'study_debts.evidence_paths_json'),
     recommendedStudy: row.recommended_study,
     openedAt: row.opened_at,
     updatedAt: row.updated_at,
@@ -1136,6 +1252,8 @@ function mapSessionCheckpoint(row: SessionCheckpointRow): SessionCheckpointRecor
     completed: row.completed,
     next: row.next,
     openRisks: row.open_risks,
+    currentCommitments: row.current_commitments,
+    importantNonGoals: row.important_non_goals,
     gitLog: row.git_log,
     gitStatus: row.git_status,
     gitDiffStat: row.git_diff_stat,
@@ -1143,6 +1261,10 @@ function mapSessionCheckpoint(row: SessionCheckpointRow): SessionCheckpointRecor
     activeExperimentSummaries: parseExperimentSearchResults(
       row.active_experiments_json,
       'session_checkpoints.active_experiments_json'
+    ),
+    invalidatedExperimentSummaries: parseExperimentSearchResults(
+      row.invalidated_experiments_json,
+      'session_checkpoints.invalidated_experiments_json'
     ),
     checkpointBlock: row.checkpoint_block,
     tailStartHistoryId: row.tail_start_history_id

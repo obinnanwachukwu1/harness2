@@ -32,6 +32,7 @@ Greenfield rule:
 - Do not open a question just because multiple designs exist.
 - Open one only when the prompt leaves a load-bearing product contract underdetermined, especially around recovery, durability, retry, ownership, or history semantics, and silently choosing would likely surprise the user or force rework.
 - A greenfield commitment note is not a substitute for an open question when the commitment chooses underdetermined history, recovery, retry, durability, or ownership semantics.
+- Keep questions narrow. If one umbrella question would gate most of the feature, narrow it or split orthogonal claims into separate questions before spawning.
 - If a tiny local capability probe can cheaply eliminate a leading alternative, do that before committing.
 
 Search discipline:

@@ -17,6 +17,7 @@ import type {
   OpenTuiRenderBlock,
   OpenTuiState
 } from '../../../src/ui-opentui/render-types.js';
+import { captureHeapSnapshot } from '../../../src/ui-opentui/heap-snapshot.js';
 import { BridgeClient } from './bridge-client.js';
 import { copyToClipboard } from './clipboard.js';
 import { createBlockView, updateBlockView, type BlockView } from './render-block-view.js';
@@ -49,6 +50,10 @@ export class OpenTuiApp {
   private lastBridgeError: string | null = null;
   private resolveRun?: () => void;
   private transientStatus: { message: string; timeout: ReturnType<typeof setTimeout> | null } | null = null;
+  private capturingHeap = false;
+  private readonly handleSigUsr2 = (): void => {
+    void this.captureHeapSnapshots('signal');
+  };
 
   private constructor(
     private readonly renderer: CliRenderer,
@@ -67,6 +72,7 @@ export class OpenTuiApp {
     this.bindKeys();
     this.bindInput();
     this.bindSelection();
+    process.on('SIGUSR2', this.handleSigUsr2);
     this.input.focus();
   }
 
@@ -231,6 +237,11 @@ export class OpenTuiApp {
         return;
       }
 
+      if (key.ctrl && key.name === 'y') {
+        void this.captureHeapSnapshots('ui');
+        return;
+      }
+
       if (key.name === 'pageup') {
         this.transcriptScroll.scrollBy(-10, 'step');
         this.renderer.requestRender();
@@ -308,6 +319,13 @@ export class OpenTuiApp {
         contextUsagePercent: this.state?.status.contextUsagePercent ?? 0,
         usageText: event.message
       });
+      this.renderer.requestRender();
+      return;
+    }
+
+    if (event.type === 'heapSnapshot') {
+      const rssMb = Math.round(event.rss / (1024 * 1024));
+      this.setTransientStatus(`${event.processType} heap ${rssMb}MB`);
       this.renderer.requestRender();
       return;
     }
@@ -535,6 +553,7 @@ export class OpenTuiApp {
     }
 
     this.destroyed = true;
+    process.off('SIGUSR2', this.handleSigUsr2);
     if (this.transientStatus?.timeout) {
       clearTimeout(this.transientStatus.timeout);
       this.transientStatus = null;
@@ -542,6 +561,35 @@ export class OpenTuiApp {
     await this.bridge.dispose();
     this.renderer.destroy();
     this.resolveRun?.();
+  }
+
+  private async captureHeapSnapshots(trigger: 'ui' | 'signal'): Promise<void> {
+    if (this.capturingHeap) {
+      this.setTransientStatus('heap snapshot already running');
+      return;
+    }
+
+    this.capturingHeap = true;
+    this.setTransientStatus('capturing heap snapshots…');
+    try {
+      const cwd = this.state?.cwd ?? process.cwd();
+      const snapshot = await captureHeapSnapshot({
+        cwd,
+        processType: 'tui',
+        trigger
+      });
+      const rssMb = Math.round(snapshot.rss / (1024 * 1024));
+      this.setTransientStatus(`tui heap ${rssMb}MB`);
+      this.bridge.send({
+        type: 'captureHeap',
+        trigger
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.setTransientStatus(`heap snapshot failed: ${message}`);
+    } finally {
+      this.capturingHeap = false;
+    }
   }
 }
 

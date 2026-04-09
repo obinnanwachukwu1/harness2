@@ -105,6 +105,7 @@ export interface StudyDebtRecord {
   summary: string;
   whyItMatters: string;
   affectedPaths: string[] | null;
+  evidencePaths: string[] | null;
   recommendedStudy: string | null;
   openedAt: string;
   updatedAt: string;
@@ -219,11 +220,14 @@ export interface SessionCheckpointRecord {
   completed: string;
   next: string;
   openRisks: string | null;
+  currentCommitments: string | null;
+  importantNonGoals: string | null;
   gitLog: string;
   gitStatus: string;
   gitDiffStat: string;
   lastTestStatus: string | null;
   activeExperimentSummaries: ExperimentSearchResult[];
+  invalidatedExperimentSummaries: ExperimentSearchResult[];
   checkpointBlock: string;
   tailStartHistoryId: number | null;
 }
@@ -395,6 +399,7 @@ export interface AgentTools {
     whyItMatters: string;
     kind?: StudyDebtKind;
     affectedPaths?: string[];
+    evidencePaths?: string[];
     recommendedStudy?: string;
   }): Promise<{ questionId: string; status: 'open' }>;
   resolveStudyDebt?(input: {
@@ -414,7 +419,9 @@ export interface AgentTools {
     goal: string,
     completed: string,
     next: string,
-    openRisks?: string
+    openRisks?: string,
+    currentCommitments?: string,
+    importantNonGoals?: string
   ): Promise<{ ok: true; checkpointId: number }>;
   logObservation?(
     experimentId: string,

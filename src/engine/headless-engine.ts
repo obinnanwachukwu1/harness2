@@ -36,6 +36,7 @@ import type {
   SessionExportResult,
   SpawnExperimentInput,
   StudyDebtKind,
+  StudyDebtRecord,
   StudyDebtResolution,
   TranscriptRole,
   WriteStdinInput,
@@ -66,6 +67,7 @@ interface ExecSession {
   command: string;
   cwd: string;
   root: string;
+  probeQuestionIds: string[];
   child: ChildProcessWithoutNullStreams;
   pendingStdout: string;
   pendingStderr: string;
@@ -185,8 +187,8 @@ export class HeadlessEngine {
       adoptExperiment: (experimentId, adoptionOptions) =>
         this.adoptExperiment(experimentId, adoptionOptions),
       resolveExperiment: async (input) => this.experimentManager.resolve(input),
-      compact: (goal, completed, next, openRisks) =>
-        this.runCompact(goal, completed, next, openRisks),
+      compact: (goal, completed, next, openRisks, currentCommitments, importantNonGoals) =>
+        this.runCompact(goal, completed, next, openRisks, currentCommitments, importantNonGoals),
       authLogin: () => this.runAuthLogin(),
       authStatus: () => this.runAuthStatus(),
       authLogout: () => this.runAuthLogout(),
@@ -567,8 +569,12 @@ export class HeadlessEngine {
 
     const cwd = input.cwd ? this.resolveRootedPath(root, input.cwd) : root;
     this.assertExperimentAllowsInlineProbe(root, 'exec_command', [cwd]);
+    const probeQuestionIds = this.consumeInlineProbeBudget(root, 'exec_command', [cwd]);
 
-    const session = this.startExecSession(root, cwd, command);
+    const session = this.startExecSession(root, cwd, command, probeQuestionIds);
+    for (const questionId of probeQuestionIds) {
+      this.options.notebook.incrementStudyDebtProbeEpisodeCount(questionId);
+    }
     await this.waitForExecSession(session, normalizeExecYieldTime(input.yieldTimeMs));
 
     const result = this.collectExecCommandResult(session, command, cwd, input.maxOutputChars);
@@ -583,6 +589,7 @@ export class HeadlessEngine {
 
     if (!input.terminate) {
       this.assertExperimentAllowsInlineProbe(root, 'write_stdin', [session.cwd]);
+      this.assertInlineProbeContinuationAllowed(root, session);
     }
 
     if (input.terminate) {
@@ -617,7 +624,6 @@ export class HeadlessEngine {
     endLine?: number
   ): Promise<string> {
     const resolvedPath = this.resolveRootedPath(root, filePath);
-    this.assertExperimentAllowsInlineProbe(root, 'read', [resolvedPath]);
     const content = await readFile(resolvedPath, 'utf8');
     const allLines = content.split(/\r?\n/);
     const totalLines = allLines.length;
@@ -646,7 +652,6 @@ export class HeadlessEngine {
   }
 
   private async runGlobAtRoot(root: string, patternText: string): Promise<string[]> {
-    this.assertExperimentAllowsInlineProbe(root, 'glob');
     const matches: string[] = [];
     for await (const entry of glob(patternText, { cwd: root })) {
       matches.push(entry);
@@ -667,7 +672,6 @@ export class HeadlessEngine {
 
   private async runLsAtRoot(root: string, filePath = '.', recursive = false): Promise<string> {
     const targetPath = this.resolveRootedPath(root, filePath);
-    this.assertExperimentAllowsInlineProbe(root, 'ls', [targetPath]);
     const command = recursive ? `ls -laR ${shellQuote(targetPath)}` : `ls -la ${shellQuote(targetPath)}`;
     const result = await execaCommand(command, {
       cwd: root,
@@ -689,10 +693,6 @@ export class HeadlessEngine {
     target: string | string[] = '.'
   ): Promise<string> {
     const targets = await normalizeRgTargets(root, target);
-    const resolvedTargets = targets
-      .filter((entry) => entry !== '.')
-      .map((entry) => this.resolveRootedPath(root, entry));
-    this.assertExperimentAllowsInlineProbe(root, 'rg', resolvedTargets);
     try {
       const result = await execa(
         'rg',
@@ -737,7 +737,12 @@ export class HeadlessEngine {
     }
   }
 
-  private startExecSession(root: string, cwd: string, command: string): ExecSession {
+  private startExecSession(
+    root: string,
+    cwd: string,
+    command: string,
+    probeQuestionIds: string[]
+  ): ExecSession {
     const child = spawn(DEFAULT_COMMAND_SHELL, ['-lc', command], {
       cwd,
       detached: process.platform !== 'win32',
@@ -754,6 +759,7 @@ export class HeadlessEngine {
       command,
       cwd,
       root,
+      probeQuestionIds,
       child,
       pendingStdout: '',
       pendingStderr: '',
@@ -1045,6 +1051,7 @@ export class HeadlessEngine {
     whyItMatters: string;
     kind?: StudyDebtKind;
     affectedPaths?: string[];
+    evidencePaths?: string[];
     recommendedStudy?: string;
   }): Promise<{
     questionId: string;
@@ -1058,6 +1065,7 @@ export class HeadlessEngine {
       whyItMatters: input.whyItMatters,
       kind: input.kind,
       affectedPaths: input.affectedPaths,
+      evidencePaths: input.evidencePaths,
       recommendedStudy: input.recommendedStudy
     });
     this.emitChange();
@@ -1627,7 +1635,12 @@ export class HeadlessEngine {
         return false;
       }
 
-      if (!debt.affectedPaths || debt.affectedPaths.length === 0) {
+      const evidenceScopes = this.getInlineEvidenceScopes(debt, toolName);
+      if (evidenceScopes === null) {
+        return false;
+      }
+
+      if (evidenceScopes.length === 0) {
         return true;
       }
 
@@ -1635,7 +1648,7 @@ export class HeadlessEngine {
         return false;
       }
 
-      return debt.affectedPaths.some((scope) => {
+      return evidenceScopes.some((scope) => {
         const resolvedScope = this.resolveRootedPath(this.options.cwd, scope);
         return resolvedTargets.some(
           (resolvedTarget) =>
@@ -1657,22 +1670,142 @@ export class HeadlessEngine {
             .listActiveExperimentsForStudyDebt(debt.id)
             .map((experiment) => experiment.id)
             .join(', ');
-          const scope =
-            debt.affectedPaths && debt.affectedPaths.length > 0
-              ? debt.affectedPaths.join(', ')
-              : 'all main-workspace evidence';
-          return `${debt.id}: ${debt.summary} [active_experiments=${activeExperiments}; affected_paths=${scope}]`;
+          const evidenceScopes = this.getInlineEvidenceScopes(debt, toolName);
+          const scopeLabel =
+            evidenceScopes === null
+              ? 'none'
+              : evidenceScopes.length > 0
+                ? evidenceScopes.join(', ')
+                : 'all main-workspace evidence';
+          return `${debt.id}: ${debt.summary} [active_experiments=${activeExperiments}; evidence_paths=${scopeLabel}]`;
         }),
         'Use wait_experiment or read_experiment before more inline probing on the same question.'
       ].join('\n')
     );
   }
 
+  private consumeInlineProbeBudget(
+    root: string,
+    toolName: 'exec_command',
+    resolvedTargets: string[] = []
+  ): string[] {
+    if (root !== this.options.cwd) {
+      return [];
+    }
+
+    const matchingDebts = this.findOpenStudyDebtsForEvidencePath(root, resolvedTargets, {
+      requireActiveExperiment: false,
+      toolName
+    });
+    if (matchingDebts.length === 0) {
+      return [];
+    }
+
+    const exhausted = matchingDebts.filter(
+      (debt) => this.options.notebook.getStudyDebtProbeEpisodeCount(debt.id) >= 1
+    );
+    if (exhausted.length > 0) {
+      throw new Error(
+        [
+          `The inline probe budget for ${toolName} is already exhausted on this question.`,
+          ...exhausted.map((debt) => `${debt.id}: ${debt.summary}`),
+          'After one bounded inline probe episode on the same question, either resolve_question, spawn_experiment, or explicitly narrow/override the claim before more inline probing.'
+        ].join('\n')
+      );
+    }
+
+    return matchingDebts.map((debt) => debt.id);
+  }
+
+  private assertInlineProbeContinuationAllowed(root: string, session: ExecSession): void {
+    if (root !== this.options.cwd) {
+      return;
+    }
+
+    if (session.probeQuestionIds.length === 0) {
+      return;
+    }
+
+    const openQuestionIds = new Set(
+      this.options.notebook.listOpenStudyDebts(this.options.sessionId).map((debt) => debt.id)
+    );
+    const missing = session.probeQuestionIds.filter((questionId) => !openQuestionIds.has(questionId));
+    if (missing.length === 0) {
+      return;
+    }
+
+    throw new Error(
+      [
+        'This running inline probe no longer has an open owning question.',
+        `questions: ${missing.join(', ')}`,
+        'Resolve, narrow, or reopen the relevant question before continuing the probe.'
+      ].join('\n')
+    );
+  }
+
+  private findOpenStudyDebtsForEvidencePath(
+    root: string,
+    resolvedTargets: string[],
+    options: { requireActiveExperiment: boolean; toolName: 'exec_command' | 'write_stdin' }
+  ) {
+    const openDebts = this.options.notebook.listOpenStudyDebts(this.options.sessionId);
+    return openDebts.filter((debt) => {
+      if (options.requireActiveExperiment) {
+        const activeExperiments = this.options.notebook.listActiveExperimentsForStudyDebt(debt.id);
+        if (activeExperiments.length === 0) {
+          return false;
+        }
+      }
+
+      const evidenceScopes = this.getInlineEvidenceScopes(debt, options.toolName);
+      if (evidenceScopes === null) {
+        return false;
+      }
+
+      if (evidenceScopes.length === 0) {
+        return true;
+      }
+
+      if (resolvedTargets.length === 0) {
+        return false;
+      }
+
+      return evidenceScopes.some((scope) => {
+        const resolvedScope = this.resolveRootedPath(this.options.cwd, scope);
+        return resolvedTargets.some(
+          (resolvedTarget) =>
+            resolvedTarget === resolvedScope ||
+            resolvedTarget.startsWith(`${resolvedScope}${path.sep}`)
+        );
+      });
+    });
+  }
+
+  private getInlineEvidenceScopes(
+    debt: StudyDebtRecord,
+    toolName: 'exec_command' | 'write_stdin' | 'read' | 'ls' | 'glob' | 'rg'
+  ): string[] | null {
+    const evidencePaths =
+      debt.evidencePaths && debt.evidencePaths.length > 0 ? debt.evidencePaths : null;
+
+    if (toolName === 'read' || toolName === 'ls' || toolName === 'glob' || toolName === 'rg') {
+      return evidencePaths;
+    }
+
+    if (evidencePaths) {
+      return evidencePaths;
+    }
+
+    return debt.affectedPaths;
+  }
+
   async runCompact(
     goal: string,
     completed: string,
     next: string,
-    openRisks?: string
+    openRisks?: string,
+    currentCommitments?: string,
+    importantNonGoals?: string
   ): Promise<{ ok: true; checkpointId: number }> {
     const [gitLog, gitStatus, gitDiffStat] = await Promise.all([
       this.readGitSnapshot(['log', '--oneline', '-5']),
@@ -1682,8 +1815,27 @@ export class HeadlessEngine {
 
     const activeExperimentSummaries = this.options.notebook
       .searchExperimentSummaries(this.options.sessionId)
-      .filter((experiment) => experiment.status === 'running');
+      .filter(
+        (experiment) =>
+          experiment.status === 'running' || experiment.status === 'budget_exhausted'
+      );
     const openStudyDebts = this.options.notebook.listOpenStudyDebts(this.options.sessionId);
+    const invalidatedExperimentSummaries = Array.from(
+      new Map(
+        openStudyDebts
+          .flatMap((debt) => this.options.notebook.listInvalidatedExperimentsForStudyDebt(debt.id))
+          .map((experiment) => [
+            experiment.id,
+            {
+              experimentId: experiment.id,
+              hypothesis: experiment.hypothesis,
+              status: experiment.status,
+              summary: experiment.finalSummary ?? '',
+              discovered: experiment.discovered
+            }
+          ])
+      ).values()
+    );
 
     const tailStartHistoryId = this.options.notebook.getTailStartHistoryId(this.options.sessionId, 12);
     const checkpointBlock = this.buildCheckpointBlock({
@@ -1691,11 +1843,14 @@ export class HeadlessEngine {
       completed,
       next,
       openRisks,
+      currentCommitments,
+      importantNonGoals,
       gitLog,
       gitStatus,
       gitDiffStat,
       lastTestStatus: this.lastTestStatus,
       activeExperimentSummaries,
+      invalidatedExperimentSummaries,
       openStudyDebts
     });
 
@@ -1705,11 +1860,14 @@ export class HeadlessEngine {
       completed,
       next,
       openRisks,
+      currentCommitments,
+      importantNonGoals,
       gitLog,
       gitStatus,
       gitDiffStat,
       lastTestStatus: this.lastTestStatus,
       activeExperimentSummaries,
+      invalidatedExperimentSummaries,
       checkpointBlock,
       tailStartHistoryId
     });
@@ -1754,11 +1912,14 @@ export class HeadlessEngine {
     completed: string;
     next: string;
     openRisks?: string;
+    currentCommitments?: string;
+    importantNonGoals?: string;
     gitLog: string;
     gitStatus: string;
     gitDiffStat: string;
     lastTestStatus: string | null;
     activeExperimentSummaries: ExperimentSearchResult[];
+    invalidatedExperimentSummaries: ExperimentSearchResult[];
     openStudyDebts: Array<{
       id: string;
       kind: string;
@@ -1768,6 +1929,13 @@ export class HeadlessEngine {
     const experimentLines =
       input.activeExperimentSummaries.length > 0
         ? input.activeExperimentSummaries.map(
+            (experiment) =>
+              `- ${experiment.experimentId} | ${experiment.status} | ${experiment.hypothesis}`
+          )
+        : ['- none'];
+    const invalidatedExperimentLines =
+      input.invalidatedExperimentSummaries.length > 0
+        ? input.invalidatedExperimentSummaries.map(
             (experiment) =>
               `- ${experiment.experimentId} | ${experiment.status} | ${experiment.hypothesis}`
           )
@@ -1785,6 +1953,12 @@ export class HeadlessEngine {
       `completed: ${input.completed}`,
       `next: ${input.next}`,
       input.openRisks ? `open_risks: ${input.openRisks}` : 'open_risks: none',
+      input.currentCommitments
+        ? `current_commitments: ${input.currentCommitments}`
+        : 'current_commitments: none',
+      input.importantNonGoals
+        ? `important_non_goals: ${input.importantNonGoals}`
+        : 'important_non_goals: none',
       '',
       'Harness state:',
       'recent_commits:',
@@ -1802,7 +1976,10 @@ export class HeadlessEngine {
       ...studyDebtLines,
       '',
       'active_experiments:',
-      ...experimentLines
+      ...experimentLines,
+      '',
+      'invalidated_experiments:',
+      ...invalidatedExperimentLines
     ].join('\n');
   }
 
@@ -1894,6 +2071,7 @@ function renderSessionExport(input: {
     summary: string;
     whyItMatters: string;
     affectedPaths: string[] | null;
+    evidencePaths: string[] | null;
     recommendedStudy: string | null;
     resolution: string | null;
     resolutionNote: string | null;
@@ -1930,6 +2108,9 @@ function renderSessionExport(input: {
               `  - why: ${debt.whyItMatters}`,
               debt.affectedPaths && debt.affectedPaths.length > 0
                 ? `  - affectedPaths: ${debt.affectedPaths.join(', ')}`
+                : null,
+              debt.evidencePaths && debt.evidencePaths.length > 0
+                ? `  - evidencePaths: ${debt.evidencePaths.join(', ')}`
                 : null,
               debt.recommendedStudy ? `  - recommendedStudy: ${debt.recommendedStudy}` : null,
               debt.resolution ? `  - resolution: ${debt.resolution}` : null,

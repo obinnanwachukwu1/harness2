@@ -22,6 +22,7 @@ const runtimeSchema = z.object({
   web_search_mode: z.enum(['disabled', 'cached', 'live', 'fixed']).optional().default('fixed'),
   max_steps: z.number().int().positive().optional(),
   parallelism: z.number().int().positive().optional(),
+  repeat_count: z.number().int().positive().optional(),
   default_experiment_budget: z.number().int().positive().optional()
 });
 
@@ -67,7 +68,7 @@ const caseSchema = z.object({
   prompt: z.string().trim().min(1),
   notes: z.string().optional(),
   question_expected: z.boolean().optional(),
-  experiment_expected: z.boolean().optional(),
+  experiment_expected: z.union([z.boolean(), z.enum(['yes', 'no', 'optional'])]).optional(),
   web_search_expected: z.enum(['yes', 'no', 'optional']).optional(),
   runtime_override: runtimeOverrideSchema.optional(),
   env_override: caseEnvOverrideSchema,
@@ -109,6 +110,7 @@ export async function parseEvalManifest(manifestPath: string): Promise<ParsedEva
     thinking: parsed.runtime.thinking,
     webSearchMode: parsed.runtime.web_search_mode,
     parallelism: parsed.runtime.parallelism,
+    repeatCount: parsed.runtime.repeat_count,
     defaultExperimentBudget: parsed.runtime.default_experiment_budget
   };
   const clarification: EvalClarificationPolicy | undefined = parsed.clarification
@@ -136,7 +138,7 @@ export async function parseEvalManifest(manifestPath: string): Promise<ParsedEva
     prompt: entry.prompt,
     notes: entry.notes,
     questionExpected: entry.question_expected,
-    experimentExpected: entry.experiment_expected,
+    experimentExpected: normalizeExperimentExpectation(entry.experiment_expected),
     webSearchExpected: entry.web_search_expected,
     runtimeOverride: entry.runtime_override
       ? normalizeRuntimeOverride(entry.runtime_override)
@@ -185,8 +187,21 @@ function normalizeRuntimeOverride(
     thinking: input.thinking,
     webSearchMode: input.web_search_mode,
     parallelism: input.parallelism,
+    repeatCount: input.repeat_count,
     defaultExperimentBudget: input.default_experiment_budget
   };
+}
+
+function normalizeExperimentExpectation(
+  value: boolean | 'yes' | 'no' | 'optional' | undefined
+): 'yes' | 'no' | 'optional' | undefined {
+  if (value === undefined) {
+    return undefined;
+  }
+  if (typeof value === 'boolean') {
+    return value ? 'yes' : 'no';
+  }
+  return value;
 }
 
 function normalizeModelSelection(model: string | undefined): string | undefined {

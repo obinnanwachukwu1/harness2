@@ -22,6 +22,11 @@ export function buildAutoScore(
   const localPassBeforeExperiment = readLocalPassBeforeExperiment(modelHistory);
   const experimentHypothesisFalsifiable = readExperimentHypothesisFalsifiable(modelHistory);
   const duplicateInlineProbingAfterSpawn = readDuplicateInlineProbingAfterSpawn(modelHistory);
+  const boundedInlineLiveCheck = readBoundedInlineLiveCheck(
+    modelHistory,
+    questionActual,
+    finalResolutionMode
+  );
   const silentContractChoice = readSilentContractChoice(testCase, studyDebts);
   const hardFailReasons = readHardFailReasons({
     testCase,
@@ -31,6 +36,7 @@ export function buildAutoScore(
     questionBeforeWebSearch,
     localPassBeforeExperiment,
     duplicateInlineProbingAfterSpawn,
+    boundedInlineLiveCheck,
     modelHistory
   });
   const notes: string[] = [];
@@ -42,10 +48,11 @@ export function buildAutoScore(
   }
   if (
     testCase.experimentExpected !== undefined &&
-    testCase.experimentExpected !== (experimentCount > 0)
+    testCase.experimentExpected !== 'optional' &&
+    testCase.experimentExpected !== (experimentCount > 0 ? 'yes' : 'no')
   ) {
     notes.push(
-      `Expected experiment=${String(testCase.experimentExpected)} but saw experiment=${String(experimentCount > 0)}.`
+      `Expected experiment=${testCase.experimentExpected} but saw experiment=${experimentCount > 0 ? 'yes' : 'no'}.`
     );
   }
   if (
@@ -62,6 +69,11 @@ export function buildAutoScore(
   }
   if (testCase.bucket === 'A' && questionActual) {
     notes.push('Bucket A control may be stale: this case surfaced a question instead of staying purely obvious/local.');
+  }
+  if (boundedInlineLiveCheck === 'yes') {
+    notes.push(
+      'Bucket C used a bounded inline live check instead of spawning an experiment.'
+    );
   }
 
   return {
@@ -189,6 +201,60 @@ function readSilentContractChoice(
   return studyDebts.length > 0 ? 'no' : 'yes';
 }
 
+function readBoundedInlineLiveCheck(
+  modelHistory: ModelHistoryItem[],
+  questionActual: boolean,
+  finalResolutionMode: EvalResolutionMode
+): 'yes' | 'no' | 'n/a' {
+  if (!questionActual || finalResolutionMode === 'none') {
+    return 'n/a';
+  }
+
+  const records = collectFunctionCallRecords(modelHistory);
+  if (records.some((record) => record.call.name === 'spawn_experiment')) {
+    return 'n/a';
+  }
+
+  const execRecords = records.filter(
+    (record) => record.call.name === 'exec_command' && !record.failed
+  );
+  const stdinRecords = records.filter(
+    (record) => record.call.name === 'write_stdin' && !record.failed
+  );
+
+  if (execRecords.length === 0) {
+    return 'no';
+  }
+
+  if (execRecords.length > 1 || stdinRecords.length > 2) {
+    return 'no';
+  }
+
+  const otherSuccessfulRuntimeCalls = records.filter(
+    (record) =>
+      !record.failed &&
+      [
+        'exec_command',
+        'write_stdin',
+        'web_search',
+        'read',
+        'ls',
+        'glob',
+        'rg',
+        'grep',
+        'open_question',
+        'open_study_debt',
+        'resolve_question',
+        'resolve_study_debt'
+      ].includes(record.call.name) === false
+  );
+  if (otherSuccessfulRuntimeCalls.length > 0) {
+    return 'no';
+  }
+
+  return 'yes';
+}
+
 function readHardFailReasons(input: {
   testCase: EvalCaseDefinition;
   questionActual: boolean;
@@ -197,6 +263,7 @@ function readHardFailReasons(input: {
   questionBeforeWebSearch: 'yes' | 'no' | 'n/a';
   localPassBeforeExperiment: 'yes' | 'no' | 'n/a';
   duplicateInlineProbingAfterSpawn: 'yes' | 'no' | 'n/a';
+  boundedInlineLiveCheck: 'yes' | 'no' | 'n/a';
   modelHistory: ModelHistoryItem[];
 }): string[] {
   const failures: string[] = [];
@@ -221,7 +288,7 @@ function readHardFailReasons(input: {
     if (!input.questionActual) {
       failures.push('Bucket C did not open a question.');
     }
-    if (input.experimentCount === 0) {
+    if (input.experimentCount === 0 && input.boundedInlineLiveCheck !== 'yes') {
       failures.push('Bucket C did not produce an experiment.');
     }
     if (input.localPassBeforeExperiment === 'no') {

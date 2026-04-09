@@ -16,6 +16,11 @@ The implementation now lives under `src/evals/`, and the committed suite/fixture
 Files:
 
 - `../wide-suite.toml`: committed 15-session suite
+- `../stability-pack.toml`: committed 6-case repeatability pack with 5 fresh runs by default
 - `../fixtures/`: committed reusable fixture repos
 - `manifest-schema.md`: committed TOML suite format, fixture/env rules, and case structure
 - `type-model.md`: proposed TypeScript interfaces and implementation module boundaries
+
+Operational notes:
+
+- `h2 eval pack --latest-batch` packages the newest repeated-run batch into one review zip.

@@ -258,7 +258,7 @@ function printDoctor(report: {
 }
 
 function printUsage(): void {
-  console.log('Usage: h2 [resume [sessionId]] [opentui] | h2 auth <login|status|access|logout> | h2 doctor | h2 paths | h2 eval run <manifest> [--case <id>] [--parallel <n>] | h2 eval score <run-dir> | h2 eval pack [run-id-or-suffix]');
+  console.log('Usage: h2 [resume [sessionId]] [opentui] | h2 auth <login|status|access|logout> | h2 doctor | h2 paths | h2 eval run <manifest> [--case <id>] [--parallel <n>] [--repeat <n>] | h2 eval score <run-dir> | h2 eval pack [run-id-or-suffix] [--latest-batch]');
   console.log('');
   console.log('Examples:');
   console.log('h2');
@@ -268,14 +268,16 @@ function printUsage(): void {
   console.log('h2 auth login');
   console.log('h2 doctor');
   console.log('h2 eval run evals/wide-suite.toml --parallel 4');
+  console.log('h2 eval run evals/stability-pack.toml --repeat 5');
   console.log('h2 eval score ~/.h2/evals/<run-id>');
   console.log('h2 eval pack 0e5484');
+  console.log('h2 eval pack --latest-batch');
 }
 
 async function runEvalCommand(args: string[]): Promise<void> {
   const action = args[0];
   if (action !== 'run' && action !== 'score' && action !== 'pack') {
-    throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>] [--parallel <n>] | h2 eval score <run-dir> | h2 eval pack [run-id-or-suffix]');
+    throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>] [--parallel <n>] [--repeat <n>] | h2 eval score <run-dir> | h2 eval pack [run-id-or-suffix] [--latest-batch]');
   }
 
   if (action === 'score') {
@@ -295,11 +297,29 @@ async function runEvalCommand(args: string[]): Promise<void> {
   }
 
   if (action === 'pack') {
-    const selector = args[1];
+    let selector: string | undefined;
+    let latestBatch = false;
+    for (let index = 1; index < args.length; index += 1) {
+      const token = args[index];
+      if (token === '--latest-batch') {
+        latestBatch = true;
+        continue;
+      }
+      if (!selector) {
+        selector = token;
+        continue;
+      }
+      throw new CliUsageError('Usage: h2 eval pack [run-id-or-suffix] [--latest-batch]');
+    }
+    if (latestBatch && selector) {
+      throw new CliUsageError('Usage: h2 eval pack [run-id-or-suffix] [--latest-batch]');
+    }
     const { createEvalReviewPack } = await import('./evals/pack-run.js');
-    const result = await createEvalReviewPack({ selector });
-    console.log(`packed run: ${result.runId}`);
-    console.log(`source: ${result.runDir}`);
+    const result = await createEvalReviewPack({ selector, latestBatch });
+    console.log(result.kind === 'batch' ? `packed batch: ${result.batchId}` : `packed run: ${result.runId}`);
+    for (const sourcePath of result.sourcePaths) {
+      console.log(`source: ${sourcePath}`);
+    }
     console.log(`zip: ${result.zipPath}`);
     console.log(`files: ${result.includedFiles.length}`);
     return;
@@ -307,17 +327,18 @@ async function runEvalCommand(args: string[]): Promise<void> {
 
   const manifestPath = args[1];
   if (!manifestPath) {
-    throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>] [--parallel <n>]');
+    throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>] [--parallel <n>] [--repeat <n>]');
   }
 
   const selectedCaseIds: string[] = [];
   let parallelism: number | undefined;
+  let repeatCount: number | undefined;
   for (let index = 2; index < args.length; index += 1) {
     const token = args[index];
     if (token === '--case') {
       const caseId = args[index + 1];
       if (!caseId) {
-        throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>] [--parallel <n>]');
+        throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>] [--parallel <n>] [--repeat <n>]');
       }
       selectedCaseIds.push(caseId);
       index += 1;
@@ -326,7 +347,7 @@ async function runEvalCommand(args: string[]): Promise<void> {
     if (token === '--parallel') {
       const value = args[index + 1];
       if (!value) {
-        throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>] [--parallel <n>]');
+        throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>] [--parallel <n>] [--repeat <n>]');
       }
       const parsed = Number.parseInt(value, 10);
       if (!Number.isFinite(parsed) || parsed < 1) {
@@ -336,44 +357,85 @@ async function runEvalCommand(args: string[]): Promise<void> {
       index += 1;
       continue;
     }
+    if (token === '--repeat') {
+      const value = args[index + 1];
+      if (!value) {
+        throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>] [--parallel <n>] [--repeat <n>]');
+      }
+      const parsed = Number.parseInt(value, 10);
+      if (!Number.isFinite(parsed) || parsed < 1) {
+        throw new CliUsageError(`Invalid repeat count: ${value}`);
+      }
+      repeatCount = parsed;
+      index += 1;
+      continue;
+    }
     throw new CliUsageError(`Unknown eval argument: ${token}`);
   }
 
+  const { parseEvalManifest } = await import('./evals/manifest-parse.js');
+  const { createEvalRunBatchRecord } = await import('./evals/repeat-batches.js');
   const { runEvalSuite } = await import('./evals/suite-runner.js');
-  const result = await runEvalSuite({
-    manifestPath,
-    selectedCaseIds: selectedCaseIds.length > 0 ? selectedCaseIds : undefined,
-    parallelism,
-    onProgress: (event) => {
-      if (event.type === 'suite_started') {
+  const parsedManifest = await parseEvalManifest(manifestPath);
+  const totalRepeats = repeatCount ?? parsedManifest.manifest.runtime.repeatCount ?? 1;
+  const runResults = [];
+  for (let repeatIndex = 0; repeatIndex < totalRepeats; repeatIndex += 1) {
+    if (totalRepeats > 1) {
+      console.log(`repeat ${repeatIndex + 1}/${totalRepeats}`);
+    }
+    const result = await runEvalSuite({
+      manifestPath,
+      selectedCaseIds: selectedCaseIds.length > 0 ? selectedCaseIds : undefined,
+      parallelism,
+      onProgress: (event) => {
+        if (event.type === 'suite_started') {
+          console.log(
+            `running suite ${event.suiteId}  cases=${event.totalCases}  results=${event.runRoot}`
+          );
+          return;
+        }
+        if (event.type === 'case_started') {
+          console.log(
+            `[${event.index}/${event.totalCases}] ${event.caseId}  fixture=${event.fixtureId}  profile=${event.profile}`
+          );
+          return;
+        }
         console.log(
-          `running suite ${event.suiteId}  cases=${event.totalCases}  results=${event.runRoot}`
+          `  done ${event.caseId}  overall=${event.overall}  question=${
+            event.questionActual ? 'yes' : 'no'
+          }  experiments=${event.experimentActual}`
         );
-        return;
       }
-      if (event.type === 'case_started') {
-        console.log(
-          `[${event.index}/${event.totalCases}] ${event.caseId}  fixture=${event.fixtureId}  profile=${event.profile}`
-        );
-        return;
-      }
+    });
+    runResults.push(result);
+
+    console.log('');
+    console.log(`eval run: ${result.runId}`);
+    console.log(`suite: ${result.suiteId}`);
+    console.log(`results: ${path.dirname(result.lockedManifestPath)}`);
+    console.log('');
+    for (const caseResult of result.cases) {
       console.log(
-        `  done ${event.caseId}  overall=${event.overall}  question=${
-          event.questionActual ? 'yes' : 'no'
-        }  experiments=${event.experimentActual}`
+        `${caseResult.caseId}  session=${caseResult.sessionId}  question=${caseResult.autoScore.questionActual ? 'yes' : 'no'}  experiments=${caseResult.autoScore.experimentActual}`
       );
     }
-  });
+    if (repeatIndex < totalRepeats - 1) {
+      console.log('');
+    }
+  }
 
-  console.log('');
-  console.log(`eval run: ${result.runId}`);
-  console.log(`suite: ${result.suiteId}`);
-  console.log(`results: ${path.dirname(result.lockedManifestPath)}`);
-  console.log('');
-  for (const caseResult of result.cases) {
-    console.log(
-      `${caseResult.caseId}  session=${caseResult.sessionId}  question=${caseResult.autoScore.questionActual ? 'yes' : 'no'}  experiments=${caseResult.autoScore.experimentActual}`
-    );
+  if (runResults.length > 1) {
+    const batch = await createEvalRunBatchRecord({
+      suiteId: runResults[0]!.suiteId,
+      manifestPath,
+      runIds: runResults.map((result) => result.runId)
+    });
+    console.log('');
+    console.log(`repeat batch: ${batch.batchId}`);
+    console.log('repeat runs:');
+    for (const result of runResults) {
+      console.log(`${result.runId}  ${path.dirname(result.lockedManifestPath)}`);
+    }
   }
 }
 

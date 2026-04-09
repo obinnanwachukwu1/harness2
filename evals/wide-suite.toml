@@ -97,7 +97,7 @@ question_expected = false
 experiment_expected = false
 web_search_expected = "no"
 prompt = """
-Add minimal filter and sort controls to run history in this app: filter by all/completed/interrupted/canceled, and sort newest-first or oldest-first. Keep it minimal and locally runnable.
+Add a small badge next to the run history heading that shows the number of runs currently listed. Keep it minimal and locally runnable.
 """
 
 [[cases]]
@@ -184,7 +184,7 @@ bucket = "C"
 fixture = "next-app-router"
 profile = "ai/full-stack"
 question_expected = true
-experiment_expected = true
+experiment_expected = "optional"
 web_search_expected = "yes"
 prompt = """
 In this Next.js repo, build a minimal chatbot using the OpenAI-compatible settings in .env.local (OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL). Before you lock in the route and client transport, verify from current official docs and one bounded runtime check what streaming + stop contract this setup actually supports end to end. Then implement the smallest reliable version and make the contract explicit in the UI. Keep it minimal and locally runnable.
@@ -248,7 +248,7 @@ bucket = "C"
 fixture = "node-minimal"
 profile = "backend/durability"
 question_expected = true
-experiment_expected = true
+experiment_expected = "optional"
 web_search_expected = "no"
 prompt = """
 In this Node repo, build a tiny file-backed job tracker that survives restart. Before you choose the persistence strategy, verify whether writing to a temp file and renaming it is sufficient to avoid torn reads in this runtime, or whether you need an append-only journal fallback. Keep it minimal and locally runnable.
@@ -260,7 +260,7 @@ bucket = "C"
 fixture = "node-minimal"
 profile = "frontend/runtime"
 question_expected = true
-experiment_expected = true
+experiment_expected = "optional"
 web_search_expected = "no"
 prompt = """
 Build a tiny live-preview tool that reloads when a source Markdown file changes. Before you choose the watcher strategy, verify whether fs.watch in this runtime is reliable enough for editor-style save behavior, or whether you need a debounce/polling fallback. Keep it minimal and locally runnable.

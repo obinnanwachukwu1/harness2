@@ -1,8 +1,10 @@
 #!/usr/bin/env node
 import readline from 'node:readline';
+import { once } from 'node:events';
 
 import { HeadlessEngine } from '../engine/headless-engine.js';
 import { formatUnknownError } from '../lib/utils.js';
+import { captureHeapSnapshot } from './heap-snapshot.js';
 import type { OpenTuiBridgeCommand, OpenTuiBridgeEvent } from './protocol.js';
 import { buildOpenTuiState } from './render-state.js';
 
@@ -14,8 +16,51 @@ async function main(): Promise<void> {
   });
 
   let closed = false;
+  let stateFlushScheduled = false;
+  let stateFlushInFlight = false;
+  let stateDirty = false;
   const send = (event: OpenTuiBridgeEvent): void => {
     process.stdout.write(`${JSON.stringify(event)}\n`);
+  };
+  const scheduleStateFlush = (): void => {
+    if (closed || stateFlushScheduled || stateFlushInFlight) {
+      return;
+    }
+
+    stateFlushScheduled = true;
+    queueMicrotask(() => {
+      stateFlushScheduled = false;
+      void flushState();
+    });
+  };
+  const flushState = async (): Promise<void> => {
+    if (closed || stateFlushInFlight || !stateDirty) {
+      return;
+    }
+
+    stateFlushInFlight = true;
+    try {
+      while (stateDirty && !closed) {
+        stateDirty = false;
+        const payload = JSON.stringify({
+          type: 'state',
+          state: buildOpenTuiState(engine.snapshot)
+        } satisfies OpenTuiBridgeEvent);
+        const writable = process.stdout.write(`${payload}\n`);
+        if (!writable) {
+          await once(process.stdout, 'drain');
+        }
+      }
+    } finally {
+      stateFlushInFlight = false;
+      if (stateDirty && !closed) {
+        scheduleStateFlush();
+      }
+    }
+  };
+  const requestStateFlush = (): void => {
+    stateDirty = true;
+    scheduleStateFlush();
   };
 
   const cleanup = async (): Promise<void> => {
@@ -28,12 +73,33 @@ async function main(): Promise<void> {
     rl.close();
     await engine.dispose();
   };
+  const emitHeapSnapshot = async (trigger: 'ui' | 'signal'): Promise<void> => {
+    try {
+      const snapshot = await captureHeapSnapshot({
+        cwd: engine.snapshot.session.cwd,
+        processType: 'bridge',
+        trigger
+      });
+      send({
+        type: 'heapSnapshot',
+        processType: snapshot.processType,
+        trigger: snapshot.trigger,
+        path: snapshot.path,
+        metaPath: snapshot.metaPath,
+        pid: snapshot.pid,
+        rss: snapshot.rss,
+        heapUsed: snapshot.heapUsed
+      });
+    } catch (error) {
+      send({
+        type: 'error',
+        message: `Bridge heap snapshot failed: ${formatUnknownError(error)}`
+      });
+    }
+  };
 
   const unsubscribe = engine.subscribe(() => {
-    send({
-      type: 'state',
-      state: buildOpenTuiState(engine.snapshot)
-    });
+    requestStateFlush();
   });
 
   send({
@@ -41,10 +107,7 @@ async function main(): Promise<void> {
     sessionId: engine.snapshot.session.id,
     cwd: engine.snapshot.session.cwd
   });
-  send({
-    type: 'state',
-    state: buildOpenTuiState(engine.snapshot)
-  });
+  requestStateFlush();
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -54,6 +117,9 @@ async function main(): Promise<void> {
   process.on('SIGINT', async () => {
     await cleanup();
     process.exit(0);
+  });
+  process.on('SIGUSR2', () => {
+    void emitHeapSnapshot('signal');
   });
 
   for await (const line of rl) {
@@ -88,6 +154,9 @@ async function main(): Promise<void> {
           break;
         case 'setThinking':
           engine.setThinkingEnabled(command.enabled);
+          break;
+        case 'captureHeap':
+          await emitHeapSnapshot(command.trigger ?? 'ui');
           break;
         case 'shutdown':
           await cleanup();

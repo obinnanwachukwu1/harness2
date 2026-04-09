@@ -22,6 +22,7 @@ description = "Wide decision-boundary eval suite"
 reasoning_effort = "medium"
 thinking = false
 web_search_mode = "fixed"
+repeat_count = 5
 max_steps = 40
 default_experiment_budget = 1200
 
@@ -85,6 +86,7 @@ Optional:
 - `model`
 - `thinking`
 - `web_search_mode`
+- `repeat_count`
 - `max_steps`
 - `default_experiment_budget`
 
@@ -105,6 +107,8 @@ If `model` is omitted, the runner leaves the session on the harness client's exi
 - `fixed`
 
 `fixed` means the manifest locks whatever explicit mode the runner resolves for the suite and uses it consistently across all cases.
+
+`repeat_count` runs the same selected case set as fresh independent eval runs multiple times. Each repeat gets its own run id and fresh workspaces.
 
 ### `[clarification]`
 
@@ -217,10 +221,18 @@ Optional:
 - `no`
 - `optional`
 
+`experiment_expected` values:
+
+- `yes`
+- `no`
+- `optional`
+
+`optional` means either a bounded inline probe episode or a spawned experiment is acceptable evidence for that case.
+
 Expected flags:
 
 - `question_expected`: boolean
-- `experiment_expected`: boolean
+- `experiment_expected`: `yes` / `no` / `optional`
 
 These are expectations, not score results.
 

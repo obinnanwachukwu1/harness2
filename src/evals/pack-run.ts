@@ -5,6 +5,7 @@ import { access, mkdir, readdir, rm } from 'node:fs/promises';
 import { execa } from 'execa';
 
 import { getGlobalH2Dir } from '../state-paths.js';
+import { readLatestEvalRunBatchRecord } from './repeat-batches.js';
 
 const TOP_LEVEL_REVIEW_FILES = [
   'manifest.lock.json',
@@ -27,21 +28,50 @@ const CASE_REVIEW_FILES = [
 ] as const;
 
 export interface EvalReviewPackResult {
-  runId: string;
-  runDir: string;
+  kind: 'run' | 'batch';
+  runId?: string;
+  batchId?: string;
+  runIds: string[];
+  sourcePaths: string[];
   zipPath: string;
   includedFiles: string[];
 }
 
 export async function createEvalReviewPack(input: {
   selector?: string;
+  latestBatch?: boolean;
   outputDir?: string;
 } = {}): Promise<EvalReviewPackResult> {
-  const runDir = await resolveEvalRunDir(input.selector);
-  const runId = path.basename(runDir);
   const outputDir = input.outputDir ?? path.join(os.homedir(), 'Desktop');
   await mkdir(outputDir, { recursive: true });
+  if (input.latestBatch) {
+    const batch = await readLatestEvalRunBatchRecord();
+    const evalRoot = path.join(getGlobalH2Dir(), 'evals');
+    const runDirs = batch.runIds.map((runId) => path.join(evalRoot, runId));
+    const includedFiles = await collectBatchReviewPackFiles(batch.batchId, runDirs);
+    if (includedFiles.length === 0) {
+      throw new Error(`No review-pack files were found for batch ${batch.batchId}.`);
+    }
 
+    const zipPath = path.join(outputDir, `${batch.batchId}-review-pack.zip`);
+    await rm(zipPath, { force: true });
+    await execa('zip', ['-q', '-@', zipPath], {
+      cwd: evalRoot,
+      input: `${includedFiles.join('\n')}\n`
+    });
+
+    return {
+      kind: 'batch',
+      batchId: batch.batchId,
+      runIds: [...batch.runIds],
+      sourcePaths: runDirs,
+      zipPath,
+      includedFiles
+    };
+  }
+
+  const runDir = await resolveEvalRunDir(input.selector);
+  const runId = path.basename(runDir);
   const includedFiles = await collectReviewPackFiles(runDir);
   if (includedFiles.length === 0) {
     throw new Error(`No review-pack files were found in ${runDir}.`);
@@ -55,8 +85,10 @@ export async function createEvalReviewPack(input: {
   });
 
   return {
+    kind: 'run',
     runId,
-    runDir,
+    runIds: [runId],
+    sourcePaths: [runDir],
     zipPath,
     includedFiles
   };
@@ -128,6 +160,28 @@ async function collectReviewPackFiles(runDir: string): Promise<string[]> {
       if (await pathExists(path.join(runDir, relativePath))) {
         included.add(relativePath);
       }
+    }
+  }
+
+  return [...included].sort();
+}
+
+async function collectBatchReviewPackFiles(
+  batchId: string,
+  runDirs: string[]
+): Promise<string[]> {
+  const evalRoot = path.join(getGlobalH2Dir(), 'evals');
+  const included = new Set<string>();
+  const batchRecordPath = path.join('batches', `${batchId}.json`);
+  if (await pathExists(path.join(evalRoot, batchRecordPath))) {
+    included.add(batchRecordPath);
+  }
+
+  for (const runDir of runDirs) {
+    const runId = path.basename(runDir);
+    const runFiles = await collectReviewPackFiles(runDir);
+    for (const relativePath of runFiles) {
+      included.add(path.join(runId, relativePath));
     }
   }
 
