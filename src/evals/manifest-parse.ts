@@ -16,10 +16,12 @@ import type {
 } from './manifest-types.js';
 
 const runtimeSchema = z.object({
+  mode: z.enum(['study', 'plan', 'direct']).optional().default('study'),
   model: z.string().trim().min(1).optional(),
   reasoning_effort: z.enum(['off', 'low', 'medium', 'high']),
   thinking: z.boolean().optional().default(false),
   web_search_mode: z.enum(['disabled', 'cached', 'live', 'fixed']).optional().default('fixed'),
+  context_window_tokens: z.number().int().positive().optional(),
   max_steps: z.number().int().positive().optional(),
   parallelism: z.number().int().positive().optional(),
   repeat_count: z.number().int().positive().optional(),
@@ -105,10 +107,12 @@ export async function parseEvalManifest(manifestPath: string): Promise<ParsedEva
     description: parsed.suite.description
   };
   const runtime: EvalRuntimeConfig = {
+    mode: parsed.runtime.mode,
     model: normalizeModelSelection(parsed.runtime.model),
     reasoningEffort: parsed.runtime.reasoning_effort,
     thinking: parsed.runtime.thinking,
     webSearchMode: parsed.runtime.web_search_mode,
+    contextWindowTokens: parsed.runtime.context_window_tokens,
     parallelism: parsed.runtime.parallelism,
     repeatCount: parsed.runtime.repeat_count,
     defaultExperimentBudget: parsed.runtime.default_experiment_budget
@@ -172,6 +176,9 @@ function resolveManifestPath(manifestDir: string, targetPath: string): string {
   if (path.isAbsolute(targetPath)) {
     return targetPath;
   }
+  if (/^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//.test(targetPath)) {
+    return targetPath;
+  }
   if (targetPath.startsWith('~/')) {
     return targetPath;
   }
@@ -182,10 +189,12 @@ function normalizeRuntimeOverride(
   input: z.infer<typeof runtimeOverrideSchema>
 ): Partial<EvalRuntimeConfig> {
   return {
+    mode: input.mode,
     model: normalizeModelSelection(input.model),
     reasoningEffort: input.reasoning_effort,
     thinking: input.thinking,
     webSearchMode: input.web_search_mode,
+    contextWindowTokens: input.context_window_tokens,
     parallelism: input.parallelism,
     repeatCount: input.repeat_count,
     defaultExperimentBudget: input.default_experiment_budget

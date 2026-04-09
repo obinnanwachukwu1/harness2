@@ -4,7 +4,12 @@ import path from 'node:path';
 import test from 'node:test';
 
 import { OpenAICodexAuth } from '../src/auth/openai-codex.js';
-import { CodexModelClient, EXPERIMENT_TOOL_DEFINITIONS } from '../src/model/codex-client.js';
+import {
+  CodexModelClient,
+  DIRECT_TOOL_DEFINITIONS,
+  EXPERIMENT_TOOL_DEFINITIONS
+} from '../src/model/codex-client.js';
+import { DIRECT_AGENT_PROMPT } from '../src/model/codex-prompt.js';
 import { Notebook } from '../src/storage/notebook.js';
 import type { AgentTools, TranscriptRole } from '../src/types.js';
 import { cleanupDir, createTempDir, createUnsignedJwt } from '../test-support/helpers.js';
@@ -277,6 +282,185 @@ test('CodexModelClient performs tool round-trips and persists the latest respons
   assert.match(emitted[0]?.text ?? '', /^@@tool\tread\tRead\(README\.md\)/);
   assert.equal(emitted[1]?.role, 'assistant');
   assert.equal(emitted[1]?.text, 'Done reading the file.');
+});
+
+test('CodexModelClient auto-compacts direct mode with a hidden checkpoint before the model turn', async (t) => {
+  const priorContextWindow = process.env.H2_CONTEXT_WINDOW_TOKENS;
+  process.env.H2_CONTEXT_WINDOW_TOKENS = '12000';
+  t.after(() => {
+    if (priorContextWindow === undefined) {
+      delete process.env.H2_CONTEXT_WINDOW_TOKENS;
+    } else {
+      process.env.H2_CONTEXT_WINDOW_TOKENS = priorContextWindow;
+    }
+  });
+
+  const tempDir = await createTempDir('h2-model-hidden-compact-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-compact', tempDir);
+  notebook.upsertModelSession({
+    sessionId: 'session-compact',
+    provider: 'openai-codex',
+    model: 'gpt-5.4',
+    reasoningEffort: 'medium',
+    previousResponseId: null,
+    updatedAt: new Date(1_700_000_000_000).toISOString(),
+    agentMode: 'direct',
+    planModePhase: null
+  });
+  notebook.appendModelHistoryItem('session-compact', {
+    type: 'message',
+    role: 'user',
+    content: 'old context '.repeat(2000)
+  });
+  notebook.appendModelHistoryItem('session-compact', {
+    type: 'message',
+    role: 'assistant',
+    content: 'implementation details '.repeat(600)
+  });
+
+  const now = 1_700_000_000_000;
+  notebook.upsertOpenAICodexAuth({
+    provider: 'openai-codex',
+    type: 'oauth',
+    accessToken: createUnsignedJwt({
+      exp: Math.floor((now + 3600_000) / 1000)
+    }),
+    refreshToken: 'refresh-token',
+    idToken: createUnsignedJwt({
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: 'acct_123'
+      }
+    }),
+    accountId: 'acct_123',
+    expiresAt: now + 3600_000,
+    createdAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString()
+  });
+
+  const requests: Array<{ body: Record<string, unknown> }> = [];
+  const auth = new OpenAICodexAuth(notebook, { now: () => now });
+  const client = new CodexModelClient(notebook, auth, {
+    fetchImpl: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      requests.push({ body });
+
+      if (body.model === 'gpt-5.4-mini') {
+        const summary = {
+          mode: 'direct',
+          task: {
+            goal: 'Continue the direct-mode task after hidden compaction.',
+            constraints: ['keep the change minimal'],
+            non_goals: ['no feature expansion']
+          },
+          state: {
+            status: 'in_progress',
+            completed: ['Inspected the existing code and identified the touched area.'],
+            current_focus: 'Finish the requested direct-mode update.',
+            next: ['Apply the remaining edit.', 'Run one focused validation check.'],
+            blockers: []
+          },
+          durable_decisions: [
+            {
+              decision: 'Keep the implementation local to the existing file.',
+              why: 'The saved history already narrowed the scope.'
+            }
+          ],
+          implementation_context: {
+            changed_files: ['src/server.js'],
+            relevant_paths: ['src/server.js'],
+            artifacts: []
+          },
+          validation: {
+            last_test_status: null,
+            passed_checks: [],
+            open_failures: []
+          },
+          plan_mode_state: null,
+          resume_hints: ['Use the checkpoint block plus raw tail to continue.']
+        };
+
+        return createResponsesStream([
+          responseCreated('resp_compact', 'gpt-5.4-mini'),
+          {
+            type: 'response.output_text.delta',
+            item_id: 'msg_compact',
+            delta: JSON.stringify(summary)
+          },
+          responseCompleted('resp_compact', 'gpt-5.4-mini')
+        ]);
+      }
+
+      return createResponsesStream([
+        responseCreated('resp_final'),
+        {
+          type: 'response.output_text.delta',
+          item_id: 'msg_final',
+          delta: 'Done after hidden compaction.'
+        },
+        responseCompleted('resp_final')
+      ]);
+    }
+  });
+
+  const tools: AgentTools = {
+    execCommand: async () => '',
+    writeStdin: async () => '',
+    read: async () => '',
+    write: async () => '',
+    edit: async () => '',
+    glob: async () => [],
+    grep: async () => '',
+    spawnExperiment: async () => {
+      throw new Error('not used');
+    },
+    readExperiment: async () => {
+      throw new Error('not used');
+    },
+    authLogin: async () => '',
+    authStatus: async () => '',
+    authLogout: async () => '',
+    getModelSettings: async () => '',
+    setModel: async () => '',
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
+  };
+
+  const emitted: Array<{ role: TranscriptRole; text: string }> = [];
+  await client.runTurn(
+    'session-compact',
+    'Finish the direct update',
+    tools,
+    async (role, text) => {
+      emitted.push({ role, text });
+    },
+    undefined,
+    undefined,
+    false,
+    undefined,
+    DIRECT_TOOL_DEFINITIONS,
+    DIRECT_AGENT_PROMPT
+  );
+
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0]?.body.model, 'gpt-5.4-mini');
+  assert.equal(requests[1]?.body.model, 'gpt-5.4');
+  const firstInput = (requests[1]?.body.input as Array<Record<string, unknown>>)[0] as
+    | { role?: string; content?: unknown }
+    | undefined;
+  assert.equal(firstInput?.role, 'developer');
+  assert.match(String(firstInput?.content ?? ''), /Hidden continuation summary/);
+  assert.equal(notebook.getLatestSessionCheckpoint('session-compact')?.checkpointKind, 'plan_direct');
+  assert.ok(
+    (notebook.getLatestSessionCheckpoint('session-compact')?.checkpointSummary?.task.goal ?? '').includes(
+      'Continue the direct-mode task'
+    )
+  );
+  assert.equal(emitted.at(-1)?.text, 'Done after hidden compaction.');
 });
 
 test('CodexModelClient sends the built-in web_search tool when enabled', async (t) => {
@@ -1820,7 +2004,7 @@ test('CodexModelClient exposes only compact when the reserve buffer is exhausted
   t.after(async () => cleanupDir(tempDir));
 
   const previousContextWindow = process.env.H2_CONTEXT_WINDOW_TOKENS;
-  process.env.H2_CONTEXT_WINDOW_TOKENS = '50000';
+  process.env.H2_CONTEXT_WINDOW_TOKENS = '30000';
   t.after(() => {
     if (previousContextWindow === undefined) {
       delete process.env.H2_CONTEXT_WINDOW_TOKENS;

@@ -25,6 +25,11 @@ function createSnapshot(overrides: Partial<EngineSnapshot> = {}): EngineSnapshot
     standardRateContextTokens: null,
     liveTurnEvents: [],
     thinkingEnabled: true,
+    activePlan: null,
+    pendingUserRequest: null,
+    todos: [],
+    agentMode: 'study',
+    planModePhase: null,
     ...overrides
   };
 }
@@ -186,4 +191,37 @@ test('buildOpenTuiState renders experiment notices as experiment tool rows', () 
     'Provider streams SSE content deltas.',
     'backend supports OpenAI-style streaming'
   ]);
+});
+
+test('buildOpenTuiState surfaces a pending single-choice ask_user request', () => {
+  const state = buildOpenTuiState(
+    createSnapshot({
+      agentMode: 'plan',
+      planModePhase: 'planning',
+      pendingUserRequest: {
+        sessionId: 'session-test',
+        kind: 'clarification',
+        responseKind: 'single_choice',
+        question: 'Which rollout should we use?',
+        context: 'We need a safe migration path.',
+        options: [
+          { id: 'a', label: 'Immediate', description: 'Turn it on everywhere now.' },
+          { id: 'b', label: 'Gradual', description: 'Roll it out in stages.' }
+        ],
+        recommendedOptionId: 'b',
+        recommendedResponse: null,
+        reason: 'Gradual rollout is safer.',
+        createdAt: '2026-04-07T00:00:00.000Z',
+        updatedAt: '2026-04-07T00:00:00.000Z'
+      }
+    })
+  );
+
+  assert.equal(state.inputPlaceholder, 'Reply to the pending question…');
+  assert.equal(state.status.label, 'waiting');
+  assert.equal(state.status.pendingText, 'pick b');
+  const toolBlock = state.blocks.at(-1);
+  assert.ok(toolBlock && toolBlock.kind === 'tool');
+  assert.equal(toolBlock.header, 'ask_user  clarification  single_choice');
+  assert.match(toolBlock.body.join('\n'), /b \[recommended\]/);
 });

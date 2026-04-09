@@ -207,6 +207,63 @@ prompt = "/write two.txt :: two"
   assert.equal(await readFile(path.join(result.cases[1]!.workspacePath, 'two.txt'), 'utf8'), 'two');
 });
 
+test('runEvalSuite applies runtime overrides such as mode when requested', async (t) => {
+  const tempDir = await createTempDir('h2-eval-runtime-override-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const originalH2Home = process.env.H2_HOME;
+  process.env.H2_HOME = path.join(tempDir, 'h2-home');
+  t.after(() => {
+    if (originalH2Home === undefined) {
+      delete process.env.H2_HOME;
+    } else {
+      process.env.H2_HOME = originalH2Home;
+    }
+  });
+
+  const fixtureDir = path.join(tempDir, 'fixtures', 'tiny-app');
+  await mkdir(fixtureDir, { recursive: true });
+  await writeFile(path.join(fixtureDir, 'README.md'), '# fixture\n', 'utf8');
+
+  const manifestPath = path.join(tempDir, 'suite.toml');
+  await writeFile(
+    manifestPath,
+    `
+[suite]
+id = "core-12"
+
+[runtime]
+reasoning_effort = "medium"
+thinking = false
+web_search_mode = "fixed"
+
+[[fixtures]]
+id = "tiny-app"
+type = "template"
+path = "./fixtures/tiny-app"
+
+[[cases]]
+id = "A1"
+bucket = "A"
+fixture = "tiny-app"
+profile = "backend"
+prompt = "/read README.md"
+`,
+    'utf8'
+  );
+
+  const result = await runEvalSuite({
+    manifestPath,
+    runtimeOverride: { mode: 'direct' }
+  });
+
+  assert.equal(result.cases[0]!.runtime.mode, 'direct');
+  const lock = JSON.parse(
+    await readFile(path.join(path.dirname(result.lockedManifestPath), 'manifest.lock.json'), 'utf8')
+  ) as { runtime: { mode?: string } };
+  assert.equal(lock.runtime.mode, 'direct');
+});
+
 test('createEvalReviewPack resolves a short run suffix and excludes workspaces', async (t) => {
   const tempDir = await createTempDir('h2-eval-pack-');
   t.after(async () => cleanupDir(tempDir));

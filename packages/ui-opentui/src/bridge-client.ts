@@ -24,6 +24,7 @@ export class BridgeClient extends EventEmitter<BridgeClientEvents> {
     private readonly options: {
       cwd: string;
       sessionId?: string;
+      mode?: 'study' | 'plan' | 'direct';
     }
   ) {
     super();
@@ -39,6 +40,9 @@ export class BridgeClient extends EventEmitter<BridgeClientEvents> {
     const args = ['--import', 'tsx', bridgePath, '--cwd', this.options.cwd];
     if (this.options.sessionId) {
       args.push('--session', this.options.sessionId);
+    }
+    if (this.options.mode) {
+      args.push('--mode', this.options.mode);
     }
 
     const child = spawn('node', args, {

@@ -11,8 +11,12 @@ import { describeStatePaths, getRepoNotebookPath } from './state-paths.js';
 
 class CliUsageError extends Error {}
 
+const EVAL_RUN_USAGE =
+  'Usage: h2 eval run <manifest> [--case <id>] [--parallel <n>] [--repeat <n>] [--mode <study|plan|direct>]';
+
 async function main(): Promise<void> {
-  const [, , ...args] = process.argv;
+  const [, , ...rawArgs] = process.argv;
+  const { args, mode } = extractModeArg(rawArgs);
   if (args[0] === 'help' || args[0] === '--help' || args[0] === '-h') {
     printUsage();
     return;
@@ -22,7 +26,7 @@ async function main(): Promise<void> {
   if (printRequest) {
     assertSupportedNodeRuntime();
     await assertInsideGitRepository(process.cwd());
-    await runPrintMode(printRequest.prompt, printRequest.sessionId, printRequest.thinking);
+    await runPrintMode(printRequest.prompt, printRequest.sessionId, printRequest.thinking, mode);
     return;
   }
 
@@ -41,7 +45,7 @@ async function main(): Promise<void> {
   if (command === 'opentui') {
     assertSupportedNodeRuntime();
     await assertInsideGitRepository(process.cwd());
-    await runOpenTui(args[1]);
+    await runOpenTui(args[1], mode);
     return;
   }
 
@@ -57,7 +61,7 @@ async function main(): Promise<void> {
 
   if (command === 'eval') {
     assertSupportedNodeRuntime();
-    await runEvalCommand(args.slice(1));
+    await runEvalCommand(args.slice(1), mode);
     return;
   }
 
@@ -73,10 +77,10 @@ async function main(): Promise<void> {
   }
   assertSupportedNodeRuntime();
   await assertInsideGitRepository(process.cwd());
-  await runOpenTui(sessionId);
+  await runOpenTui(sessionId, mode);
 }
 
-async function runOpenTui(sessionId?: string): Promise<void> {
+async function runOpenTui(sessionId?: string, mode?: 'study' | 'plan' | 'direct'): Promise<void> {
   await assertKnownSession(process.cwd(), sessionId);
   const repoRoot = resolveHarnessRoot();
   const entryPath = path.join(repoRoot, 'packages/ui-opentui/src/index.ts');
@@ -84,6 +88,9 @@ async function runOpenTui(sessionId?: string): Promise<void> {
   const args = ['run', entryPath, '--cwd', process.cwd()];
   if (sessionId) {
     args.push('--session', sessionId);
+  }
+  if (mode) {
+    args.push('--mode', mode);
   }
 
   await execa('bun', args, {
@@ -95,12 +102,14 @@ async function runOpenTui(sessionId?: string): Promise<void> {
 async function runPrintMode(
   prompt: string,
   sessionId?: string,
-  thinking = true
+  thinking = true,
+  mode?: 'study' | 'plan' | 'direct'
 ): Promise<void> {
   const { HeadlessEngine } = await import('./engine/headless-engine.js');
   const engine = await HeadlessEngine.open({
     cwd: process.cwd(),
-    sessionId
+    sessionId,
+    agentMode: mode
   });
   engine.setThinkingEnabled(thinking);
 
@@ -258,26 +267,31 @@ function printDoctor(report: {
 }
 
 function printUsage(): void {
-  console.log('Usage: h2 [resume [sessionId]] [opentui] | h2 auth <login|status|access|logout> | h2 doctor | h2 paths | h2 eval run <manifest> [--case <id>] [--parallel <n>] [--repeat <n>] | h2 eval score <run-dir> | h2 eval pack [run-id-or-suffix] [--latest-batch]');
+  console.log('Usage: h2 [--mode <study|plan|direct>] [resume [sessionId]] [opentui] | h2 auth <login|status|access|logout> | h2 doctor | h2 paths | h2 eval run <manifest> [--case <id>] [--parallel <n>] [--repeat <n>] [--mode <study|plan|direct>] | h2 eval score <run-dir> | h2 eval pack [run-id-or-suffix] [--latest-batch]');
   console.log('');
   console.log('Examples:');
   console.log('h2');
+  console.log('h2 --mode plan');
   console.log('h2 -p "inspect the repo"');
   console.log('h2 resume');
   console.log('h2 resume <sessionId>');
   console.log('h2 auth login');
   console.log('h2 doctor');
   console.log('h2 eval run evals/wide-suite.toml --parallel 4');
+  console.log('h2 eval run evals/comparison-stage1.toml --mode plan');
   console.log('h2 eval run evals/stability-pack.toml --repeat 5');
   console.log('h2 eval score ~/.h2/evals/<run-id>');
   console.log('h2 eval pack 0e5484');
   console.log('h2 eval pack --latest-batch');
 }
 
-async function runEvalCommand(args: string[]): Promise<void> {
+async function runEvalCommand(
+  args: string[],
+  modeOverride?: 'study' | 'plan' | 'direct'
+): Promise<void> {
   const action = args[0];
   if (action !== 'run' && action !== 'score' && action !== 'pack') {
-    throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>] [--parallel <n>] [--repeat <n>] | h2 eval score <run-dir> | h2 eval pack [run-id-or-suffix] [--latest-batch]');
+    throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>] [--parallel <n>] [--repeat <n>] [--mode <study|plan|direct>] | h2 eval score <run-dir> | h2 eval pack [run-id-or-suffix] [--latest-batch]');
   }
 
   if (action === 'score') {
@@ -327,7 +341,7 @@ async function runEvalCommand(args: string[]): Promise<void> {
 
   const manifestPath = args[1];
   if (!manifestPath) {
-    throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>] [--parallel <n>] [--repeat <n>]');
+    throw new CliUsageError(EVAL_RUN_USAGE);
   }
 
   const selectedCaseIds: string[] = [];
@@ -338,7 +352,7 @@ async function runEvalCommand(args: string[]): Promise<void> {
     if (token === '--case') {
       const caseId = args[index + 1];
       if (!caseId) {
-        throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>] [--parallel <n>] [--repeat <n>]');
+        throw new CliUsageError(EVAL_RUN_USAGE);
       }
       selectedCaseIds.push(caseId);
       index += 1;
@@ -347,7 +361,7 @@ async function runEvalCommand(args: string[]): Promise<void> {
     if (token === '--parallel') {
       const value = args[index + 1];
       if (!value) {
-        throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>] [--parallel <n>] [--repeat <n>]');
+        throw new CliUsageError(EVAL_RUN_USAGE);
       }
       const parsed = Number.parseInt(value, 10);
       if (!Number.isFinite(parsed) || parsed < 1) {
@@ -360,7 +374,7 @@ async function runEvalCommand(args: string[]): Promise<void> {
     if (token === '--repeat') {
       const value = args[index + 1];
       if (!value) {
-        throw new CliUsageError('Usage: h2 eval run <manifest> [--case <id>] [--parallel <n>] [--repeat <n>]');
+        throw new CliUsageError(EVAL_RUN_USAGE);
       }
       const parsed = Number.parseInt(value, 10);
       if (!Number.isFinite(parsed) || parsed < 1) {
@@ -370,7 +384,7 @@ async function runEvalCommand(args: string[]): Promise<void> {
       index += 1;
       continue;
     }
-    throw new CliUsageError(`Unknown eval argument: ${token}`);
+    throw new CliUsageError(buildUnknownEvalArgumentMessage(token));
   }
 
   const { parseEvalManifest } = await import('./evals/manifest-parse.js');
@@ -387,6 +401,7 @@ async function runEvalCommand(args: string[]): Promise<void> {
       manifestPath,
       selectedCaseIds: selectedCaseIds.length > 0 ? selectedCaseIds : undefined,
       parallelism,
+      runtimeOverride: modeOverride ? { mode: modeOverride } : undefined,
       onProgress: (event) => {
         if (event.type === 'suite_started') {
           console.log(
@@ -477,6 +492,48 @@ function parsePrintRequest(
   }
 
   return null;
+}
+
+function extractModeArg(
+  args: string[]
+): { args: string[]; mode?: 'study' | 'plan' | 'direct' } {
+  const filtered: string[] = [];
+  let mode: 'study' | 'plan' | 'direct' | undefined;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    if (token !== '--mode') {
+      filtered.push(token);
+      continue;
+    }
+
+    const next = args[index + 1];
+    if (next !== 'study' && next !== 'plan' && next !== 'direct') {
+      throw new CliUsageError(
+        `Invalid mode: ${next ?? '(missing)'}.\n\nUsage: h2 [--mode <study|plan|direct>] ...`
+      );
+    }
+    mode = next;
+    index += 1;
+  }
+
+  return { args: filtered, mode };
+}
+
+function buildUnknownEvalArgumentMessage(token: string): string {
+  const hints = [
+    '--case <id>',
+    '--parallel <n>',
+    '--repeat <n>',
+    '--mode <study|plan|direct>'
+  ].join(', ');
+
+  const staleBuildHint =
+    token === '--mode' || token === '--parallel' || token === '--repeat'
+      ? '\n\nIf this flag should be supported here, rebuild the linked CLI with `npm run build`.'
+      : '';
+
+  return `Unknown eval argument: ${token}\n\n${EVAL_RUN_USAGE}\n\nSupported eval run flags: ${hints}.${staleBuildHint}`;
 }
 
 function truncatePrintLines(text: string, width: number): string {

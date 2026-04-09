@@ -23,7 +23,11 @@ import { copyToClipboard } from './clipboard.js';
 import { createBlockView, updateBlockView, type BlockView } from './render-block-view.js';
 
 export class OpenTuiApp {
-  static async open(options: { cwd: string; sessionId?: string }): Promise<OpenTuiApp> {
+  static async open(options: {
+    cwd: string;
+    sessionId?: string;
+    mode?: 'study' | 'plan' | 'direct';
+  }): Promise<OpenTuiApp> {
     const renderer = await createCliRenderer({
       exitOnCtrlC: true,
       useMouse: true,
@@ -206,10 +210,12 @@ export class OpenTuiApp {
       const exitLabel = `bridge exited (${code ?? 'unknown'})`;
       this.renderStatusLine({
         label: this.lastBridgeError ? 'error' : exitLabel,
+        modeText: this.state?.status.modeText ?? 'study',
         model: this.state?.status.model ?? 'gpt-5.4',
         contextText: this.state?.status.contextText ?? '',
         contextUsagePercent: this.state?.status.contextUsagePercent ?? 0,
-        usageText: this.lastBridgeError ? `${this.lastBridgeError} (${exitLabel})` : this.state?.status.usageText ?? ''
+        usageText: this.lastBridgeError ? `${this.lastBridgeError} (${exitLabel})` : this.state?.status.usageText ?? '',
+        pendingText: this.state?.status.pendingText ?? null
       });
       this.renderer.requestRender();
     });
@@ -314,10 +320,12 @@ export class OpenTuiApp {
       this.lastBridgeError = event.message;
       this.renderStatusLine({
         label: 'error',
+        modeText: this.state?.status.modeText ?? 'study',
         model: this.state?.status.model ?? 'gpt-5.4',
         contextText: this.state?.status.contextText ?? '',
         contextUsagePercent: this.state?.status.contextUsagePercent ?? 0,
-        usageText: event.message
+        usageText: event.message,
+        pendingText: this.state?.status.pendingText ?? null
       });
       this.renderer.requestRender();
       return;
@@ -452,9 +460,11 @@ export class OpenTuiApp {
     const sessionLabel = this.state?.sessionId?.replace(/^session-/, '');
     const leftIds = {
       status: 'status-row-status',
+      mode: 'status-row-mode',
       model: 'status-row-model',
       context: 'status-row-context',
-      usage: 'status-row-usage'
+      usage: 'status-row-usage',
+      pending: 'status-row-pending'
     } as const;
     const rightIds = {
       transient: 'status-row-transient',
@@ -469,6 +479,14 @@ export class OpenTuiApp {
       })
     );
     this.statusRow.add(newTextSpacer(this.renderer, 'status-row-gap-1'));
+    this.statusRow.add(
+      new TextRenderable(this.renderer, {
+        id: leftIds.mode,
+        content: status.modeText,
+        fg: '#d4d4d8'
+      })
+    );
+    this.statusRow.add(newTextSpacer(this.renderer, 'status-row-gap-1b'));
     this.statusRow.add(
       new TextRenderable(this.renderer, {
         id: leftIds.model,
@@ -492,6 +510,16 @@ export class OpenTuiApp {
         fg: getContextColor(status.contextUsagePercent)
       })
     );
+    if (status.pendingText) {
+      this.statusRow.add(newTextSpacer(this.renderer, 'status-row-gap-3b'));
+      this.statusRow.add(
+        new TextRenderable(this.renderer, {
+          id: leftIds.pending,
+          content: status.pendingText,
+          fg: '#fbbf24'
+        })
+      );
+    }
     this.statusRow.add(
       new BoxRenderable(this.renderer, {
         id: 'status-row-spacer',

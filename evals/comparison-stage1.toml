@@ -1,0 +1,172 @@
+[suite]
+id = "comparison-stage1"
+description = "Stage 1 core short/medium comparison pack. Run this manifest three times: study, plan, and direct."
+
+[runtime]
+reasoning_effort = "medium"
+thinking = false
+web_search_mode = "live"
+repeat_count = 3
+
+[clarification]
+auto_reply = "Make the best grounded minimal choice and proceed. Keep the contract explicit."
+mark_as_unnecessary = true
+
+[[fixtures]]
+id = "node-minimal"
+type = "template"
+path = "./fixtures/node-minimal"
+
+[[fixtures]]
+id = "node-service-starter"
+type = "template"
+path = "./fixtures/node-service-starter"
+
+[[fixtures]]
+id = "next-app-router"
+type = "template"
+path = "./fixtures/next-app-router"
+setup_command = "npm ci"
+
+[[fixtures]]
+id = "vite-react"
+type = "template"
+path = "./fixtures/vite-react"
+setup_command = "npm ci"
+
+[[fixtures]]
+id = "run-harness2"
+type = "git_checkout"
+path = ".."
+ref = "756c1ef9101b90ac999da056845dc5dbd5160d64"
+setup_command = "npm ci"
+
+[[cases]]
+id = "A1"
+bucket = "A"
+fixture = "vite-react"
+profile = "frontend"
+question_expected = false
+experiment_expected = "no"
+web_search_expected = "no"
+prompt = """
+In this Vite React repo, add a small Settings panel with three controls: theme (light/dark/system), density (comfortable/compact), and animations (on/off). Persist them locally in localStorage. No sync, no server calls, no multi-user behavior. Most recent local change wins. Keep it minimal and locally runnable.
+"""
+
+[[cases]]
+id = "A2"
+bucket = "A"
+fixture = "node-service-starter"
+profile = "backend"
+question_expected = false
+experiment_expected = "no"
+web_search_expected = "no"
+prompt = """
+Add GET /api/items/export.csv to this service. Export the current items as UTF-8 CSV with header id,name,status,createdAt, newest-first. Return 200 with the header row even if there are no items. Keep it minimal and locally runnable.
+"""
+
+[[cases]]
+id = "A3"
+bucket = "A"
+fixture = "next-app-router"
+profile = "frontend/full-stack"
+question_expected = false
+experiment_expected = "no"
+web_search_expected = "no"
+prompt = """
+Replace the default page with a small product landing page: hero, 3-feature grid, FAQ accordion, and a contact form that posts to a local route and returns a mocked success message. No email delivery, no auth, no persistence. Keep it minimal and locally runnable.
+"""
+
+[[cases]]
+id = "B1"
+bucket = "B"
+fixture = "run-harness2"
+profile = "existing-app history contract"
+question_expected = true
+experiment_expected = "no"
+web_search_expected = "no"
+prompt = """
+Add a feature that lets a user duplicate a historical run into a new draft run, edit the prompt variants for the new run, and then execute it. The UI should feel clear and safe about what belongs to the old historical run versus the new draft, especially if prompts changed since the original run. Keep it minimal and locally runnable.
+"""
+
+[[cases]]
+id = "B2"
+bucket = "B"
+fixture = "next-app-router"
+profile = "full-stack history contract"
+question_expected = true
+experiment_expected = "no"
+web_search_expected = "no"
+prompt = """
+In this Next.js repo, build a tiny local prompt-runner. Users can create one prompt, run it against a short input list, edit the prompt later, and rerun. History should feel clear and safe if the prompt changed between runs. No auth, no sharing, no cancel. Keep it minimal and locally runnable.
+"""
+
+[[cases]]
+id = "B3"
+bucket = "B"
+fixture = "vite-react"
+profile = "frontend autosave contract"
+question_expected = true
+experiment_expected = "no"
+web_search_expected = "no"
+prompt = """
+In this Vite repo, build a tiny local writing app with autosave and draft recovery. It should feel predictable if someone refreshes, closes the tab, opens a second tab, or manually saves while an older autosave exists. Keep it minimal and locally runnable.
+"""
+
+[[cases]]
+id = "C1"
+bucket = "C"
+fixture = "next-app-router"
+profile = "ai/full-stack"
+question_expected = true
+experiment_expected = "optional"
+web_search_expected = "yes"
+prompt = """
+In this Next.js repo, build a minimal chatbot using the OpenAI-compatible settings in .env.local (OPENAI_API_KEY, OPENAI_BASE_URL, OPENAI_MODEL). Before you lock in the route and client transport, verify from current official docs and one bounded runtime check what streaming + stop contract this setup actually supports end to end. Then implement the smallest reliable version and make the contract explicit in the UI. Keep it minimal and locally runnable.
+"""
+
+[cases.env_override]
+env_source = "~/.h2/eval-env/next-app-router-openai.env"
+write_env_file = ".env.local"
+write_env_example = ".env.local.example"
+
+[[cases]]
+id = "C2"
+bucket = "C"
+fixture = "node-minimal"
+profile = "ai/runtime"
+question_expected = true
+experiment_expected = "optional"
+web_search_expected = "optional"
+prompt = """
+In this Node repo, build a tiny local page that starts a streamed generation from the OpenAI-compatible settings in .env and lets the user press Stop. Before you lock in behavior, verify in this runtime whether aborting the in-flight request actually stops additional chunks and what partial text state remains. Then implement the smallest reliable contract and make it explicit in the UI. Keep it minimal and locally runnable.
+"""
+
+[cases.env_override]
+env_source = "~/.h2/eval-env/node-minimal-openai.env"
+write_env_file = ".env"
+write_env_example = ".env.example"
+
+[[cases]]
+id = "C3"
+bucket = "C"
+fixture = "node-minimal"
+profile = "backend/concurrency"
+question_expected = true
+experiment_expected = "yes"
+web_search_expected = "no"
+prompt = """
+In this Node repo, build a tiny job queue with SQLite and 4 workers. Before you lock in the claim loop, verify whether a single atomic claim statement in this runtime is enough to prevent double-claiming under concurrency, or whether you need a stronger pattern. Keep it minimal and locally runnable.
+"""
+
+[[cases]]
+id = "C4"
+bucket = "C"
+fixture = "node-minimal"
+profile = "backend/durability"
+question_expected = true
+experiment_expected = "yes"
+web_search_expected = "no"
+prompt = """
+In this Node repo, build a tiny file-backed job tracker that survives restart. Before you choose the persistence strategy, verify whether writing to a temp file and renaming it is sufficient to avoid torn reads in this runtime, or whether you need an append-only journal fallback. Keep it minimal and locally runnable.
+"""

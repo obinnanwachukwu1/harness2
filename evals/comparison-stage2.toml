@@ -1,0 +1,80 @@
+[suite]
+id = "comparison-stage2"
+description = "Stage 2 product and non-greenfield extension pack. Run this manifest three times: study, plan, and direct."
+
+[runtime]
+reasoning_effort = "medium"
+thinking = false
+web_search_mode = "live"
+repeat_count = 2
+
+[clarification]
+auto_reply = "Make the best grounded minimal choice and proceed. Keep the contract explicit."
+mark_as_unnecessary = true
+
+[[fixtures]]
+id = "vercel-chatbot"
+type = "git_checkout"
+path = "https://github.com/vercel/chatbot"
+ref = "146b3cb8cf2ffbb5b985819f06f6b8357bd464e7"
+setup_command = "corepack pnpm install --frozen-lockfile"
+
+[[fixtures]]
+id = "healthchecks"
+type = "git_checkout"
+path = "https://github.com/healthchecks/healthchecks"
+ref = "89c248a0c41fa57a63f90aafcb431c83ec5ccfa6"
+
+[[fixtures]]
+id = "linkding"
+type = "git_checkout"
+path = "https://github.com/sissbruecker/linkding"
+ref = "573b6f5411eaaa18ccc9524544fa27bb594c532b"
+
+[[cases]]
+id = "P1"
+bucket = "B"
+fixture = "vercel-chatbot"
+profile = "existing-chat history contract"
+question_expected = true
+experiment_expected = "no"
+web_search_expected = "no"
+prompt = """
+Add a feature that lets users duplicate an existing conversation into a new draft, edit the system prompt / model settings for the draft, and continue there without making the old conversation feel mutable. Keep the history semantics clear and safe if settings changed since the original chat. Keep it minimal and locally runnable.
+"""
+
+[[cases]]
+id = "P2"
+bucket = "C"
+fixture = "vercel-chatbot"
+profile = "existing-chat runtime contract"
+question_expected = true
+experiment_expected = "optional"
+web_search_expected = "optional"
+prompt = """
+Add stop and later continue for an in-progress generation in this chatbot. It should be clear what partial text belongs to the interrupted attempt, what can continue safely, and what should restart. Keep it minimal and locally runnable.
+"""
+
+[[cases]]
+id = "P3"
+bucket = "B"
+fixture = "healthchecks"
+profile = "existing-product recovery semantics"
+question_expected = true
+experiment_expected = "no"
+web_search_expected = "no"
+prompt = """
+Add a minimal pause-and-resume workflow for a check or a group of checks so that alerts stay predictable across pause, resume, missed periods, and restart. Keep it minimal and safe. The main thing is that history and alert ownership should feel clear and unsurprising.
+"""
+
+[[cases]]
+id = "P4"
+bucket = "B"
+fixture = "linkding"
+profile = "existing-product retry/history contract"
+question_expected = true
+experiment_expected = "optional"
+web_search_expected = "no"
+prompt = """
+Add a minimal metadata refresh workflow for bookmarks that lets the user queue a refresh, see progress, and safely retry failed refreshes later without confusing old metadata with new attempts. Keep it minimal and locally runnable.
+"""

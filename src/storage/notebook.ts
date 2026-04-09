@@ -3,6 +3,13 @@ import { dirname } from 'node:path';
 import { DatabaseSync } from 'node:sqlite';
 
 import type {
+  AgentMode,
+  AskUserKind,
+  AskUserRecommendedResponse,
+  AskUserResponseKind,
+  ApprovePlanResult,
+  CompactionArtifactPointer,
+  CreatePlanInput,
   EngineSnapshot,
   ExperimentDetails,
   ExperimentObservation,
@@ -15,15 +22,20 @@ import type {
   ModelMessageRole,
   ModelSessionRecord,
   OpenAICodexAuthRecord,
+  PlanDirectCompactionSummary,
+  PlanModePhase,
+  SessionPlanRecord,
+  PendingUserRequest,
   SessionRecord,
   SessionCheckpointRecord,
   StudyDebtKind,
   StudyDebtRecord,
   StudyDebtResolution,
+  TodoItem,
   TranscriptEntry,
   TranscriptRole
 } from '../types.js';
-import { createStudyDebtId, nowIso } from '../lib/utils.js';
+import { createStudyDebtId, estimateTokens, nowIso } from '../lib/utils.js';
 import {
   appendObservation,
   EXPERIMENT_SCHEMA_SQL,
@@ -73,6 +85,47 @@ interface ModelSessionRow {
   reasoning_effort: 'low' | 'medium' | 'high' | null;
   previous_response_id: string | null;
   updated_at: string;
+  agent_mode: AgentMode;
+  plan_mode_phase: PlanModePhase;
+}
+
+interface SessionPlanRow {
+  session_id: string;
+  created_at: string;
+  updated_at: string;
+  goal: string;
+  assumptions_json: string;
+  files_json: string;
+  steps_json: string;
+  validation_json: string;
+  risks_json: string;
+  options_json: string;
+  recommended_option_id: string;
+  selected_option_id: string | null;
+  plan_path: string;
+}
+
+interface SessionTodoRow {
+  session_id: string;
+  todo_id: string;
+  text: string;
+  status: TodoItem['status'];
+  position: number;
+  updated_at: string;
+}
+
+interface PendingUserRequestRow {
+  session_id: string;
+  kind: AskUserKind;
+  response_kind: AskUserResponseKind;
+  question: string;
+  context: string | null;
+  options_json: string | null;
+  recommended_option_id: string | null;
+  recommended_response: AskUserRecommendedResponse;
+  reason: string | null;
+  created_at: string;
+  updated_at: string;
 }
 
 interface ModelHistoryRow {
@@ -115,6 +168,7 @@ interface SessionCheckpointRow {
   id: number;
   session_id: string;
   created_at: string;
+  checkpoint_kind: 'study' | 'plan_direct';
   goal: string;
   completed: string;
   next: string;
@@ -128,6 +182,8 @@ interface SessionCheckpointRow {
   active_experiments_json: string;
   invalidated_experiments_json: string;
   checkpoint_block: string;
+  checkpoint_json: string | null;
+  artifacts_json: string;
   tail_start_history_id: number | null;
 }
 
@@ -188,6 +244,51 @@ export class Notebook {
         model TEXT NOT NULL,
         reasoning_effort TEXT,
         previous_response_id TEXT,
+        updated_at TEXT NOT NULL,
+        agent_mode TEXT NOT NULL DEFAULT 'study',
+        plan_mode_phase TEXT
+      );
+
+      CREATE TABLE IF NOT EXISTS session_plans (
+        session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL,
+        goal TEXT NOT NULL,
+        assumptions_json TEXT NOT NULL,
+        files_json TEXT NOT NULL,
+        steps_json TEXT NOT NULL,
+        validation_json TEXT NOT NULL,
+        risks_json TEXT NOT NULL,
+        options_json TEXT NOT NULL,
+        recommended_option_id TEXT NOT NULL,
+        selected_option_id TEXT,
+        plan_path TEXT NOT NULL
+      );
+
+      CREATE TABLE IF NOT EXISTS session_todos (
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        todo_id TEXT NOT NULL,
+        text TEXT NOT NULL,
+        status TEXT NOT NULL,
+        position INTEGER NOT NULL,
+        updated_at TEXT NOT NULL,
+        PRIMARY KEY (session_id, todo_id)
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_session_todos_session_position
+      ON session_todos(session_id, position);
+
+      CREATE TABLE IF NOT EXISTS pending_user_requests (
+        session_id TEXT PRIMARY KEY REFERENCES sessions(id) ON DELETE CASCADE,
+        kind TEXT NOT NULL,
+        response_kind TEXT NOT NULL,
+        question TEXT NOT NULL,
+        context TEXT,
+        options_json TEXT,
+        recommended_option_id TEXT,
+        recommended_response TEXT,
+        reason TEXT,
+        created_at TEXT NOT NULL,
         updated_at TEXT NOT NULL
       );
 
@@ -240,6 +341,7 @@ export class Notebook {
         id INTEGER PRIMARY KEY AUTOINCREMENT,
         session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
         created_at TEXT NOT NULL,
+        checkpoint_kind TEXT NOT NULL DEFAULT 'study',
         goal TEXT NOT NULL,
         completed TEXT NOT NULL,
         next TEXT NOT NULL,
@@ -253,6 +355,8 @@ export class Notebook {
         active_experiments_json TEXT NOT NULL,
         invalidated_experiments_json TEXT NOT NULL DEFAULT '[]',
         checkpoint_block TEXT NOT NULL,
+        checkpoint_json TEXT,
+        artifacts_json TEXT NOT NULL DEFAULT '[]',
         tail_start_history_id INTEGER
       );
 
@@ -266,6 +370,14 @@ export class Notebook {
 
     if (!modelSessionColumns.some((column) => column.name === 'reasoning_effort')) {
       this.db.exec(`ALTER TABLE model_sessions ADD COLUMN reasoning_effort TEXT`);
+    }
+
+    if (!modelSessionColumns.some((column) => column.name === 'agent_mode')) {
+      this.db.exec(`ALTER TABLE model_sessions ADD COLUMN agent_mode TEXT NOT NULL DEFAULT 'study'`);
+    }
+
+    if (!modelSessionColumns.some((column) => column.name === 'plan_mode_phase')) {
+      this.db.exec(`ALTER TABLE model_sessions ADD COLUMN plan_mode_phase TEXT`);
     }
 
     const sessionCheckpointColumns = this.db
@@ -285,6 +397,19 @@ export class Notebook {
         `ALTER TABLE session_checkpoints ADD COLUMN invalidated_experiments_json TEXT NOT NULL DEFAULT '[]'`
       );
     }
+    if (!sessionCheckpointColumns.some((column) => column.name === 'checkpoint_kind')) {
+      this.db.exec(
+        `ALTER TABLE session_checkpoints ADD COLUMN checkpoint_kind TEXT NOT NULL DEFAULT 'study'`
+      );
+    }
+    if (!sessionCheckpointColumns.some((column) => column.name === 'checkpoint_json')) {
+      this.db.exec(`ALTER TABLE session_checkpoints ADD COLUMN checkpoint_json TEXT`);
+    }
+    if (!sessionCheckpointColumns.some((column) => column.name === 'artifacts_json')) {
+      this.db.exec(
+        `ALTER TABLE session_checkpoints ADD COLUMN artifacts_json TEXT NOT NULL DEFAULT '[]'`
+      );
+    }
 
     migrateExperimentTables(this.db);
 
@@ -294,6 +419,18 @@ export class Notebook {
 
     if (!studyDebtColumns.some((column) => column.name === 'evidence_paths_json')) {
       this.db.exec(`ALTER TABLE study_debts ADD COLUMN evidence_paths_json TEXT`);
+    }
+
+    const pendingUserRequestColumns = this.db
+      .prepare(`PRAGMA table_info(pending_user_requests)`)
+      .all() as unknown as TableInfoRow[];
+
+    if (!pendingUserRequestColumns.some((column) => column.name === 'options_json')) {
+      this.db.exec(`ALTER TABLE pending_user_requests ADD COLUMN options_json TEXT`);
+    }
+
+    if (!pendingUserRequestColumns.some((column) => column.name === 'recommended_option_id')) {
+      this.db.exec(`ALTER TABLE pending_user_requests ADD COLUMN recommended_option_id TEXT`);
     }
   }
 
@@ -572,15 +709,19 @@ export class Notebook {
             model,
             reasoning_effort,
             previous_response_id,
-            updated_at
+            updated_at,
+            agent_mode,
+            plan_mode_phase
           )
-          VALUES (?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(session_id) DO UPDATE SET
             provider = excluded.provider,
             model = excluded.model,
             reasoning_effort = excluded.reasoning_effort,
             previous_response_id = excluded.previous_response_id,
-            updated_at = excluded.updated_at
+            updated_at = excluded.updated_at,
+            agent_mode = excluded.agent_mode,
+            plan_mode_phase = excluded.plan_mode_phase
         `
       )
       .run(
@@ -589,7 +730,9 @@ export class Notebook {
         record.model,
         record.reasoningEffort,
         record.previousResponseId,
-        record.updatedAt
+        record.updatedAt,
+        record.agentMode ?? 'study',
+        record.planModePhase ?? null
       );
   }
 
@@ -603,7 +746,9 @@ export class Notebook {
             model,
             reasoning_effort,
             previous_response_id,
-            updated_at
+            updated_at,
+            agent_mode,
+            plan_mode_phase
           FROM model_sessions
           WHERE session_id = ?
         `
@@ -611,6 +756,292 @@ export class Notebook {
       .get(sessionId) as ModelSessionRow | undefined;
 
     return row ? mapModelSession(row) : null;
+  }
+
+  getOrCreateModelSession(
+    sessionId: string,
+    defaults: { agentMode?: AgentMode; planModePhase?: PlanModePhase } = {}
+  ): ModelSessionRecord {
+    const existing = this.getModelSession(sessionId);
+    if (existing) {
+      return existing;
+    }
+
+    const record: ModelSessionRecord = {
+      sessionId,
+      provider: 'openai-codex',
+      model: 'gpt-5.4',
+      reasoningEffort: 'medium',
+      previousResponseId: null,
+      updatedAt: nowIso(),
+      agentMode: defaults.agentMode ?? 'study',
+      planModePhase:
+        defaults.planModePhase ?? (defaults.agentMode === 'plan' ? 'planning' : null)
+    };
+    this.upsertModelSession(record);
+    return record;
+  }
+
+  setPlanModePhase(sessionId: string, phase: PlanModePhase): ModelSessionRecord {
+    const current = this.getOrCreateModelSession(sessionId);
+    const next: ModelSessionRecord = {
+      ...current,
+      planModePhase: phase,
+      updatedAt: nowIso()
+    };
+    this.upsertModelSession(next);
+    return next;
+  }
+
+  saveSessionPlan(input: {
+    sessionId: string;
+    goal: string;
+    assumptions: string[];
+    files: string[];
+    steps: string[];
+    validation: string[];
+    risks: string[];
+    planPath: string;
+  }): SessionPlanRecord {
+    const timestamp = nowIso();
+    this.db
+      .prepare(
+        `
+          INSERT INTO session_plans (
+            session_id,
+            created_at,
+            updated_at,
+            goal,
+            assumptions_json,
+            files_json,
+            steps_json,
+            validation_json,
+            risks_json,
+            options_json,
+            recommended_option_id,
+            selected_option_id,
+            plan_path
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(session_id) DO UPDATE SET
+            updated_at = excluded.updated_at,
+            goal = excluded.goal,
+            assumptions_json = excluded.assumptions_json,
+            files_json = excluded.files_json,
+            steps_json = excluded.steps_json,
+            validation_json = excluded.validation_json,
+            risks_json = excluded.risks_json,
+            options_json = excluded.options_json,
+            recommended_option_id = excluded.recommended_option_id,
+            selected_option_id = excluded.selected_option_id,
+            plan_path = excluded.plan_path
+        `
+      )
+      .run(
+        input.sessionId,
+        timestamp,
+        timestamp,
+        input.goal,
+        JSON.stringify(input.assumptions),
+        JSON.stringify(input.files),
+        JSON.stringify(input.steps),
+        JSON.stringify(input.validation),
+        JSON.stringify(input.risks),
+        JSON.stringify([]),
+        '',
+        null,
+        input.planPath
+      );
+    this.touchSession(input.sessionId);
+    return this.getSessionPlan(input.sessionId) as SessionPlanRecord;
+  }
+
+  getSessionPlan(sessionId: string): SessionPlanRecord | null {
+    const row = this.db
+      .prepare(
+        `
+          SELECT
+            session_id,
+            created_at,
+            updated_at,
+            goal,
+            assumptions_json,
+            files_json,
+            steps_json,
+            validation_json,
+            risks_json,
+            options_json,
+            recommended_option_id,
+            selected_option_id,
+            plan_path
+          FROM session_plans
+          WHERE session_id = ?
+        `
+      )
+      .get(sessionId) as SessionPlanRow | undefined;
+
+    return row ? mapSessionPlan(row) : null;
+  }
+
+  savePendingUserRequest(input: {
+    sessionId: string;
+    kind: AskUserKind;
+    responseKind: AskUserResponseKind;
+    question: string;
+    context?: string | null;
+    options?: PendingUserRequest['options'];
+    recommendedOptionId?: string | null;
+    recommendedResponse?: AskUserRecommendedResponse;
+    reason?: string | null;
+  }): PendingUserRequest {
+    const existing = this.getPendingUserRequest(input.sessionId);
+    const timestamp = nowIso();
+    const createdAt = existing?.createdAt ?? timestamp;
+    this.db
+      .prepare(
+        `
+          INSERT INTO pending_user_requests (
+            session_id,
+            kind,
+            response_kind,
+            question,
+            context,
+            options_json,
+            recommended_option_id,
+            recommended_response,
+            reason,
+            created_at,
+            updated_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          ON CONFLICT(session_id) DO UPDATE SET
+            kind = excluded.kind,
+            response_kind = excluded.response_kind,
+            question = excluded.question,
+            context = excluded.context,
+            options_json = excluded.options_json,
+            recommended_option_id = excluded.recommended_option_id,
+            recommended_response = excluded.recommended_response,
+            reason = excluded.reason,
+            updated_at = excluded.updated_at
+        `
+      )
+      .run(
+        input.sessionId,
+        input.kind,
+        input.responseKind,
+        input.question.trim(),
+        input.context?.trim() || null,
+        input.options ? JSON.stringify(input.options) : null,
+        input.recommendedOptionId ?? null,
+        input.recommendedResponse ?? null,
+        input.reason?.trim() || null,
+        createdAt,
+        timestamp
+      );
+    this.touchSession(input.sessionId);
+    return this.getPendingUserRequest(input.sessionId) as PendingUserRequest;
+  }
+
+  getPendingUserRequest(sessionId: string): PendingUserRequest | null {
+    const row = this.db
+      .prepare(
+        `
+          SELECT
+            session_id,
+            kind,
+            response_kind,
+            question,
+            context,
+            options_json,
+            recommended_option_id,
+            recommended_response,
+            reason,
+            created_at,
+            updated_at
+          FROM pending_user_requests
+          WHERE session_id = ?
+        `
+      )
+      .get(sessionId) as PendingUserRequestRow | undefined;
+
+    return row ? mapPendingUserRequest(row) : null;
+  }
+
+  clearPendingUserRequest(sessionId: string): void {
+    this.db
+      .prepare(
+        `
+          DELETE FROM pending_user_requests
+          WHERE session_id = ?
+        `
+      )
+      .run(sessionId);
+    this.touchSession(sessionId);
+  }
+
+  approveSessionPlan(sessionId: string): SessionPlanRecord {
+    const plan = this.getSessionPlan(sessionId);
+    if (!plan) {
+      throw new Error(`No session plan exists for ${sessionId}.`);
+    }
+    this.db
+      .prepare(
+        `
+          UPDATE session_plans
+          SET updated_at = ?
+          WHERE session_id = ?
+        `
+      )
+      .run(nowIso(), sessionId);
+    this.touchSession(sessionId);
+    return this.getSessionPlan(sessionId) as SessionPlanRecord;
+  }
+
+  replaceSessionTodos(sessionId: string, items: TodoItem[]): TodoItem[] {
+    const timestamp = nowIso();
+    const deleteStatement = this.db.prepare(
+      `
+        DELETE FROM session_todos
+        WHERE session_id = ?
+      `
+    );
+    const insertStatement = this.db.prepare(
+      `
+        INSERT INTO session_todos (
+          session_id,
+          todo_id,
+          text,
+          status,
+          position,
+          updated_at
+        )
+        VALUES (?, ?, ?, ?, ?, ?)
+      `
+    );
+
+    deleteStatement.run(sessionId);
+    for (const item of items) {
+      insertStatement.run(sessionId, item.id, item.text, item.status, item.position, timestamp);
+    }
+
+    this.touchSession(sessionId);
+    return this.listSessionTodos(sessionId);
+  }
+
+  listSessionTodos(sessionId: string): TodoItem[] {
+    const rows = this.db
+      .prepare(
+        `
+          SELECT session_id, todo_id, text, status, position, updated_at
+          FROM session_todos
+          WHERE session_id = ?
+          ORDER BY position ASC, todo_id ASC
+        `
+      )
+      .all(sessionId) as unknown as SessionTodoRow[];
+
+    return rows.map(mapTodoItem);
   }
 
   appendModelHistoryItem(sessionId: string, item: ModelHistoryItem): void {
@@ -683,6 +1114,47 @@ export class Notebook {
     return row?.id ?? null;
   }
 
+  getTailStartHistoryIdByTokenBudget(sessionId: string, tailTokenBudget: number): number | null {
+    if (tailTokenBudget < 1) {
+      return null;
+    }
+
+    const rows = this.db
+      .prepare(
+        `
+          SELECT
+            id,
+            session_id,
+            item_type,
+            role,
+            name,
+            call_id,
+            arguments_text,
+            content_text,
+            created_at
+          FROM model_history_items
+          WHERE session_id = ?
+          ORDER BY id ASC
+        `
+      )
+      .all(sessionId) as unknown as ModelHistoryRow[];
+
+    let total = 0;
+    let tailStartId: number | null = null;
+    for (let index = rows.length - 1; index >= 0; index -= 1) {
+      const row = rows[index]!;
+      const item = mapModelHistoryItem(row);
+      const itemTokens = estimateModelHistoryItemTokens(item);
+      if (tailStartId !== null && total + itemTokens > tailTokenBudget) {
+        break;
+      }
+      total += itemTokens;
+      tailStartId = row.id;
+    }
+
+    return tailStartId;
+  }
+
   listModelHistory(sessionId: string): ModelHistoryItem[] {
     const rows = this.db
       .prepare(
@@ -703,6 +1175,41 @@ export class Notebook {
         `
       )
       .all(sessionId) as unknown as ModelHistoryRow[];
+
+    return rows.map(mapModelHistoryItem);
+  }
+
+  listModelHistoryRange(
+    sessionId: string,
+    input: { startIdInclusive?: number | null; endIdExclusive?: number | null } = {}
+  ): ModelHistoryItem[] {
+    const rows = this.db
+      .prepare(
+        `
+          SELECT
+            id,
+            session_id,
+            item_type,
+            role,
+            name,
+            call_id,
+            arguments_text,
+            content_text,
+            created_at
+          FROM model_history_items
+          WHERE session_id = ?
+            AND (? IS NULL OR id >= ?)
+            AND (? IS NULL OR id < ?)
+          ORDER BY id ASC
+        `
+      )
+      .all(
+        sessionId,
+        input.startIdInclusive ?? null,
+        input.startIdInclusive ?? null,
+        input.endIdExclusive ?? null,
+        input.endIdExclusive ?? null
+      ) as unknown as ModelHistoryRow[];
 
     return rows.map(mapModelHistoryItem);
   }
@@ -993,6 +1500,7 @@ export class Notebook {
 
   createSessionCheckpoint(input: {
     sessionId: string;
+    checkpointKind?: 'study' | 'plan_direct';
     goal: string;
     completed: string;
     next: string;
@@ -1006,6 +1514,8 @@ export class Notebook {
     activeExperimentSummaries: ExperimentSearchResult[];
     invalidatedExperimentSummaries: ExperimentSearchResult[];
     checkpointBlock: string;
+    checkpointSummary?: PlanDirectCompactionSummary | null;
+    artifacts?: CompactionArtifactPointer[];
     tailStartHistoryId: number | null;
   }): SessionCheckpointRecord {
     const createdAt = nowIso();
@@ -1015,6 +1525,7 @@ export class Notebook {
           INSERT INTO session_checkpoints (
             session_id,
             created_at,
+            checkpoint_kind,
             goal,
             completed,
             next,
@@ -1028,14 +1539,17 @@ export class Notebook {
             active_experiments_json,
             invalidated_experiments_json,
             checkpoint_block,
+            checkpoint_json,
+            artifacts_json,
             tail_start_history_id
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
         `
       )
       .run(
         input.sessionId,
         createdAt,
+        input.checkpointKind ?? 'study',
         input.goal,
         input.completed,
         input.next,
@@ -1049,6 +1563,8 @@ export class Notebook {
         JSON.stringify(input.activeExperimentSummaries),
         JSON.stringify(input.invalidatedExperimentSummaries),
         input.checkpointBlock,
+        input.checkpointSummary ? JSON.stringify(input.checkpointSummary) : null,
+        JSON.stringify(input.artifacts ?? []),
         input.tailStartHistoryId
       );
 
@@ -1059,6 +1575,7 @@ export class Notebook {
             id,
             session_id,
             created_at,
+            checkpoint_kind,
             goal,
             completed,
             next,
@@ -1072,6 +1589,8 @@ export class Notebook {
             active_experiments_json,
             invalidated_experiments_json,
             checkpoint_block,
+            checkpoint_json,
+            artifacts_json,
             tail_start_history_id
           FROM session_checkpoints
           WHERE id = last_insert_rowid()
@@ -1091,6 +1610,7 @@ export class Notebook {
             id,
             session_id,
             created_at,
+            checkpoint_kind,
             goal,
             completed,
             next,
@@ -1104,6 +1624,8 @@ export class Notebook {
             active_experiments_json,
             invalidated_experiments_json,
             checkpoint_block,
+            checkpoint_json,
+            artifacts_json,
             tail_start_history_id
           FROM session_checkpoints
           WHERE session_id = ?
@@ -1137,11 +1659,16 @@ export class Notebook {
       transcript: this.listTranscript(sessionId),
       experiments: this.listExperiments(sessionId),
       studyDebts: this.listStudyDebts(sessionId),
+      activePlan: this.getSessionPlan(sessionId),
+      pendingUserRequest: this.getPendingUserRequest(sessionId),
+      todos: this.listSessionTodos(sessionId),
       processingTurn,
       currentTurnStartedAt,
       statusText,
       model: this.getModelSession(sessionId)?.model ?? 'gpt-5.4',
       reasoningEffort: this.getModelSession(sessionId)?.reasoningEffort ?? 'medium',
+      agentMode: this.getModelSession(sessionId)?.agentMode ?? 'study',
+      planModePhase: this.getModelSession(sessionId)?.planModePhase ?? null,
       estimatedContextTokens,
       contextWindowTokens,
       standardRateContextTokens,
@@ -1195,7 +1722,49 @@ function mapModelSession(row: ModelSessionRow): ModelSessionRecord {
     model: row.model,
     reasoningEffort: row.reasoning_effort,
     previousResponseId: row.previous_response_id,
+    updatedAt: row.updated_at,
+    agentMode: row.agent_mode ?? 'study',
+    planModePhase: row.plan_mode_phase ?? null
+  };
+}
+
+function mapSessionPlan(row: SessionPlanRow): SessionPlanRecord {
+  return {
+    sessionId: row.session_id,
+    createdAt: row.created_at,
+    updatedAt: row.updated_at,
+    goal: row.goal,
+    assumptions: parseJsonStringArray(row.assumptions_json, 'session_plans.assumptions_json'),
+    files: parseJsonStringArray(row.files_json, 'session_plans.files_json'),
+    steps: parseJsonStringArray(row.steps_json, 'session_plans.steps_json'),
+    validation: parseJsonStringArray(row.validation_json, 'session_plans.validation_json'),
+    risks: parseJsonStringArray(row.risks_json, 'session_plans.risks_json'),
+    planPath: row.plan_path
+  };
+}
+
+function mapPendingUserRequest(row: PendingUserRequestRow): PendingUserRequest {
+  return {
+    sessionId: row.session_id,
+    kind: row.kind,
+    responseKind: row.response_kind,
+    question: row.question,
+    context: row.context,
+    options: parseNullableAskUserOptions(row.options_json, 'pending_user_requests.options_json'),
+    recommendedOptionId: row.recommended_option_id,
+    recommendedResponse: row.recommended_response,
+    reason: row.reason,
+    createdAt: row.created_at,
     updatedAt: row.updated_at
+  };
+}
+
+function mapTodoItem(row: SessionTodoRow): TodoItem {
+  return {
+    id: row.todo_id,
+    text: row.text,
+    status: row.status,
+    position: row.position
   };
 }
 
@@ -1248,6 +1817,7 @@ function mapSessionCheckpoint(row: SessionCheckpointRow): SessionCheckpointRecor
     id: row.id,
     sessionId: row.session_id,
     createdAt: row.created_at,
+    checkpointKind: row.checkpoint_kind ?? 'study',
     goal: row.goal,
     completed: row.completed,
     next: row.next,
@@ -1267,8 +1837,81 @@ function mapSessionCheckpoint(row: SessionCheckpointRow): SessionCheckpointRecor
       'session_checkpoints.invalidated_experiments_json'
     ),
     checkpointBlock: row.checkpoint_block,
+    checkpointSummary: parseNullablePlanDirectCheckpoint(
+      row.checkpoint_json,
+      'session_checkpoints.checkpoint_json'
+    ),
+    artifacts: parseCompactionArtifactPointers(
+      row.artifacts_json,
+      'session_checkpoints.artifacts_json'
+    ),
     tailStartHistoryId: row.tail_start_history_id
   };
+}
+
+function parseNullablePlanDirectCheckpoint(
+  value: string | null,
+  field: string
+): PlanDirectCompactionSummary | null {
+  if (!value) {
+    return null;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch (error) {
+    throw new Error(`Invalid JSON stored in ${field}: ${String(error)}`);
+  }
+
+  if (!parsed || typeof parsed !== 'object') {
+    throw new Error(`Invalid checkpoint summary stored in ${field}.`);
+  }
+
+  return parsed as PlanDirectCompactionSummary;
+}
+
+function parseCompactionArtifactPointers(
+  value: string | null,
+  field: string
+): CompactionArtifactPointer[] {
+  if (!value) {
+    return [];
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch (error) {
+    throw new Error(`Invalid JSON stored in ${field}: ${String(error)}`);
+  }
+
+  if (
+    !Array.isArray(parsed) ||
+    parsed.some(
+      (item) =>
+        !item ||
+        typeof item !== 'object' ||
+        typeof (item as { path?: unknown }).path !== 'string' ||
+        typeof (item as { why?: unknown }).why !== 'string'
+    )
+  ) {
+    throw new Error(`Invalid compaction artifact pointers stored in ${field}.`);
+  }
+
+  return parsed as CompactionArtifactPointer[];
+}
+
+function estimateModelHistoryItemTokens(item: ModelHistoryItem): number {
+  if (item.type === 'message') {
+    return estimateTokens(item.content);
+  }
+
+  if (item.type === 'function_call') {
+    return estimateTokens(item.name) + estimateTokens(item.arguments);
+  }
+
+  return estimateTokens(item.output);
 }
 
 function parseJsonStringArray(value: string | null, field: string): string[] {
@@ -1297,6 +1940,45 @@ function parseNullableJsonArray(value: string | null, field: string): string[] |
 
   const parsed = parseJsonStringArray(value, field);
   return parsed.length > 0 ? parsed : [];
+}
+
+function parseNullableAskUserOptions(
+  value: string | null,
+  field: string
+): PendingUserRequest['options'] {
+  if (!value) {
+    return null;
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(value);
+  } catch (error) {
+    throw new Error(`Invalid JSON stored in ${field}: ${String(error)}`);
+  }
+
+  if (!Array.isArray(parsed)) {
+    throw new Error(`Expected ${field} to be a JSON array.`);
+  }
+
+  return parsed.map((item, index) => {
+    if (!item || typeof item !== 'object') {
+      throw new Error(`Expected ${field}[${index}] to be an object.`);
+    }
+    const option = item as Record<string, unknown>;
+    if (
+      typeof option.id !== 'string' ||
+      typeof option.label !== 'string' ||
+      typeof option.description !== 'string'
+    ) {
+      throw new Error(`Expected ${field}[${index}] to match AskUserOption.`);
+    }
+    return {
+      id: option.id,
+      label: option.label,
+      description: option.description
+    };
+  });
 }
 
 function parseExperimentSearchResults(value: string | null, field: string): ExperimentSearchResult[] {

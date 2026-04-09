@@ -1,10 +1,16 @@
 import { appendFile, mkdir, writeFile } from 'node:fs/promises';
 import { randomUUID } from 'node:crypto';
 import path from 'node:path';
+import { execa } from 'execa';
 
 import { OpenAICodexAuth } from '../auth/openai-codex.js';
 import { clampText, estimateTokens, nowIso } from '../lib/utils.js';
-import { EXPERIMENT_SUBAGENT_PROMPT, MAIN_AGENT_PROMPT } from './codex-prompt.js';
+import {
+  DIRECT_AGENT_PROMPT,
+  EXPERIMENT_SUBAGENT_PROMPT,
+  PLAN_AGENT_PROMPT,
+  STUDY_AGENT_PROMPT
+} from './codex-prompt.js';
 import { Notebook } from '../storage/notebook.js';
 import {
   buildObservationHint,
@@ -12,11 +18,15 @@ import {
 } from './codex-hints.js';
 import {
   executeToolCallBatch,
+  DIRECT_TOOL_DEFINITIONS,
   formatLiveToolBody,
   formatToolHeader,
   formatToolOutput,
   isParallelReadOnlyToolCall,
   MAIN_TOOL_DEFINITIONS,
+  PLAN_EXECUTION_TOOL_DEFINITIONS,
+  PLAN_PLANNING_TOOL_DEFINITIONS,
+  STUDY_TOOL_DEFINITIONS,
   type ToolDefinition
 } from './codex-tooling.js';
 import {
@@ -25,10 +35,17 @@ import {
   type ProviderToolEvent,
   toResponseInputItem
 } from './codex-response.js';
+import {
+  renderPlanDirectCheckpointBlock,
+  runPlanDirectCompactor,
+  writePlanDirectCompactionArtifacts
+} from './plan-direct-compactor.js';
 import type {
   AgentTools,
-  ModelHistoryItem,
+  CompactionArtifactPointer,
+  HiddenCompactionStateSnapshot,
   ModelSessionRecord,
+  ModelHistoryItem,
   TranscriptRole
 } from '../types.js';
 
@@ -43,10 +60,12 @@ const DEBUG_RESPONSES_FILE =
   path.join(process.cwd(), '.h2', 'debug', 'responses.jsonl');
 const COMPACTION_ADVISORY_RATIO = 0.75;
 const COMPACTION_WARNING_RATIO = 0.85;
-const COMPACTION_RESERVED_TOKEN_FLOOR = 24_000;
+const COMPACTION_RESERVED_TOKEN_FLOOR = 10_000;
 const COMPACTION_RESERVED_TOKEN_RATIO = 0.08;
 const TOOL_OUTPUT_SPILL_THRESHOLD_TOKENS = 5_000;
 const TOOL_OUTPUT_PREVIEW_CHAR_LIMIT = 1_600;
+const PLAN_DIRECT_RAW_TAIL_TOKEN_CAP = 10_000;
+const PLAN_DIRECT_RAW_TAIL_WINDOW_RATIO = 0.10;
 const SPILLABLE_TOOL_OUTPUT_NAMES = new Set([
   'exec_command',
   'write_stdin',
@@ -60,7 +79,45 @@ const SPILLABLE_TOOL_OUTPUT_NAMES = new Set([
   'search_experiments'
 ]);
 
-export { EXPERIMENT_TOOL_DEFINITIONS, MAIN_TOOL_DEFINITIONS } from './codex-tooling.js';
+export {
+  DIRECT_TOOL_DEFINITIONS,
+  EXPERIMENT_TOOL_DEFINITIONS,
+  MAIN_TOOL_DEFINITIONS,
+  PLAN_EXECUTION_TOOL_DEFINITIONS,
+  PLAN_PLANNING_TOOL_DEFINITIONS,
+  STUDY_TOOL_DEFINITIONS
+} from './codex-tooling.js';
+
+export function resolveSessionPromptAndTools(settings: ModelSessionRecord): {
+  instructions: string;
+  toolDefinitions: readonly ToolDefinition[];
+} {
+  if (settings.agentMode === 'direct') {
+    return {
+      instructions: DIRECT_AGENT_PROMPT,
+      toolDefinitions: DIRECT_TOOL_DEFINITIONS
+    };
+  }
+
+  if (settings.agentMode === 'plan') {
+    if (settings.planModePhase === 'execution') {
+      return {
+        instructions: PLAN_AGENT_PROMPT,
+        toolDefinitions: PLAN_EXECUTION_TOOL_DEFINITIONS
+      };
+    }
+
+    return {
+      instructions: PLAN_AGENT_PROMPT,
+      toolDefinitions: PLAN_PLANNING_TOOL_DEFINITIONS
+    };
+  }
+
+  return {
+    instructions: STUDY_AGENT_PROMPT,
+    toolDefinitions: STUDY_TOOL_DEFINITIONS
+  };
+}
 
 interface CodexModelClientOptions {
   fetchImpl?: typeof fetch;
@@ -109,8 +166,8 @@ export class CodexModelClient {
     onReasoningSummaryStream?: (text: string) => Promise<void>,
     thinkingEnabled = false,
     webSearchMode: 'disabled' | 'cached' | 'live' | undefined = undefined,
-    toolDefinitions: readonly ToolDefinition[] = MAIN_TOOL_DEFINITIONS,
-    instructions = MAIN_AGENT_PROMPT,
+    toolDefinitions: readonly ToolDefinition[] = STUDY_TOOL_DEFINITIONS,
+    instructions = STUDY_AGENT_PROMPT,
     onToolCallStart?: (toolCall: {
       toolCallId: string;
       toolName: string;
@@ -119,8 +176,23 @@ export class CodexModelClient {
       body?: string[];
       providerExecuted?: boolean;
     }) => Promise<void>,
-    onToolCallFinish?: (toolCallId: string, transcriptText?: string) => Promise<void>
+    onToolCallFinish?: (toolCallId: string, transcriptText?: string) => Promise<void>,
+    getHiddenCompactionState?: (() => Promise<HiddenCompactionStateSnapshot>) | undefined
   ): Promise<void> {
+    ({
+      webSearchMode,
+      toolDefinitions,
+      instructions,
+      onToolCallStart,
+      onToolCallFinish
+    } = normalizeRunTurnArgs({
+      webSearchMode,
+      toolDefinitions,
+      instructions,
+      onToolCallStart,
+      onToolCallFinish
+    }));
+
     const accessToken = await this.auth.access();
     const authRecord = this.auth.getStored();
 
@@ -147,6 +219,21 @@ export class CodexModelClient {
     }
 
     turnLoop: for (;;) {
+      if (settings.agentMode === 'plan' || settings.agentMode === 'direct') {
+        const compacted = await this.maybeAutoCompactPlanOrDirect({
+          accessToken,
+          accountId: authRecord.accountId,
+          sessionId,
+          settings,
+          instructions,
+          toolDefinitions,
+          getHiddenCompactionState
+        });
+        if (compacted) {
+          requestItems = this.notebook.buildModelRequestHistory(sessionId);
+        }
+      }
+
       const compactionState = this.getCompactionWindowState(
         sessionId,
         instructions,
@@ -193,13 +280,16 @@ export class CodexModelClient {
       });
 
       previousResponseId = response.id ?? previousResponseId;
+      const latestSettings = this.getSessionSettings(sessionId);
       this.persistSession({
         sessionId,
         provider: 'openai-codex',
-        model: settings.model,
-        reasoningEffort: settings.reasoningEffort,
+        model: latestSettings.model,
+        reasoningEffort: latestSettings.reasoningEffort,
         previousResponseId,
-        updatedAt: nowIso()
+        updatedAt: nowIso(),
+        agentMode: latestSettings.agentMode,
+        planModePhase: latestSettings.planModePhase
       });
 
       const toolCalls = response.toolCalls;
@@ -325,6 +415,10 @@ export class CodexModelClient {
           await onToolCallFinish?.(call.callId, transcriptText);
         }
 
+        if (batchCalls.some((call) => call.name === 'ask_user')) {
+          return;
+        }
+
         index = nextIndex;
       }
 
@@ -367,10 +461,12 @@ export class CodexModelClient {
   }
 
   getContextWindowUsage(sessionId: string): ContextWindowUsage {
+    const settings = this.getSessionSettings(sessionId);
+    const modeConfig = resolveSessionPromptAndTools(settings);
     const { usedTokens, totalTokens, standardRateTokens } = this.getCompactionWindowState(
       sessionId,
-      MAIN_AGENT_PROMPT,
-      MAIN_TOOL_DEFINITIONS
+      modeConfig.instructions,
+      modeConfig.toolDefinitions
     );
     return { usedTokens, totalTokens, standardRateTokens };
   }
@@ -409,6 +505,183 @@ export class CodexModelClient {
       ...input,
       debugResponse: (kind, payload) => debugResponseShape(input.sessionId, kind, payload)
     });
+  }
+
+  private async maybeAutoCompactPlanOrDirect(input: {
+    accessToken: string;
+    accountId: string;
+    sessionId: string;
+    settings: ModelSessionRecord;
+    instructions: string;
+    toolDefinitions: readonly ToolDefinition[];
+    getHiddenCompactionState?: (() => Promise<HiddenCompactionStateSnapshot>) | undefined;
+  }): Promise<boolean> {
+    const compactionState = this.getCompactionWindowState(
+      input.sessionId,
+      input.instructions,
+      input.toolDefinitions
+    );
+    if (!compactionState.forceCompactOnly) {
+      return false;
+    }
+
+    const session = this.notebook.getSession(input.sessionId);
+    if (!session) {
+      return false;
+    }
+
+    const tailTokenBudget = Math.max(
+      1,
+      Math.min(
+        PLAN_DIRECT_RAW_TAIL_TOKEN_CAP,
+        Math.floor(compactionState.totalTokens * PLAN_DIRECT_RAW_TAIL_WINDOW_RATIO)
+      )
+    );
+    const nextTailStartHistoryId = this.notebook.getTailStartHistoryIdByTokenBudget(
+      input.sessionId,
+      tailTokenBudget
+    );
+    const latestCheckpoint = this.notebook.getLatestSessionCheckpoint(input.sessionId);
+    const transcriptStartId =
+      latestCheckpoint?.tailStartHistoryId ?? null;
+    const transcriptMiddle = this.notebook.listModelHistoryRange(input.sessionId, {
+      startIdInclusive: transcriptStartId,
+      endIdExclusive: nextTailStartHistoryId
+    });
+
+    if (transcriptMiddle.length === 0) {
+      return false;
+    }
+
+    const [gitLog, gitStatus, gitDiffStat, structuredState] = await Promise.all([
+      this.readGitSnapshot(session.cwd, ['log', '--oneline', '-5']),
+      this.readGitSnapshot(session.cwd, ['status', '--short']),
+      this.readGitSnapshot(session.cwd, ['diff', '--stat']),
+      this.resolveHiddenCompactionState(input.sessionId, input.settings, input.getHiddenCompactionState)
+    ]);
+    const artifactPointers = this.buildCompactionArtifactPointers(
+      session.cwd,
+      structuredState.approvedPlan
+    );
+
+    const summary = await runPlanDirectCompactor({
+      fetchImpl: this.fetchImpl,
+      endpoint: this.endpoint,
+      accessToken: input.accessToken,
+      accountId: input.accountId,
+      sessionId: `compact-${input.sessionId}-${Date.now()}`,
+      input: {
+        mode: structuredState.mode,
+        previousCheckpoint: latestCheckpoint?.checkpointSummary ?? null,
+        structuredState,
+        transcriptMiddle,
+        gitLog,
+        gitStatus,
+        gitDiffStat,
+        artifactPointers,
+        originalUserRequest: this.getOriginalUserPrompt(input.sessionId)
+      }
+    });
+
+    const compactionArtifacts = await writePlanDirectCompactionArtifacts({
+      cwd: session.cwd,
+      transcriptMiddle,
+      summary,
+      artifactPointers
+    });
+    const checkpointBlock = renderPlanDirectCheckpointBlock({
+      summary,
+      structuredState,
+      gitLog,
+      gitStatus,
+      gitDiffStat,
+      compactionArtifacts
+    });
+
+    this.notebook.createSessionCheckpoint({
+      sessionId: input.sessionId,
+      checkpointKind: 'plan_direct',
+      goal: summary.task.goal,
+      completed: summary.state.completed.join(' | ') || '(none)',
+      next: summary.state.next.join(' | ') || '(none)',
+      openRisks: summary.state.blockers.join(' | ') || undefined,
+      currentCommitments:
+        summary.durable_decisions.map((decision) => decision.decision).join(' | ') || undefined,
+      importantNonGoals: summary.task.non_goals.join(' | ') || undefined,
+      gitLog,
+      gitStatus,
+      gitDiffStat,
+      lastTestStatus: structuredState.lastTestStatus,
+      activeExperimentSummaries: [],
+      invalidatedExperimentSummaries: [],
+      checkpointBlock,
+      checkpointSummary: summary,
+      artifacts: compactionArtifacts.pointers,
+      tailStartHistoryId: nextTailStartHistoryId
+    });
+
+    return true;
+  }
+
+  private async readGitSnapshot(cwd: string, args: string[]): Promise<string> {
+    const result = await execa('git', args, {
+      cwd,
+      reject: false
+    });
+
+    if (result.exitCode === 0) {
+      return result.stdout.trim() || '(clean)';
+    }
+
+    const errorText = result.stderr.trim() || result.stdout.trim() || '(unavailable)';
+    return `git ${args.join(' ')} failed: ${clampText(errorText, 500)}`;
+  }
+
+  private buildCompactionArtifactPointers(
+    cwd: string,
+    approvedPlan: HiddenCompactionStateSnapshot['approvedPlan']
+  ): CompactionArtifactPointer[] {
+    const pointers: CompactionArtifactPointer[] = [];
+    if (approvedPlan?.planPath) {
+      pointers.push({
+        path: approvedPlan.planPath,
+        why: 'approved plan artifact'
+      });
+    }
+
+    const toolOutputDir = path.join(cwd, '.h2', 'tool-output');
+    pointers.push({
+      path: toolOutputDir,
+      why: 'spilled large tool outputs'
+    });
+    return pointers;
+  }
+
+  private getOriginalUserPrompt(sessionId: string): string {
+    const history = this.notebook.listModelHistory(sessionId);
+    const firstUserMessage = history.find(
+      (item) => item.type === 'message' && item.role === 'user'
+    );
+    return firstUserMessage?.type === 'message' ? firstUserMessage.content : '';
+  }
+
+  private async resolveHiddenCompactionState(
+    sessionId: string,
+    settings: ModelSessionRecord,
+    getHiddenCompactionState?: (() => Promise<HiddenCompactionStateSnapshot>) | undefined
+  ): Promise<HiddenCompactionStateSnapshot> {
+    if (getHiddenCompactionState) {
+      return getHiddenCompactionState();
+    }
+
+    return {
+      mode: settings.agentMode === 'plan' ? 'plan' : 'direct',
+      planModePhase: settings.planModePhase,
+      approvedPlan: this.notebook.getSessionPlan(sessionId),
+      todos: this.notebook.listSessionTodos(sessionId),
+      lastTestStatus: this.notebook.getLatestSessionCheckpoint(sessionId)?.lastTestStatus ?? null,
+      activeProcessSummary: []
+    };
   }
 
   private persistSession(record: ModelSessionRecord): void {
@@ -508,9 +781,143 @@ export class CodexModelClient {
       model: this.defaultModel,
       reasoningEffort: DEFAULT_REASONING_EFFORT,
       previousResponseId: null,
-      updatedAt: nowIso()
+      updatedAt: nowIso(),
+      agentMode: 'study',
+      planModePhase: null
     };
   }
+}
+
+function normalizeRunTurnArgs(input: {
+  webSearchMode: 'disabled' | 'cached' | 'live' | readonly ToolDefinition[] | undefined;
+  toolDefinitions:
+    | readonly ToolDefinition[]
+    | string
+    | ((
+        toolCall: {
+          toolCallId: string;
+          toolName: string;
+          label: string;
+          detail?: string | null;
+          body?: string[];
+          providerExecuted?: boolean;
+        }
+      ) => Promise<void>)
+    | undefined;
+  instructions:
+    | string
+    | ((toolCall: {
+        toolCallId: string;
+        toolName: string;
+        label: string;
+        detail?: string | null;
+        body?: string[];
+        providerExecuted?: boolean;
+      }) => Promise<void>)
+    | undefined;
+  onToolCallStart?:
+    | ((
+        toolCall: {
+          toolCallId: string;
+          toolName: string;
+          label: string;
+          detail?: string | null;
+          body?: string[];
+          providerExecuted?: boolean;
+        }
+      ) => Promise<void>)
+    | ((toolCallId: string, transcriptText?: string) => Promise<void>);
+  onToolCallFinish?: (toolCallId: string, transcriptText?: string) => Promise<void>;
+}): {
+  webSearchMode: 'disabled' | 'cached' | 'live' | undefined;
+  toolDefinitions: readonly ToolDefinition[];
+  instructions: string;
+  onToolCallStart?: (toolCall: {
+    toolCallId: string;
+    toolName: string;
+    label: string;
+    detail?: string | null;
+    body?: string[];
+    providerExecuted?: boolean;
+  }) => Promise<void>;
+  onToolCallFinish?: (toolCallId: string, transcriptText?: string) => Promise<void>;
+} {
+  const defaultToolDefinitions = STUDY_TOOL_DEFINITIONS;
+  const defaultInstructions = STUDY_AGENT_PROMPT;
+
+  let resolvedWebSearchMode: 'disabled' | 'cached' | 'live' | undefined =
+    typeof input.webSearchMode === 'string' ? input.webSearchMode : undefined;
+  let resolvedToolDefinitions = defaultToolDefinitions;
+  let resolvedInstructions = defaultInstructions;
+  let resolvedOnToolCallStart:
+    | ((
+        toolCall: {
+          toolCallId: string;
+          toolName: string;
+          label: string;
+          detail?: string | null;
+          body?: string[];
+          providerExecuted?: boolean;
+        }
+      ) => Promise<void>)
+    | undefined;
+  let resolvedOnToolCallFinish:
+    | ((toolCallId: string, transcriptText?: string) => Promise<void>)
+    | undefined = input.onToolCallFinish;
+
+  if (Array.isArray(input.webSearchMode)) {
+    resolvedToolDefinitions = input.webSearchMode;
+  } else if (typeof input.toolDefinitions === 'function') {
+    resolvedOnToolCallStart = input.toolDefinitions;
+    resolvedOnToolCallFinish =
+      typeof input.instructions === 'function'
+        ? (input.instructions as unknown as (
+            toolCallId: string,
+            transcriptText?: string
+          ) => Promise<void>)
+        : (input.onToolCallStart as
+            | ((toolCallId: string, transcriptText?: string) => Promise<void>)
+            | undefined);
+    return {
+      webSearchMode: resolvedWebSearchMode,
+      toolDefinitions: resolvedToolDefinitions,
+      instructions: resolvedInstructions,
+      onToolCallStart: resolvedOnToolCallStart,
+      onToolCallFinish: resolvedOnToolCallFinish
+    };
+  } else if (Array.isArray(input.toolDefinitions)) {
+    resolvedToolDefinitions = input.toolDefinitions;
+  }
+
+  if (typeof input.instructions === 'string') {
+    resolvedInstructions = input.instructions;
+  } else if (typeof input.instructions === 'function') {
+    resolvedOnToolCallStart = input.instructions;
+    resolvedOnToolCallFinish = input.onToolCallStart as
+      | ((toolCallId: string, transcriptText?: string) => Promise<void>)
+      | undefined;
+  } else {
+    resolvedOnToolCallStart = input.onToolCallStart as
+      | ((
+          toolCall: {
+            toolCallId: string;
+            toolName: string;
+            label: string;
+            detail?: string | null;
+            body?: string[];
+            providerExecuted?: boolean;
+          }
+        ) => Promise<void>)
+      | undefined;
+  }
+
+  return {
+    webSearchMode: resolvedWebSearchMode,
+    toolDefinitions: resolvedToolDefinitions,
+    instructions: resolvedInstructions,
+    onToolCallStart: resolvedOnToolCallStart,
+    onToolCallFinish: resolvedOnToolCallFinish
+  };
 }
 
 function formatReadHeader(path: string, startLine?: number, endLine?: number): string {

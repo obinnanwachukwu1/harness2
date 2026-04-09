@@ -1,3 +1,5 @@
+import type { AgentMode } from '../types.js';
+
 export type EvalReasoningEffort = 'off' | 'low' | 'medium' | 'high';
 
 export type EvalWebSearchMode = 'disabled' | 'cached' | 'live' | 'fixed';
@@ -10,10 +12,12 @@ export interface EvalSuiteMeta {
 }
 
 export interface EvalRuntimeConfig {
+  mode: AgentMode;
   model?: string;
   reasoningEffort: EvalReasoningEffort;
   thinking: boolean;
   webSearchMode: EvalWebSearchMode;
+  contextWindowTokens?: number;
   parallelism?: number;
   repeatCount?: number;
   defaultExperimentBudget?: number;
@@ -81,6 +85,7 @@ export interface EvalRunRequest {
   selectedCaseIds?: string[];
   parallelism?: number;
   repeatCount?: number;
+  runtimeOverride?: Partial<EvalRuntimeConfig>;
   onProgress?: (event: EvalRunProgressEvent) => void;
 }
 

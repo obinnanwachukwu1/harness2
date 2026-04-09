@@ -5,6 +5,7 @@ import type { OpenTuiExperimentSummary, OpenTuiRenderBlock, OpenTuiState } from 
 type ToolTone = Extract<OpenTuiRenderBlock, { kind: 'tool' }>['tone'];
 
 const INPUT_PLACEHOLDER = 'Send a prompt…';
+const PENDING_INPUT_PLACEHOLDER = 'Reply to the pending question…';
 
 export function buildOpenTuiState(snapshot: EngineSnapshot): OpenTuiState {
   return {
@@ -12,7 +13,7 @@ export function buildOpenTuiState(snapshot: EngineSnapshot): OpenTuiState {
     cwd: snapshot.session.cwd,
     status: formatStatus(snapshot),
     thinkingEnabled: snapshot.thinkingEnabled,
-    inputPlaceholder: INPUT_PLACEHOLDER,
+    inputPlaceholder: snapshot.pendingUserRequest ? PENDING_INPUT_PLACEHOLDER : INPUT_PLACEHOLDER,
     blocks: buildBlocks(snapshot),
     experiments: snapshot.experiments.map(summarizeExperiment)
   };
@@ -81,7 +82,40 @@ function buildBlocks(snapshot: EngineSnapshot): OpenTuiRenderBlock[] {
     });
   }
 
+  if (snapshot.pendingUserRequest) {
+    blocks.push(pendingUserRequestToBlock(snapshot));
+  }
+
   return blocks;
+}
+
+function pendingUserRequestToBlock(snapshot: EngineSnapshot): OpenTuiRenderBlock {
+  const request = snapshot.pendingUserRequest!;
+  const body: string[] = [];
+  if (request.context) {
+    body.push(compactText(request.context, 96));
+  }
+  body.push(`question  ${compactText(request.question, 92)}`);
+
+  if (request.responseKind === 'single_choice' && request.options?.length) {
+    for (const option of request.options) {
+      const suffix =
+        option.id === request.recommendedOptionId ? ' [recommended]' : '';
+      body.push(`${option.id}${suffix}  ${compactText(`${option.label} — ${option.description}`, 88)}`);
+    }
+  } else if (request.responseKind === 'yes_no' && request.recommendedResponse) {
+    body.push(`recommended  ${request.recommendedResponse.toUpperCase()}`);
+  }
+
+  const footer = request.reason ? [compactText(request.reason, 96)] : [];
+  return {
+    id: `pending-user-request-${snapshot.session.id}`,
+    kind: 'tool',
+    tone: 'tool',
+    header: `ask_user  ${request.kind}  ${request.responseKind}`,
+    body,
+    footer
+  };
 }
 
 function transcriptEntryToBlocks(
@@ -654,12 +688,37 @@ function formatTokenCount(value: number): string {
 function formatStatus(snapshot: EngineSnapshot): OpenTuiState['status'] {
   const ctxLimit = snapshot.standardRateContextTokens || snapshot.contextWindowTokens;
   const usedPercent = ctxLimit > 0 ? Math.max(0, Math.round((snapshot.estimatedContextTokens / ctxLimit) * 100)) : 0;
+  const phaseSuffix =
+    snapshot.agentMode === 'plan' && snapshot.planModePhase
+      ? `/${snapshot.planModePhase.replace('_', '-')}`
+      : '';
 
   return {
-    label: snapshot.statusText === 'running turn' ? 'running' : snapshot.statusText,
+    label:
+      snapshot.pendingUserRequest && snapshot.statusText === 'idle'
+        ? 'waiting'
+        : snapshot.statusText === 'running turn'
+          ? 'running'
+          : snapshot.statusText,
+    modeText: `${snapshot.agentMode}${phaseSuffix}`,
     model: snapshot.model,
     contextText: `${formatTokenCount(snapshot.estimatedContextTokens)}/${formatTokenCount(ctxLimit)}`,
     contextUsagePercent: usedPercent,
-    usageText: `${usedPercent}% used`
+    usageText: `${usedPercent}% used`,
+    pendingText: formatPendingText(snapshot)
   };
+}
+
+function formatPendingText(snapshot: EngineSnapshot): string | null {
+  const request = snapshot.pendingUserRequest;
+  if (!request) {
+    return null;
+  }
+  if (request.responseKind === 'single_choice' && request.recommendedOptionId) {
+    return `pick ${request.recommendedOptionId}`;
+  }
+  if (request.responseKind === 'yes_no' && request.recommendedResponse) {
+    return request.recommendedResponse.toUpperCase();
+  }
+  return 'reply needed';
 }

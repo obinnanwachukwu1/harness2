@@ -4,12 +4,13 @@ import { mkdir, writeFile } from 'node:fs/promises';
 import { parseEvalManifest } from './manifest-parse.js';
 import { runEvalCase } from './case-runner.js';
 import { scoreEvalRun } from './score-run.js';
-import type { EvalRunRequest, EvalSuiteRunResult } from './manifest-types.js';
+import type { EvalRunRequest, EvalRuntimeConfig, EvalSuiteRunResult } from './manifest-types.js';
 import { createSessionId, nowIso } from '../lib/utils.js';
 import { getGlobalH2Dir } from '../state-paths.js';
 
 export async function runEvalSuite(request: EvalRunRequest): Promise<EvalSuiteRunResult> {
   const parsed = await parseEvalManifest(request.manifestPath);
+  const runtime = mergeRuntime(parsed.manifest.runtime, request.runtimeOverride);
   const selectedCases =
     request.selectedCaseIds && request.selectedCaseIds.length > 0
       ? parsed.manifest.cases.filter((entry) => request.selectedCaseIds!.includes(entry.id))
@@ -23,7 +24,17 @@ export async function runEvalSuite(request: EvalRunRequest): Promise<EvalSuiteRu
   const startedAt = nowIso();
   await mkdir(runRoot, { recursive: true });
   const lockedManifestPath = path.join(runRoot, 'manifest.lock.json');
-  await writeFile(lockedManifestPath, JSON.stringify(parsed.manifest, null, 2), 'utf8');
+  const effectiveManifest = {
+    ...parsed.manifest,
+    runtime
+  };
+  await writeFile(lockedManifestPath, JSON.stringify(effectiveManifest, null, 2), 'utf8');
+  const effectiveParallelism = normalizeParallelism(request.parallelism ?? runtime.parallelism);
+  if (runtime.contextWindowTokens && effectiveParallelism > 1) {
+    throw new Error(
+      'context_window_tokens is only supported with eval parallelism = 1 because the current implementation uses a process-wide override.'
+    );
+  }
   request.onProgress?.({
     type: 'suite_started',
     runId,
@@ -42,7 +53,7 @@ export async function runEvalSuite(request: EvalRunRequest): Promise<EvalSuiteRu
   });
   const results = await runCasesWithConcurrency(
     plannedCases,
-    normalizeParallelism(request.parallelism ?? parsed.manifest.runtime.parallelism),
+    effectiveParallelism,
     async (planned) => {
       request.onProgress?.({
         type: 'case_started',
@@ -60,7 +71,7 @@ export async function runEvalSuite(request: EvalRunRequest): Promise<EvalSuiteRu
         caseDefinition: planned.testCase,
         fixture: planned.fixture,
         runRoot,
-        runtime: parsed.manifest.runtime,
+        runtime,
         clarification: parsed.manifest.clarification
       });
       request.onProgress?.({
@@ -92,6 +103,16 @@ export async function runEvalSuite(request: EvalRunRequest): Promise<EvalSuiteRu
   await writeFile(path.join(runRoot, 'suite-summary.json'), JSON.stringify(output, null, 2), 'utf8');
   await scoreEvalRun(runRoot);
   return output;
+}
+
+function mergeRuntime(
+  base: EvalRuntimeConfig,
+  override?: Partial<EvalRuntimeConfig>
+): EvalRuntimeConfig {
+  return {
+    ...base,
+    ...override
+  };
 }
 
 function createRunId(): string {

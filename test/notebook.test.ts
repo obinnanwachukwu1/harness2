@@ -354,11 +354,14 @@ test('Notebook persists checkpoints and rebuilds compacted request history from 
   });
 
   assert.equal(firstCheckpoint.goal, 'ship compaction');
+  assert.equal(firstCheckpoint.checkpointKind, 'study');
   assert.equal(firstCheckpoint.currentCommitments, 'runs remain historical snapshots');
   assert.equal(firstCheckpoint.importantNonGoals, 'avoid schema redesign during the checkpoint pass');
   assert.match(firstCheckpoint.gitLog, /abc123/);
   assert.equal(firstCheckpoint.activeExperimentSummaries.length, 1);
   assert.equal(firstCheckpoint.invalidatedExperimentSummaries.length, 1);
+  assert.equal(firstCheckpoint.checkpointSummary, null);
+  assert.deepEqual(firstCheckpoint.artifacts, []);
 
   assert.deepEqual(notebook.buildModelRequestHistory(session.id), [
     {
@@ -408,6 +411,8 @@ test('Notebook persists checkpoints and rebuilds compacted request history from 
       content: 'tail-two'
     }
   ]);
+
+  assert.equal(typeof notebook.getTailStartHistoryIdByTokenBudget(session.id, 2), 'number');
 });
 
 test('Notebook persists open questions without injecting reminder developer messages into request history', async (t) => {

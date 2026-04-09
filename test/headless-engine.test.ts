@@ -67,6 +67,142 @@ test('HeadlessEngine routes slash commands through the prototype runner', async 
   );
 });
 
+test('HeadlessEngine plan mode pauses on ask_user approval and resumes after yes', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir, agentMode: 'plan' });
+  t.after(async () => engine.dispose());
+
+  const originalRunTurn = engine.modelClient.runTurn;
+  engine.modelClient.runTurn = async () => {};
+  t.after(() => {
+    engine.modelClient.runTurn = originalRunTurn;
+  });
+
+  await engine.createPlan({
+    goal: 'Add a tiny implementation',
+    assumptions: ['No extra API design is needed'],
+    files: ['README.md'],
+    steps: ['Update the file'],
+    validation: ['Read the diff'],
+    risks: ['Low risk'],
+    planMarkdown: '# Plan\n\n- Update README.md\n'
+  });
+
+  assert.equal(engine.getSessionSettings().planModePhase, 'planning');
+
+  const request = await engine.askUser({
+    kind: 'approval',
+    responseKind: 'yes_no',
+    question: 'Approve this plan?',
+    recommendedResponse: 'yes',
+    reason: 'The scope is small and locally validated.'
+  });
+
+  assert.equal(request.status, 'waiting_for_user');
+  assert.equal(engine.getSessionSettings().planModePhase, 'awaiting_approval');
+  assert.equal(engine.notebook.getPendingUserRequest(engine.snapshot.session.id)?.kind, 'approval');
+
+  await engine.submit('Yes. Proceed.');
+
+  assert.equal(engine.getSessionSettings().planModePhase, 'execution');
+  assert.equal(engine.notebook.getPendingUserRequest(engine.snapshot.session.id), null);
+});
+
+test('HeadlessEngine ask_user supports single-choice clarification with one recommended option', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir, agentMode: 'plan' });
+  t.after(async () => engine.dispose());
+
+  const result = await engine.askUser({
+    kind: 'clarification',
+    responseKind: 'single_choice',
+    question: 'Which migration strategy should we use?',
+    options: [
+      { id: 'a', label: 'Inline migrate', description: 'Patch schema in place during startup.' },
+      { id: 'b', label: 'Offline migrate', description: 'Require a one-time manual migration step.' }
+    ],
+    recommendedOptionId: 'a',
+    reason: 'It matches the existing harness startup pattern and keeps the eval flow simple.'
+  });
+
+  assert.equal(result.responseKind, 'single_choice');
+  assert.equal(result.recommendedOptionId, 'a');
+  assert.equal(result.options?.length, 2);
+  assert.equal(engine.getSessionSettings().planModePhase, 'planning');
+
+  const pending = engine.notebook.getPendingUserRequest(engine.snapshot.session.id);
+  assert.equal(pending?.responseKind, 'single_choice');
+  assert.equal(pending?.recommendedOptionId, 'a');
+  assert.equal(pending?.options?.[0]?.id, 'a');
+});
+
+test('HeadlessEngine submit normalizes single-choice replies into the selected option', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir, agentMode: 'plan' });
+  t.after(async () => engine.dispose());
+
+  const originalRunTurn = engine.modelClient.runTurn;
+  engine.modelClient.runTurn = async () => {};
+  t.after(() => {
+    engine.modelClient.runTurn = originalRunTurn;
+  });
+
+  await engine.askUser({
+    kind: 'clarification',
+    responseKind: 'single_choice',
+    question: 'Which rollout should we use?',
+    options: [
+      { id: 'a', label: 'Immediate', description: 'Turn it on everywhere now.' },
+      { id: 'b', label: 'Gradual', description: 'Roll it out in stages.' }
+    ],
+    recommendedOptionId: 'b',
+    reason: 'A staged rollout is safer.'
+  });
+
+  await engine.submit('I choose b.');
+
+  const lastUserEntry = [...engine.snapshot.transcript].reverse().find((entry) => entry.role === 'user');
+  assert.match(lastUserEntry?.text ?? '', /Selected option: b \(Gradual\)/);
+});
+
+test('HeadlessEngine rejects repo-root evidence scopes for open questions', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  await assert.rejects(
+    () =>
+      engine.openStudyDebt({
+        summary: 'claim loop semantics remain unresolved',
+        whyItMatters: 'A root-scoped evidence path would gate the whole repo.',
+        kind: 'runtime',
+        affectedPaths: ['src/queue.js'],
+        evidencePaths: ['.']
+      }),
+    /evidencePaths cannot target the repo root or wildcard root scopes/
+  );
+
+  await assert.rejects(
+    () =>
+      engine.openStudyDebt({
+        summary: 'claim loop semantics remain unresolved',
+        whyItMatters: 'A root-scoped evidence path would gate the whole repo.',
+        kind: 'runtime',
+        affectedPaths: ['src/queue.js'],
+        evidencePaths: ['src/..']
+      }),
+    /evidencePaths cannot target the repo root/
+  );
+});
+
 test('HeadlessEngine read defaults to 100 lines and supports explicit line ranges', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));

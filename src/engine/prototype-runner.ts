@@ -22,6 +22,8 @@ const HELP_TEXT = [
   '/adopt <experimentId> [--apply]',
   '/experiment-budget <experimentId> <additionalTokens>',
   '/experiments [query]',
+  '/approve [optionId]',
+  '/plan-status',
   '/export [sessionId]',
   '/clear-journal [--force]',
   '/auth login',
@@ -382,6 +384,41 @@ export class PrototypeRunner {
           return `${experiment.experimentId}  ${experiment.status}  ${summary}`;
         });
         await context.emit('assistant', lines.join('\n'));
+        return;
+      }
+
+      case 'approve': {
+        if (!context.tools.approvePlan) {
+          await context.emit('assistant', 'Plan approval is not available.');
+          return;
+        }
+
+        const result = await context.tools.approvePlan(rawArgs[0]);
+        await context.emit('assistant', `Plan approved. Session is now in execution.`);
+        return;
+      }
+
+      case 'plan-status': {
+        if (!context.tools.getPlanStatus) {
+          await context.emit('assistant', 'Plan status is not available.');
+          return;
+        }
+
+        const result = await context.tools.getPlanStatus();
+        if (!result.plan) {
+          await context.emit('assistant', `plan phase: ${result.phase ?? 'none'}\nno plan yet`);
+          return;
+        }
+
+        const plan = result.plan;
+        await context.emit(
+          'assistant',
+          [
+            `phase: ${result.phase ?? 'none'}`,
+            `plan: ${plan.planPath}`,
+            `goal: ${plan.goal}`
+          ].join('\n')
+        );
         return;
       }
 

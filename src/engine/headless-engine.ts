@@ -11,12 +11,22 @@ import { OpenAICodexAuth } from '../auth/openai-codex.js';
 import { migrateLegacyRepoLocalAuth, openGlobalAuthNotebook } from '../auth/storage.js';
 import { ExperimentManager } from '../experiments/experiment-manager.js';
 import { clampText, createSessionId, formatUnknownError, lines, nowIso } from '../lib/utils.js';
-import { CodexModelClient, EXPERIMENT_TOOL_DEFINITIONS } from '../model/codex-client.js';
+import {
+  CodexModelClient,
+  EXPERIMENT_TOOL_DEFINITIONS,
+  resolveSessionPromptAndTools
+} from '../model/codex-client.js';
 import { EXPERIMENT_SUBAGENT_PROMPT } from '../model/codex-prompt.js';
 import { Notebook } from '../storage/notebook.js';
 import type {
+  AgentMode,
   AgentRunner,
   AgentTools,
+  AskUserInput,
+  AskUserResult,
+  ApprovePlanResult,
+  CreatePlanInput,
+  CreatePlanResult,
   EngineSnapshot,
   ExperimentAdoptionPreview,
   ExperimentAdoptionResult,
@@ -31,14 +41,19 @@ import type {
   ExperimentSearchGuardrail,
   ExperimentSearchResult,
   ExperimentWaitResult,
+  HiddenCompactionStateSnapshot,
   LiveTurnEvent,
   ModelHistoryItem,
+  ModelSessionRecord,
+  PlanStatusResult,
   SessionExportResult,
   SpawnExperimentInput,
   StudyDebtKind,
   StudyDebtRecord,
   StudyDebtResolution,
   TranscriptRole,
+  UpdateTodosInput,
+  UpdateTodosResult,
   WriteStdinInput,
   WriteStdinResult
 } from '../types.js';
@@ -50,6 +65,7 @@ interface OpenEngineOptions {
   sessionId?: string;
   revealExportsInFinder?: boolean;
   webSearchMode?: 'disabled' | 'cached' | 'live';
+  agentMode?: AgentMode;
 }
 
 const DEFAULT_EXPERIMENT_MODEL = process.env.H2_EXPERIMENT_MODEL ?? 'gpt-5.4-mini';
@@ -81,6 +97,7 @@ interface ExecSession {
   updateLastTestStatus: boolean;
   waitForExit: Promise<void>;
   resolveWaitForExit: () => void;
+  outputWaiters: Array<() => void>;
 }
 
 export class HeadlessEngine {
@@ -99,9 +116,20 @@ export class HeadlessEngine {
       if (!existing) {
         throw new Error(`Unknown session: ${sessionId}`);
       }
+      const settings = notebook.getOrCreateModelSession(sessionId, {
+        agentMode: options.agentMode
+      });
+      if (options.agentMode && settings.agentMode !== options.agentMode) {
+        throw new Error(
+          `Session ${sessionId} already uses mode ${settings.agentMode}; mode is session-wide and cannot be changed.`
+        );
+      }
       notebook.touchSession(sessionId);
     } else {
       notebook.createSession(sessionId, options.cwd);
+      notebook.getOrCreateModelSession(sessionId, {
+        agentMode: options.agentMode ?? 'study'
+      });
     }
 
     return new HeadlessEngine({
@@ -187,6 +215,11 @@ export class HeadlessEngine {
       adoptExperiment: (experimentId, adoptionOptions) =>
         this.adoptExperiment(experimentId, adoptionOptions),
       resolveExperiment: async (input) => this.experimentManager.resolve(input),
+      createPlan: (input) => this.createPlan(input),
+      askUser: (input) => this.askUser(input),
+      updateTodos: (input) => this.updateTodos(input),
+      approvePlan: (optionId) => this.approvePlan(optionId),
+      getPlanStatus: () => Promise.resolve(this.getPlanStatus()),
       compact: (goal, completed, next, openRisks, currentCommitments, importantNonGoals) =>
         this.runCompact(goal, completed, next, openRisks, currentCommitments, importantNonGoals),
       authLogin: () => this.runAuthLogin(),
@@ -243,6 +276,85 @@ export class HeadlessEngine {
     return this.experimentManager;
   }
 
+  getSessionSettings(): ModelSessionRecord {
+    return this.options.notebook.getOrCreateModelSession(this.options.sessionId);
+  }
+
+  async approvePlan(optionId?: string): Promise<ApprovePlanResult> {
+    const settings = this.getSessionSettings();
+    if (settings.agentMode !== 'plan') {
+      throw new Error('Plan approval is only available in plan mode.');
+    }
+    if (settings.planModePhase !== 'awaiting_approval') {
+      throw new Error('This session is not waiting for plan approval.');
+    }
+
+    const plan = this.options.notebook.getSessionPlan(this.options.sessionId);
+    if (!plan) {
+      throw new Error('No session plan is available to approve.');
+    }
+
+    void optionId;
+    this.options.notebook.approveSessionPlan(this.options.sessionId);
+    this.options.notebook.clearPendingUserRequest(this.options.sessionId);
+    this.options.notebook.setPlanModePhase(this.options.sessionId, 'execution');
+    this.emitChange();
+    return {
+      sessionId: this.options.sessionId,
+      status: 'execution'
+    };
+  }
+
+  async askUser(input: AskUserInput): Promise<AskUserResult> {
+    const settings = this.getSessionSettings();
+    if (settings.agentMode !== 'plan') {
+      throw new Error('ask_user is only available in plan mode.');
+    }
+
+    validateAskUserInput(input);
+
+    if (input.kind === 'approval' && !this.options.notebook.getSessionPlan(this.options.sessionId)) {
+      throw new Error('ask_user approval requests require an existing session plan.');
+    }
+
+    const request = this.options.notebook.savePendingUserRequest({
+      sessionId: this.options.sessionId,
+      kind: input.kind,
+      responseKind: input.responseKind,
+      question: input.question,
+      context: input.context,
+      options: input.options ?? null,
+      recommendedOptionId: input.recommendedOptionId ?? null,
+      recommendedResponse: input.recommendedResponse ?? null,
+      reason: input.reason ?? null
+    });
+
+    if (input.kind === 'approval') {
+      this.options.notebook.setPlanModePhase(this.options.sessionId, 'awaiting_approval');
+    }
+
+    this.emitChange();
+    return {
+      sessionId: this.options.sessionId,
+      status: 'waiting_for_user',
+      kind: request.kind,
+      responseKind: request.responseKind,
+      question: request.question,
+      options: request.options,
+      recommendedOptionId: request.recommendedOptionId,
+      recommendedResponse: request.recommendedResponse,
+      reason: request.reason
+    };
+  }
+
+  getPlanStatus(): PlanStatusResult {
+    const settings = this.getSessionSettings();
+    return {
+      phase: settings.planModePhase,
+      plan: this.options.notebook.getSessionPlan(this.options.sessionId)
+    };
+  }
+
   submit(
     input: string,
     options: {
@@ -252,9 +364,53 @@ export class HeadlessEngine {
     } = {}
   ): Promise<void> {
     const work = this.turnQueue.then(async () => {
-      const trimmed = input.trim();
+      let trimmed = input.trim();
       if (!trimmed) {
         return;
+      }
+
+      const pendingUserRequest = this.options.notebook.getPendingUserRequest(this.options.sessionId);
+      if (pendingUserRequest) {
+        this.options.notebook.clearPendingUserRequest(this.options.sessionId);
+        const settings = this.getSessionSettings();
+        if (pendingUserRequest.kind === 'approval' && settings.agentMode === 'plan') {
+          const answer = parseYesNoAnswer(trimmed);
+          if (answer === 'yes') {
+            await this.approvePlan();
+            trimmed = pendingUserRequest.reason
+              ? `The user approved the plan. User response: ${trimmed}\nRecommended rationale: ${pendingUserRequest.reason}`
+              : `The user approved the plan. User response: ${trimmed}`;
+          } else if (answer === 'no') {
+            this.options.notebook.setPlanModePhase(this.options.sessionId, 'planning');
+            trimmed = `The user did not approve the current plan. User response: ${trimmed}\nRevise the plan or ask a narrower follow-up if needed.`;
+          } else {
+            this.options.notebook.setPlanModePhase(this.options.sessionId, 'planning');
+            trimmed = `The user responded to the plan request: ${trimmed}\nInterpret this as feedback and continue planning before implementation.`;
+          }
+        } else if (
+          pendingUserRequest.responseKind === 'single_choice' &&
+          pendingUserRequest.options?.length
+        ) {
+          const selected = parseSingleChoiceAnswer(trimmed, pendingUserRequest.options);
+          if (selected) {
+            trimmed =
+              `User selected option for your question:\n` +
+              `Question: ${pendingUserRequest.question}\n` +
+              `Selected option: ${selected.id} (${selected.label})\n` +
+              `Response: ${trimmed}`;
+          } else {
+            trimmed =
+              `User response to your question:\n` +
+              `Question: ${pendingUserRequest.question}\n` +
+              `Available options: ${pendingUserRequest.options.map((option) => `${option.id} (${option.label})`).join(', ')}\n` +
+              `Response: ${trimmed}`;
+          }
+        } else {
+          trimmed =
+            `User response to your question:\n` +
+            `Question: ${pendingUserRequest.question}\n` +
+            `Response: ${trimmed}`;
+        }
       }
 
       this.activeTurnId += 1;
@@ -270,6 +426,7 @@ export class HeadlessEngine {
       });
 
       try {
+        const settings = this.getSessionSettings();
         await this.options.runner.runTurn(trimmed, {
           tools: this.tools,
           emit: async (role, text) => {
@@ -279,34 +436,102 @@ export class HeadlessEngine {
             await options.onTranscriptEntry?.(role, text);
           },
           runModel: async (input) => {
-            await this.model.runTurn(
-              this.options.sessionId,
-              input,
-              this.tools,
-              async (role, text) => {
-                this.resetLiveStreamsForTranscriptEntry(role, text);
-                this.appendTranscript(role, text);
-                await options.onTranscriptEntry?.(role, text);
-              },
-              async (text) => {
-                this.appendLiveTextEvent('assistant', text);
-                await options.onAssistantStream?.(text);
-              },
-              async (text) => {
-                this.appendLiveTextEvent('thinking', text);
-                await options.onReasoningSummaryStream?.(text);
-              },
-              this.thinkingEnabled,
-              this.options.webSearchMode,
-              undefined,
-              undefined,
-              async (toolCall) => {
-                this.startLiveToolCall(toolCall);
-              },
-              async (toolCallId, transcriptText) => {
-                this.finishLiveToolCall(toolCallId, transcriptText);
-              }
-            );
+            if (settings.agentMode === 'plan' && settings.planModePhase === 'awaiting_approval') {
+              const pendingRequest = this.options.notebook.getPendingUserRequest(this.options.sessionId);
+              const recommendation =
+                pendingRequest?.responseKind === 'single_choice' &&
+                pendingRequest.recommendedOptionId &&
+                pendingRequest.reason
+                  ? `Recommended option: ${pendingRequest.recommendedOptionId} — ${pendingRequest.reason}`
+                  : pendingRequest?.responseKind === 'single_choice' &&
+                      pendingRequest.recommendedOptionId
+                    ? `Recommended option: ${pendingRequest.recommendedOptionId}`
+                    : pendingRequest?.recommendedResponse && pendingRequest.reason
+                  ? `Recommended response: ${pendingRequest.recommendedResponse.toUpperCase()} — ${pendingRequest.reason}`
+                  : pendingRequest?.recommendedResponse
+                    ? `Recommended response: ${pendingRequest.recommendedResponse.toUpperCase()}`
+                    : null;
+              const optionBlock =
+                pendingRequest?.responseKind === 'single_choice' && pendingRequest.options?.length
+                  ? `\nOptions:\n${pendingRequest.options
+                      .map((option) => `- ${option.id}: ${option.label} — ${option.description}`)
+                      .join('\n')}`
+                  : '';
+              const message =
+                `User input required before execution.\n` +
+                `${pendingRequest?.question ?? 'Answer the pending plan question to continue.'}` +
+                optionBlock +
+                `${recommendation ? `\n${recommendation}` : ''}`;
+              this.appendTranscript('assistant', message);
+              this.appendModelHistory({
+                type: 'message',
+                role: 'assistant',
+                content: message
+              });
+              await options.onTranscriptEntry?.('assistant', message);
+              return;
+            }
+
+            const modeConfig = resolveSessionPromptAndTools(settings);
+            const emitTranscript = async (role: TranscriptRole, text: string) => {
+              this.resetLiveStreamsForTranscriptEntry(role, text);
+              this.appendTranscript(role, text);
+              await options.onTranscriptEntry?.(role, text);
+            };
+            const onAssistant = async (text: string) => {
+              this.appendLiveTextEvent('assistant', text);
+              await options.onAssistantStream?.(text);
+            };
+            const onThinking = async (text: string) => {
+              this.appendLiveTextEvent('thinking', text);
+              await options.onReasoningSummaryStream?.(text);
+            };
+            const onToolStart = async (toolCall: {
+              toolCallId: string;
+              toolName: string;
+              label: string;
+              detail?: string | null;
+              body?: string[];
+              providerExecuted?: boolean;
+            }) => {
+              this.startLiveToolCall(toolCall);
+            };
+            const onToolFinish = async (toolCallId: string, transcriptText?: string) => {
+              this.finishLiveToolCall(toolCallId, transcriptText);
+            };
+
+            if (this.options.webSearchMode === undefined) {
+              await (this.model.runTurn as (...args: any[]) => Promise<void>)(
+                this.options.sessionId,
+                input,
+                this.tools,
+                emitTranscript,
+                onAssistant,
+                onThinking,
+                this.thinkingEnabled,
+                modeConfig.toolDefinitions,
+                modeConfig.instructions,
+                onToolStart,
+                onToolFinish,
+                () => this.buildHiddenCompactionStateSnapshot(settings)
+              );
+            } else {
+              await this.model.runTurn(
+                this.options.sessionId,
+                input,
+                this.tools,
+                emitTranscript,
+                onAssistant,
+                onThinking,
+                this.thinkingEnabled,
+                this.options.webSearchMode,
+                modeConfig.toolDefinitions,
+                modeConfig.instructions,
+                onToolStart,
+                onToolFinish,
+                () => this.buildHiddenCompactionStateSnapshot(settings)
+              );
+            }
           }
         });
         this.statusText = 'idle';
@@ -341,6 +566,27 @@ export class HeadlessEngine {
   private appendTranscript(role: TranscriptRole, text: string): void {
     this.options.notebook.appendTranscript(this.options.sessionId, role, text);
     this.emitChange();
+  }
+
+  private async buildHiddenCompactionStateSnapshot(
+    settings: ModelSessionRecord
+  ): Promise<HiddenCompactionStateSnapshot> {
+    const activeProcessSummary = [...this.execSessions.values()]
+      .filter((session) => session.running)
+      .map((session) => {
+        const command = clampText(session.command, 120);
+        const cwd = relativeToWorkspace(session.root, session.cwd);
+        return `${command} | cwd ${cwd} | process ${session.id}`;
+      });
+
+    return {
+      mode: settings.agentMode === 'plan' ? 'plan' : 'direct',
+      planModePhase: settings.planModePhase,
+      approvedPlan: this.options.notebook.getSessionPlan(this.options.sessionId),
+      todos: this.options.notebook.listSessionTodos(this.options.sessionId),
+      lastTestStatus: this.lastTestStatus,
+      activeProcessSummary
+    };
   }
 
   private startLiveToolCall(input: {
@@ -624,6 +870,7 @@ export class HeadlessEngine {
     endLine?: number
   ): Promise<string> {
     const resolvedPath = this.resolveRootedPath(root, filePath);
+    this.assertExperimentAllowsInlineProbe(root, 'read', [resolvedPath]);
     const content = await readFile(resolvedPath, 'utf8');
     const allLines = content.split(/\r?\n/);
     const totalLines = allLines.length;
@@ -652,6 +899,7 @@ export class HeadlessEngine {
   }
 
   private async runGlobAtRoot(root: string, patternText: string): Promise<string[]> {
+    this.assertExperimentAllowsInlineProbe(root, 'glob');
     const matches: string[] = [];
     for await (const entry of glob(patternText, { cwd: root })) {
       matches.push(entry);
@@ -672,6 +920,7 @@ export class HeadlessEngine {
 
   private async runLsAtRoot(root: string, filePath = '.', recursive = false): Promise<string> {
     const targetPath = this.resolveRootedPath(root, filePath);
+    this.assertExperimentAllowsInlineProbe(root, 'ls', [targetPath]);
     const command = recursive ? `ls -laR ${shellQuote(targetPath)}` : `ls -la ${shellQuote(targetPath)}`;
     const result = await execaCommand(command, {
       cwd: root,
@@ -693,6 +942,10 @@ export class HeadlessEngine {
     target: string | string[] = '.'
   ): Promise<string> {
     const targets = await normalizeRgTargets(root, target);
+    const resolvedTargets = targets
+      .filter((entry) => entry !== '.')
+      .map((entry) => this.resolveRootedPath(root, entry));
+    this.assertExperimentAllowsInlineProbe(root, 'rg', resolvedTargets);
     try {
       const result = await execa(
         'rg',
@@ -772,7 +1025,8 @@ export class HeadlessEngine {
       stdinOpen: true,
       updateLastTestStatus: root === this.options.cwd,
       waitForExit,
-      resolveWaitForExit
+      resolveWaitForExit,
+      outputWaiters: []
     };
 
     child.stdout.on('data', (chunk: Buffer | string) => {
@@ -788,6 +1042,7 @@ export class HeadlessEngine {
       session.running = false;
       session.stdinOpen = false;
       session.exitCode = exitCode ?? 1;
+      this.resolveExecOutputWaiters(session);
       session.resolveWaitForExit();
     });
 
@@ -817,6 +1072,7 @@ export class HeadlessEngine {
         chunk,
         MAX_EXEC_CAPTURED_OUTPUT_CHARS
       );
+      this.resolveExecOutputWaiters(session);
       return;
     }
 
@@ -828,6 +1084,7 @@ export class HeadlessEngine {
       chunk,
       MAX_EXEC_CAPTURED_OUTPUT_CHARS
     );
+    this.resolveExecOutputWaiters(session);
   }
 
   private async waitForExecSession(session: ExecSession, yieldTimeMs: number): Promise<void> {
@@ -836,6 +1093,43 @@ export class HeadlessEngine {
     }
 
     await Promise.race([session.waitForExit, delay(yieldTimeMs)]);
+    if (session.running && !this.execSessionHasOutput(session)) {
+      await Promise.race([
+        session.waitForExit,
+        this.waitForExecOutput(session),
+        delay(Math.max(750, Math.min(2_500, yieldTimeMs * 25)))
+      ]);
+    }
+  }
+
+  private execSessionHasOutput(session: ExecSession): boolean {
+    return (
+      session.pendingStdout.length > 0 ||
+      session.pendingStderr.length > 0 ||
+      session.capturedStdout.length > 0 ||
+      session.capturedStderr.length > 0
+    );
+  }
+
+  private waitForExecOutput(session: ExecSession): Promise<void> {
+    if (this.execSessionHasOutput(session) || !session.running) {
+      return Promise.resolve();
+    }
+
+    return new Promise<void>((resolve) => {
+      session.outputWaiters.push(resolve);
+    });
+  }
+
+  private resolveExecOutputWaiters(session: ExecSession): void {
+    if (session.outputWaiters.length === 0) {
+      return;
+    }
+
+    const waiters = session.outputWaiters.splice(0, session.outputWaiters.length);
+    for (const waiter of waiters) {
+      waiter();
+    }
   }
 
   private collectExecCommandResult(
@@ -1059,6 +1353,7 @@ export class HeadlessEngine {
     summary: string;
     kind: StudyDebtKind;
   }> {
+    validateStudyDebtPaths(this.options.cwd, input.affectedPaths, input.evidencePaths);
     const record = this.options.notebook.openStudyDebt({
       sessionId: this.options.sessionId,
       summary: input.summary,
@@ -1101,6 +1396,56 @@ export class HeadlessEngine {
       resolution: record.resolution ?? input.resolution,
       note: record.resolutionNote ?? input.note
     };
+  }
+
+  async createPlan(input: CreatePlanInput): Promise<CreatePlanResult> {
+    const settings = this.getSessionSettings();
+    if (settings.agentMode !== 'plan') {
+      throw new Error('create_plan is only available in plan mode.');
+    }
+    if (settings.planModePhase !== 'planning') {
+      throw new Error('create_plan is only available during the planning phase.');
+    }
+
+    validateCreatePlanInput(input);
+    const planPath = path.join(this.options.cwd, 'plan.md');
+    await writeFile(planPath, input.planMarkdown, 'utf8');
+    this.options.notebook.saveSessionPlan({
+      sessionId: this.options.sessionId,
+      goal: input.goal,
+      assumptions: input.assumptions,
+      files: input.files,
+      steps: input.steps,
+      validation: input.validation,
+      risks: input.risks,
+      planPath
+    });
+    this.emitChange();
+    return {
+      sessionId: this.options.sessionId,
+      status: 'planned',
+      planPath
+    };
+  }
+
+  async updateTodos(input: UpdateTodosInput): Promise<UpdateTodosResult> {
+    const settings = this.getSessionSettings();
+    if (settings.agentMode === 'study') {
+      throw new Error('update_todos is not available in study mode.');
+    }
+
+    validateTodoItems(input.items);
+    const todos = this.options.notebook.replaceSessionTodos(
+      this.options.sessionId,
+      input.items.map((item, index) => ({
+        id: item.id,
+        text: item.text,
+        status: item.status,
+        position: index
+      }))
+    );
+    this.emitChange();
+    return { items: todos };
   }
 
   private async clearExperimentJournal(
@@ -1818,7 +2163,12 @@ export class HeadlessEngine {
       .filter(
         (experiment) =>
           experiment.status === 'running' || experiment.status === 'budget_exhausted'
-      );
+      )
+      .sort((left, right) => {
+        const leftRank = left.status === 'running' ? 0 : 1;
+        const rightRank = right.status === 'running' ? 0 : 1;
+        return leftRank - rightRank || left.experimentId.localeCompare(right.experimentId);
+      });
     const openStudyDebts = this.options.notebook.listOpenStudyDebts(this.options.sessionId);
     const invalidatedExperimentSummaries = Array.from(
       new Map(
@@ -2292,6 +2642,145 @@ function normalizeReadEndLine(startLine: number, endLine: number | undefined, to
   }
 
   return Math.min(maxLine, Math.max(startLine, Math.floor(endLine)));
+}
+
+function validateCreatePlanInput(input: CreatePlanInput): void {
+  if (input.goal.trim().length === 0) {
+    throw new Error('create_plan requires a non-empty goal.');
+  }
+
+  if (!input.steps.some((step) => step.trim().length > 0)) {
+    throw new Error('create_plan requires at least one concrete step.');
+  }
+
+  if (input.planMarkdown.trim().length === 0) {
+    throw new Error('create_plan requires non-empty planMarkdown.');
+  }
+}
+
+function validateAskUserInput(input: AskUserInput): void {
+  if (input.question.trim().length === 0) {
+    throw new Error('ask_user requires a non-empty question.');
+  }
+
+  if (input.kind === 'approval' && input.responseKind !== 'yes_no') {
+    throw new Error('ask_user approval requests must use responseKind=yes_no.');
+  }
+
+  if (input.responseKind === 'yes_no') {
+    if (!input.recommendedResponse) {
+      throw new Error('ask_user yes_no requests require recommendedResponse.');
+    }
+    if (!input.reason || input.reason.trim().length === 0) {
+      throw new Error('ask_user yes_no requests require a reason.');
+    }
+    return;
+  }
+
+  if (input.responseKind === 'single_choice') {
+    if (!input.options || input.options.length < 2 || input.options.length > 4) {
+      throw new Error('ask_user single_choice requests require 2 to 4 options.');
+    }
+    const optionIds = input.options.map((option) => option.id.trim());
+    if (
+      optionIds.some((id) => id.length === 0) ||
+      input.options.some(
+        (option) => option.label.trim().length === 0 || option.description.trim().length === 0
+      )
+    ) {
+      throw new Error('ask_user single_choice options must have non-empty id, label, and description.');
+    }
+    if (new Set(optionIds).size !== optionIds.length) {
+      throw new Error('ask_user single_choice option ids must be unique.');
+    }
+    if (!input.recommendedOptionId || !optionIds.includes(input.recommendedOptionId)) {
+      throw new Error('ask_user single_choice requests require recommendedOptionId to match one option.');
+    }
+    if (!input.reason || input.reason.trim().length === 0) {
+      throw new Error('ask_user single_choice requests require a reason.');
+    }
+  }
+}
+
+function parseYesNoAnswer(input: string): 'yes' | 'no' | null {
+  const normalized = input.trim().toLowerCase();
+  if (/^(yes|y|approve|approved|go ahead|proceed)\b/.test(normalized)) {
+    return 'yes';
+  }
+  if (/^(no|n|reject|decline|do not proceed|don't proceed)\b/.test(normalized)) {
+    return 'no';
+  }
+  return null;
+}
+
+function parseSingleChoiceAnswer(
+  input: string,
+  options: Array<{ id: string; label: string }>
+): { id: string; label: string } | null {
+  const normalized = input.trim().toLowerCase();
+  for (const option of options) {
+    const id = option.id.toLowerCase();
+    if (new RegExp(`(^|\\b)${escapeRegExp(id)}(\\b|$)`).test(normalized)) {
+      return option;
+    }
+  }
+
+  for (const option of options) {
+    const label = option.label.trim().toLowerCase();
+    if (label && normalized.includes(label)) {
+      return option;
+    }
+  }
+
+  return null;
+}
+
+function escapeRegExp(value: string): string {
+  return value.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+}
+
+function validateStudyDebtPaths(
+  cwd: string,
+  affectedPaths: string[] | undefined,
+  evidencePaths: string[] | undefined
+): void {
+  for (const [label, paths] of [
+    ['affectedPaths', affectedPaths],
+    ['evidencePaths', evidencePaths]
+  ] as const) {
+    if (!paths) {
+      continue;
+    }
+    for (const scope of paths) {
+      const trimmed = scope.trim();
+      if (!trimmed) {
+        continue;
+      }
+      if (trimmed === '.' || trimmed === './' || trimmed === '*' || trimmed === '**') {
+        throw new Error(`${label} cannot target the repo root or wildcard root scopes.`);
+      }
+      const resolved = path.resolve(cwd, trimmed);
+      if (resolved === cwd) {
+        throw new Error(`${label} cannot target the repo root; use more specific paths.`);
+      }
+    }
+  }
+}
+
+function validateTodoItems(items: UpdateTodosInput['items']): void {
+  if (items.length > 8) {
+    throw new Error('update_todos allows at most 8 items.');
+  }
+
+  const ids = items.map((item) => item.id.trim());
+  if (ids.some((id) => id.length === 0) || new Set(ids).size !== ids.length) {
+    throw new Error('Todo ids must be non-empty and unique.');
+  }
+
+  const inProgressCount = items.filter((item) => item.status === 'in_progress').length;
+  if (inProgressCount > 1) {
+    throw new Error('update_todos allows at most one in_progress item.');
+  }
 }
 
 function looksLikeTestCommand(command: string): boolean {

@@ -1,0 +1,85 @@
+[suite]
+id = "comparison-stage3b-75k"
+description = "Optional Stage 3b long-horizon compaction stress pack at an effective 75k context cap. Run this manifest three times: study, plan, and direct."
+
+[runtime]
+reasoning_effort = "medium"
+thinking = false
+web_search_mode = "live"
+context_window_tokens = 75000
+parallelism = 1
+repeat_count = 2
+
+[clarification]
+auto_reply = "Make the best grounded minimal choice and proceed. Keep the contract explicit."
+mark_as_unnecessary = true
+
+[[fixtures]]
+id = "next-app-router"
+type = "template"
+path = "./fixtures/next-app-router"
+setup_command = "npm ci"
+
+[[fixtures]]
+id = "run-harness2"
+type = "git_checkout"
+path = ".."
+ref = "756c1ef9101b90ac999da056845dc5dbd5160d64"
+setup_command = "npm ci"
+
+[[cases]]
+id = "L1"
+bucket = "C"
+fixture = "run-harness2"
+profile = "long-horizon compaction 75k"
+question_expected = true
+experiment_expected = "optional"
+web_search_expected = "no"
+prompt = """
+In this harness2 repo, harden the compaction/checkpoint flow so it preserves the right continuity for long-running sessions without turning into planner bureaucracy.
+
+I want:
+- progressive compaction urgency
+- a reserved token buffer so the model can still compact before overflow
+- durable continuity across compactions
+- preservation of current commitments and important non-goals when they matter
+- preservation of open questions and still-relevant experiment state
+- oversized tool-output spill to disk with short inline pointers when possible
+
+Keep it minimal and safe.
+
+Before you lock in thresholding and continuity details, verify what assumptions about context growth, checkpoint fidelity, and overflow behavior actually matter here.
+"""
+
+[[cases]]
+id = "L2"
+bucket = "C"
+fixture = "next-app-router"
+profile = "long-horizon batch-ai-lab 75k"
+question_expected = true
+experiment_expected = "optional"
+web_search_expected = "yes"
+prompt = """
+In this Next.js repo, build a local batch AI lab with:
+- SQLite-backed runs
+- 4 workers
+- per-run prompt snapshots
+- streamed live results
+- Stop / Resume after restart
+- historical safety when prompts change later
+
+Keep it minimal and locally runnable using the OpenAI-compatible env vars when needed.
+
+Before you lock in the runtime-sensitive pieces, verify:
+1. the actual end-to-end streaming + stop contract for this stack
+2. whether one atomic SQLite claim statement is enough to prevent double-claiming under 4 workers
+3. the safest minimal recovery/durability strategy for interrupted runs if it is not statically obvious
+4. whether replay should be hard-blocked, narrowed, or partially allowed when prompt variants drift after an interrupted run
+
+Use bounded studies for residual uncertainty. Prefer parallel experiments only if the risks are genuinely orthogonal.
+"""
+
+[cases.env_override]
+env_source = "~/.h2/eval-env/next-app-router-openai.env"
+write_env_file = ".env.local"
+write_env_example = ".env.local.example"

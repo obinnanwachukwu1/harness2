@@ -7,12 +7,14 @@ import { formatUnknownError } from '../lib/utils.js';
 import { captureHeapSnapshot } from './heap-snapshot.js';
 import type { OpenTuiBridgeCommand, OpenTuiBridgeEvent } from './protocol.js';
 import { buildOpenTuiState } from './render-state.js';
+import type { AgentMode } from '../types.js';
 
 async function main(): Promise<void> {
   const options = parseArgs(process.argv.slice(2));
   const engine = await HeadlessEngine.open({
     cwd: options.cwd,
-    sessionId: options.sessionId
+    sessionId: options.sessionId,
+    agentMode: options.mode
   });
 
   let closed = false;
@@ -179,9 +181,10 @@ async function main(): Promise<void> {
   await cleanup();
 }
 
-function parseArgs(args: string[]): { cwd: string; sessionId?: string } {
+function parseArgs(args: string[]): { cwd: string; sessionId?: string; mode?: AgentMode } {
   let cwd = process.cwd();
   let sessionId: string | undefined;
+  let mode: AgentMode | undefined;
 
   for (let index = 0; index < args.length; index += 1) {
     const value = args[index];
@@ -204,9 +207,18 @@ function parseArgs(args: string[]): { cwd: string; sessionId?: string } {
       index += 1;
       continue;
     }
+
+    if (value === '--mode') {
+      const next = args[index + 1];
+      if (next !== 'study' && next !== 'plan' && next !== 'direct') {
+        throw new Error('Missing or invalid value for --mode');
+      }
+      mode = next;
+      index += 1;
+    }
   }
 
-  return { cwd, sessionId };
+  return { cwd, sessionId, mode };
 }
 
 main().catch((error) => {

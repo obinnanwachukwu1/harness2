@@ -47,10 +47,12 @@ export interface OpenTuiState {
   cwd: string;
   status: {
     label: string;
+    modeText: string;
     model: string;
     contextText: string;
     contextUsagePercent: number;
     usageText: string;
+    pendingText: string | null;
   };
   thinkingEnabled: boolean;
   inputPlaceholder: string;

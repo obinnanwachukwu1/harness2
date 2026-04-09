@@ -58,74 +58,114 @@ export async function runEvalCase(input: {
 
   const promptsSent: string[] = [];
   let clarificationFallbackUsed = false;
-  const engine = await HeadlessEngine.open({
-    cwd: workspacePath,
-    revealExportsInFinder: false,
-    webSearchMode: runtime.webSearchMode === 'fixed' ? undefined : runtime.webSearchMode
-  });
-  try {
-    const sessionId = engine.snapshot.session.id;
-    const context: EvalCaseRunContext = {
-      runId: input.runId,
-      caseId: input.caseDefinition.id,
-      caseRoot,
-      workspacePath,
-      artifactRoot,
-      sessionId,
-      runtime
-    };
-
-    if (runtime.model) {
-      engine.modelClient.setModel(sessionId, runtime.model);
-    }
-    engine.modelClient.setReasoningEffort(sessionId, runtime.reasoningEffort);
-    engine.setThinkingEnabled(runtime.thinking);
-
-    await submitPrompt(engine, input.caseDefinition.prompt);
-    promptsSent.push(input.caseDefinition.prompt);
-
-    for (const followup of input.caseDefinition.followups) {
-      if (followup.afterTurn !== promptsSent.length) {
-        continue;
-      }
-      await submitPrompt(engine, followup.prompt);
-      promptsSent.push(followup.prompt);
-    }
-
-    const studyDebts = engine.notebook.listStudyDebts(sessionId);
-    const experiments = engine.notebook.listExperiments(sessionId);
-    const modelHistory = engine.notebook.listModelHistory(sessionId);
-    const autoScore = buildAutoScore(
-      input.caseDefinition,
-      modelHistory,
-      studyDebts,
-      experiments,
-      clarificationFallbackUsed
-    );
-    const artifacts = await exportEvalCaseArtifacts({
-      artifactRoot,
-      notebook: engine.notebook,
-      sessionId,
-      runtime,
-      autoScore,
-      workspacePath
+  return withEvalContextWindowOverride(runtime.contextWindowTokens, async () => {
+    const engine = await HeadlessEngine.open({
+      cwd: workspacePath,
+      revealExportsInFinder: false,
+      webSearchMode: runtime.webSearchMode === 'fixed' ? undefined : runtime.webSearchMode,
+      agentMode: runtime.mode
     });
+    try {
+      const sessionId = engine.snapshot.session.id;
+      const context: EvalCaseRunContext = {
+        runId: input.runId,
+        caseId: input.caseDefinition.id,
+        caseRoot,
+        workspacePath,
+        artifactRoot,
+        sessionId,
+        runtime
+      };
 
-    return {
-      caseId: input.caseDefinition.id,
-      bucket: input.caseDefinition.bucket,
-      fixtureId: input.fixture.id,
-      workspacePath: context.workspacePath,
-      sessionId: context.sessionId,
-      runtime,
-      promptsSent,
-      clarificationFallbackUsed,
-      artifacts,
-      autoScore
-    };
-  } finally {
-    await engine.dispose();
-  }
+      if (runtime.model) {
+        engine.modelClient.setModel(sessionId, runtime.model);
+      }
+      engine.modelClient.setReasoningEffort(sessionId, runtime.reasoningEffort);
+      engine.setThinkingEnabled(runtime.thinking);
+
+      await submitPrompt(engine, input.caseDefinition.prompt);
+      promptsSent.push(input.caseDefinition.prompt);
+
+      if (runtime.mode === 'plan') {
+        let guard = 0;
+        while (guard < 8) {
+          guard += 1;
+          const pending = engine.notebook.getPendingUserRequest(sessionId);
+          if (!pending) {
+            break;
+          }
+
+          let reply: string;
+          if (pending.responseKind === 'yes_no') {
+            const recommended = pending.recommendedResponse ?? 'yes';
+            reply =
+              recommended === 'no'
+                ? `No. ${pending.reason ?? 'Please revise the plan.'}`.trim()
+                : `Yes. ${pending.reason ?? 'Proceed with the plan.'}`.trim();
+          } else if (pending.responseKind === 'single_choice') {
+            clarificationFallbackUsed = true;
+            const recommended =
+              pending.recommendedOptionId ?? pending.options?.[0]?.id ?? 'the recommended option';
+            reply = `I choose ${recommended}. ${pending.reason ?? ''}`.trim();
+          } else {
+            clarificationFallbackUsed = true;
+            reply =
+              input.clarification?.autoReply ?? 'Use the narrowest bounded assumption and continue.';
+          }
+
+          await submitPrompt(engine, reply);
+          promptsSent.push(reply);
+        }
+
+        const finalPending = engine.notebook.getPendingUserRequest(sessionId);
+        if (finalPending) {
+          throw new Error('Plan mode is still waiting for user input after eval auto-replies.');
+        }
+      }
+
+      for (const followup of input.caseDefinition.followups) {
+        if (followup.afterTurn !== promptsSent.length) {
+          continue;
+        }
+        await submitPrompt(engine, followup.prompt);
+        promptsSent.push(followup.prompt);
+      }
+
+      const studyDebts = engine.notebook.listStudyDebts(sessionId);
+      const experiments = engine.notebook.listExperiments(sessionId);
+      const modelHistory = engine.notebook.listModelHistory(sessionId);
+      const autoScore = buildAutoScore(
+        input.caseDefinition,
+        modelHistory,
+        studyDebts,
+        experiments,
+        clarificationFallbackUsed
+      );
+      const artifacts = await exportEvalCaseArtifacts({
+        artifactRoot,
+        notebook: engine.notebook,
+        sessionId,
+        runtime,
+        autoScore,
+        workspacePath
+      });
+
+      return {
+        caseId: input.caseDefinition.id,
+        bucket: input.caseDefinition.bucket,
+        fixtureId: input.fixture.id,
+        workspacePath: context.workspacePath,
+        sessionId: context.sessionId,
+        runtime,
+        promptsSent,
+        clarificationFallbackUsed,
+        artifacts,
+        autoScore
+      };
+    } finally {
+      await engine.dispose();
+    }
+  });
 }
 
 async function submitPrompt(engine: HeadlessEngine, prompt: string): Promise<void> {
@@ -140,4 +180,26 @@ function mergeRuntime(
     ...baseRuntime,
     ...override
   };
+}
+
+async function withEvalContextWindowOverride<T>(
+  contextWindowTokens: number | undefined,
+  work: () => Promise<T>
+): Promise<T> {
+  const previous = process.env.H2_CONTEXT_WINDOW_TOKENS;
+  if (contextWindowTokens) {
+    process.env.H2_CONTEXT_WINDOW_TOKENS = String(contextWindowTokens);
+  } else {
+    delete process.env.H2_CONTEXT_WINDOW_TOKENS;
+  }
+
+  try {
+    return await work();
+  } finally {
+    if (previous === undefined) {
+      delete process.env.H2_CONTEXT_WINDOW_TOKENS;
+    } else {
+      process.env.H2_CONTEXT_WINDOW_TOKENS = previous;
+    }
+  }
 }

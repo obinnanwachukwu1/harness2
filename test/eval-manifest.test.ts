@@ -62,3 +62,39 @@ prompt = "second prompt"
   assert.equal(parsed.manifest.cases[0]?.profile, 'existing');
   assert.equal(parsed.manifest.cases[0]?.experimentExpected, 'optional');
 });
+
+test('parseEvalManifest preserves remote git fixture URLs', async (t) => {
+  const tempDir = await createTempDir('h2-eval-manifest-remote-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const manifestPath = path.join(tempDir, 'suite.toml');
+  await writeFile(
+    manifestPath,
+    `
+[suite]
+id = "remote-fixtures"
+
+[runtime]
+reasoning_effort = "medium"
+thinking = false
+web_search_mode = "fixed"
+
+[[fixtures]]
+id = "remote-repo"
+type = "git_checkout"
+path = "https://github.com/vercel/chatbot"
+ref = "abcdef"
+
+[[cases]]
+id = "P1"
+bucket = "B"
+fixture = "remote-repo"
+profile = "existing"
+prompt = "do work"
+`,
+    'utf8'
+  );
+
+  const parsed = await parseEvalManifest(manifestPath);
+  assert.equal(parsed.manifest.fixtures[0]?.path, 'https://github.com/vercel/chatbot');
+});

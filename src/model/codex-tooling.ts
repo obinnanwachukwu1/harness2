@@ -109,6 +109,14 @@ export function formatToolHeader(name: string, rawArguments: string, output?: st
         return `experiment budget(${readStringArg(args, 'experimentId')})`;
       case 'resolve_experiment':
         return `experiment resolve(${readStringArg(args, 'experimentId')})`;
+      case 'create_plan':
+        return `Plan(${compactTextForHeader(readStringArg(args, 'goal'), 56)})`;
+      case 'ask_user':
+        return `AskUser(${compactTextForHeader(readStringArg(args, 'question'), 56)})`;
+      case 'update_todos': {
+        const items = readOptionalArrayArg(args, 'items');
+        return `Todos(${Array.isArray(items) ? items.length : 0})`;
+      }
       case 'compact':
         return `Compact(${compactTextForHeader(readStringArg(args, 'goal'), 56)})`;
       default:
@@ -188,6 +196,37 @@ export function formatLiveToolBody(name: string, rawArguments: string): string[]
           body.push(`query: ${query}`);
         }
         return body;
+      }
+      case 'create_plan': {
+        return [`goal: ${readStringArg(args, 'goal')}`];
+      }
+      case 'ask_user': {
+        const body = [
+          `kind: ${readStringArg(args, 'kind')}`,
+          `responseKind: ${readStringArg(args, 'responseKind')}`,
+          `question: ${readStringArg(args, 'question')}`
+        ];
+        const options = readOptionalArrayArg(args, 'options');
+        if (Array.isArray(options)) {
+          body.push(`options: ${options.length}`);
+        }
+        const recommendedOptionId = readOptionalStringArg(args, 'recommendedOptionId');
+        if (recommendedOptionId) {
+          body.push(`recommendedOptionId: ${recommendedOptionId}`);
+        }
+        const recommended = readOptionalStringArg(args, 'recommendedResponse');
+        if (recommended) {
+          body.push(`recommendedResponse: ${recommended}`);
+        }
+        const reason = readOptionalStringArg(args, 'reason');
+        if (reason) {
+          body.push(`reason: ${reason}`);
+        }
+        return body;
+      }
+      case 'update_todos': {
+        const items = readOptionalArrayArg(args, 'items');
+        return [`items: ${Array.isArray(items) ? items.length : 0}`];
       }
       case 'compact': {
         const body = [
@@ -474,7 +513,7 @@ export const MAIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     type: 'function',
     name: 'open_question',
     description:
-      'Declare a load-bearing unresolved claim that blocks dependent edits. Use this when being wrong could materially change architecture, interfaces, protocol behavior, recovery, durability, retry, ownership, history, or integration behavior. summary should name the concrete claim. whyItMatters should say what would change if the answer goes the other way. In greenfield work, do not open a question merely because several designs exist; open one only when the prompt leaves a product contract underdetermined. If the unresolved choice is a product contract about history, recovery, retry, durability, or ownership semantics, use open_question instead of only stating a commitment note. Keep questions narrow; if one umbrella question would gate most of the feature, split or narrow it before spawning. affectedPaths should list only files whose edits depend on the claim, not the whole feature area. evidencePaths should list only the paths whose same-question inline probing should pause while a linked experiment is active. Do not spend a question on routine implementation taste or on a capability check that one focused read or tiny local probe can settle immediately unless that check is the true blocker. Open the question before any live external, secret-backed, or runtime probe that could change the implementation.',
+      'Declare a load-bearing unresolved claim that blocks dependent edits. Use this when being wrong could materially change architecture, interfaces, protocol behavior, recovery, durability, retry, ownership, history, or integration behavior. summary should name the concrete claim. whyItMatters should say what would change if the answer goes the other way. In greenfield work, do not open a question merely because several designs exist; open one only when the prompt leaves a product contract underdetermined. If the unresolved choice is a product contract about history, recovery, retry, durability, or ownership semantics, use open_question instead of only stating a commitment note. Keep questions narrow; if one umbrella question would gate most of the feature, split or narrow it before spawning. affectedPaths should list only files whose edits depend on the claim, not the whole feature area, and may not be the repo root. evidencePaths should list only the specific paths whose same-question inline probing should pause while a linked experiment is active, and may not be the repo root or wildcard root scopes like . or *. Do not spend a question on routine implementation taste or on a capability check that one focused read or tiny local probe can settle immediately unless that check is the true blocker. Open the question before any live external, secret-backed, or runtime probe that could change the implementation.',
     parameters: {
       type: 'object',
       properties: {
@@ -538,6 +577,123 @@ export const MAIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   },
   {
     type: 'function',
+    name: 'create_plan',
+    description:
+      'Create or update a reviewable plan.md for this session during the plan-mode planning phase. Capture the concrete implementation path, assumptions, files, steps, validation, and risks. Use ask_user if you need clarification or a yes/no approval before execution.',
+    parameters: {
+      type: 'object',
+      properties: {
+        goal: { type: 'string' },
+        assumptions: {
+          type: 'array',
+          items: { type: 'string' }
+        },
+        files: {
+          type: 'array',
+          items: { type: 'string' }
+        },
+        steps: {
+          type: 'array',
+          items: { type: 'string' }
+        },
+        validation: {
+          type: 'array',
+          items: { type: 'string' }
+        },
+        risks: {
+          type: 'array',
+          items: { type: 'string' }
+        },
+        planMarkdown: { type: 'string' }
+      },
+      required: [
+        'goal',
+        'assumptions',
+        'files',
+        'steps',
+        'validation',
+        'risks',
+        'planMarkdown'
+      ],
+      additionalProperties: false
+    }
+  },
+  {
+    type: 'function',
+    name: 'ask_user',
+    description:
+      'Pause for user input in plan mode. Use this for a real clarification question before implementation, or to request a yes/no approval on the current plan. For single_choice requests, present 2 to 4 options and set exactly one recommendedOptionId. For yes_no or single_choice requests, include a reason so the harness or user can evaluate the recommendation directly.',
+    parameters: {
+      type: 'object',
+      properties: {
+        kind: {
+          type: 'string',
+          enum: ['clarification', 'approval']
+        },
+        responseKind: {
+          type: 'string',
+          enum: ['open', 'yes_no', 'single_choice']
+        },
+        question: { type: 'string' },
+        context: { type: 'string' },
+        options: {
+          type: 'array',
+          minItems: 2,
+          maxItems: 4,
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              label: { type: 'string' },
+              description: { type: 'string' }
+            },
+            required: ['id', 'label', 'description'],
+            additionalProperties: false
+          }
+        },
+        recommendedOptionId: { type: 'string' },
+        recommendedResponse: {
+          type: 'string',
+          enum: ['yes', 'no']
+        },
+        reason: { type: 'string' }
+      },
+      required: ['kind', 'responseKind', 'question'],
+      additionalProperties: false
+    }
+  },
+  {
+    type: 'function',
+    name: 'update_todos',
+    description:
+      'Replace the local execution todo list for this session. Use only for implementation and validation tracking, not for product semantics, unresolved questions, or experiment findings.',
+    parameters: {
+      type: 'object',
+      properties: {
+        items: {
+          type: 'array',
+          maxItems: 8,
+          items: {
+            type: 'object',
+            properties: {
+              id: { type: 'string' },
+              text: { type: 'string' },
+              status: {
+                type: 'string',
+                enum: ['pending', 'in_progress', 'done']
+              }
+            },
+            required: ['id', 'text', 'status'],
+            additionalProperties: false
+          }
+        }
+      },
+      required: ['items'],
+      additionalProperties: false
+    }
+  },
+  {
+    type: 'function',
     name: 'resolve_experiment',
     description:
       'Resolve an experiment with a final verdict, summary, and any important findings, artifacts, constraints, or confidence notes.',
@@ -571,6 +727,49 @@ export const MAIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     }
   }
 ];
+
+function requireToolDefinition(name: string): ToolDefinition {
+  const definition = MAIN_TOOL_DEFINITIONS.find((candidate) => candidate.name === name);
+  if (!definition) {
+    throw new Error(`Missing tool definition for ${name}.`);
+  }
+  return definition;
+}
+
+function filterToolDefinitions(names: readonly string[]): readonly ToolDefinition[] {
+  return names.map((name) => requireToolDefinition(name));
+}
+
+export const STUDY_TOOL_DEFINITIONS = MAIN_TOOL_DEFINITIONS.filter(
+  (definition) =>
+    definition.name !== 'create_plan' &&
+    definition.name !== 'ask_user' &&
+    definition.name !== 'update_todos'
+);
+
+export const PLAN_PLANNING_TOOL_DEFINITIONS = filterToolDefinitions([
+  'exec_command',
+  'write_stdin',
+  'read',
+  'ls',
+  'glob',
+  'rg',
+  'create_plan',
+  'ask_user'
+]);
+
+export const PLAN_EXECUTION_TOOL_DEFINITIONS = filterToolDefinitions([
+  'exec_command',
+  'write_stdin',
+  'read',
+  'ls',
+  'edit',
+  'glob',
+  'rg',
+  'update_todos'
+]);
+
+export const DIRECT_TOOL_DEFINITIONS = PLAN_EXECUTION_TOOL_DEFINITIONS;
 
 export const EXPERIMENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   MAIN_TOOL_DEFINITIONS.find((definition) => definition.name === 'exec_command')!,
@@ -845,6 +1044,55 @@ async function executeToolCall(call: ToolCall, tools: AgentTools): Promise<strin
         null,
         2
       );
+    case 'create_plan':
+      if (!tools.createPlan) {
+        throw new Error('create_plan is not available in this session.');
+      }
+      return JSON.stringify(
+        await tools.createPlan({
+          goal: readStringArg(args, 'goal'),
+          assumptions: readStringArrayArg(args, 'assumptions'),
+          files: readStringArrayArg(args, 'files'),
+          steps: readStringArrayArg(args, 'steps'),
+          validation: readStringArrayArg(args, 'validation'),
+          risks: readStringArrayArg(args, 'risks'),
+          planMarkdown: readStringArg(args, 'planMarkdown')
+        }),
+        null,
+        2
+      );
+    case 'ask_user':
+      if (!tools.askUser) {
+        throw new Error('ask_user is not available in this session.');
+      }
+      return JSON.stringify(
+        await tools.askUser({
+          kind: readStringArg(args, 'kind') as 'clarification' | 'approval',
+          responseKind: readStringArg(args, 'responseKind') as 'open' | 'yes_no' | 'single_choice',
+          question: readStringArg(args, 'question'),
+          context: readOptionalStringArg(args, 'context'),
+          options: readOptionalAskUserOptionsArg(args, 'options'),
+          recommendedOptionId: readOptionalStringArg(args, 'recommendedOptionId'),
+          recommendedResponse: readOptionalStringArg(args, 'recommendedResponse') as
+            | 'yes'
+            | 'no'
+            | undefined,
+          reason: readOptionalStringArg(args, 'reason')
+        }),
+        null,
+        2
+      );
+    case 'update_todos':
+      if (!tools.updateTodos) {
+        throw new Error('update_todos is not available in this session.');
+      }
+      return JSON.stringify(
+        await tools.updateTodos({
+          items: readTodoItemsArg(args, 'items')
+        }),
+        null,
+        2
+      );
     case 'open_question':
     case 'open_study_debt':
       if (!tools.openStudyDebt) {
@@ -991,6 +1239,11 @@ function readOptionalStringArg(args: Record<string, unknown>, key: string): stri
   return typeof value === 'string' && value.length > 0 ? value : undefined;
 }
 
+function readOptionalArrayArg(args: Record<string, unknown>, key: string): unknown[] | undefined {
+  const value = args[key];
+  return Array.isArray(value) ? value : undefined;
+}
+
 function readOptionalStringOrArrayArg(
   args: Record<string, unknown>,
   key: string
@@ -1028,4 +1281,74 @@ function readOptionalStringArrayArg(args: Record<string, unknown>, key: string):
 
   const filtered = value.filter((item): item is string => typeof item === 'string' && item.length > 0);
   return filtered.length > 0 ? filtered : [];
+}
+
+function readStringArrayArg(args: Record<string, unknown>, key: string): string[] {
+  const value = args[key];
+  if (!Array.isArray(value) || value.some((item) => typeof item !== 'string')) {
+    throw new Error(`${key} must be an array of strings.`);
+  }
+  return value as string[];
+}
+
+function readOptionalAskUserOptionsArg(
+  args: Record<string, unknown>,
+  key: string
+): Array<{ id: string; label: string; description: string }> | undefined {
+  const value = args[key];
+  if (value === undefined || value === null) {
+    return undefined;
+  }
+  if (!Array.isArray(value)) {
+    throw new Error(`${key} must be an array.`);
+  }
+
+  return value.map((item) => {
+    if (!item || typeof item !== 'object') {
+      throw new Error(`${key} entries must be objects.`);
+    }
+    const option = item as Record<string, unknown>;
+    if (
+      typeof option.id !== 'string' ||
+      typeof option.label !== 'string' ||
+      typeof option.description !== 'string'
+    ) {
+      throw new Error(`${key} entries must include id, label, and description.`);
+    }
+    return {
+      id: option.id,
+      label: option.label,
+      description: option.description
+    };
+  });
+}
+
+
+function readTodoItemsArg(
+  args: Record<string, unknown>,
+  key: string
+): Array<{ id: string; text: string; status: 'pending' | 'in_progress' | 'done' }> {
+  const value = args[key];
+  if (!Array.isArray(value)) {
+    throw new Error(`${key} must be an array.`);
+  }
+
+  return value.map((item) => {
+    if (!item || typeof item !== 'object') {
+      throw new Error(`${key} entries must be objects.`);
+    }
+
+    const todo = item as Record<string, unknown>;
+    const id = todo.id;
+    const text = todo.text;
+    const status = todo.status;
+    if (
+      typeof id !== 'string' ||
+      typeof text !== 'string' ||
+      (status !== 'pending' && status !== 'in_progress' && status !== 'done')
+    ) {
+      throw new Error(`${key} entries must include id, text, and a valid status.`);
+    }
+    return { id, text, status };
+  });
 }

@@ -44,3 +44,42 @@ prompt = "/read README.md"
   const parsed = await parseEvalManifest(manifestPath);
   assert.equal(parsed.manifest.runtime.model, undefined);
 });
+
+test('parseEvalManifest reads context_window_tokens for compaction stress stages', async (t) => {
+  const tempDir = await createTempDir('h2-eval-runtime-context-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const fixtureDir = path.join(tempDir, 'fixtures', 'tiny-app');
+  await mkdir(fixtureDir, { recursive: true });
+  await writeFile(path.join(fixtureDir, 'README.md'), '# fixture\n', 'utf8');
+  const manifestPath = path.join(tempDir, 'suite.toml');
+  await writeFile(
+    manifestPath,
+    `
+[suite]
+id = "stage3b"
+
+[runtime]
+reasoning_effort = "medium"
+thinking = false
+web_search_mode = "fixed"
+context_window_tokens = 75000
+
+[[fixtures]]
+id = "tiny-app"
+type = "template"
+path = "./fixtures/tiny-app"
+
+[[cases]]
+id = "L1"
+bucket = "C"
+fixture = "tiny-app"
+profile = "long"
+prompt = "/read README.md"
+`,
+    'utf8'
+  );
+
+  const parsed = await parseEvalManifest(manifestPath);
+  assert.equal(parsed.manifest.runtime.contextWindowTokens, 75000);
+});

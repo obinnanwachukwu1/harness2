@@ -1,5 +1,11 @@
 export type TranscriptRole = 'user' | 'assistant' | 'tool' | 'system';
 
+export type AgentMode = 'study' | 'plan' | 'direct';
+
+export type PlanModePhase = 'planning' | 'awaiting_approval' | 'execution' | null;
+
+export type TodoStatus = 'pending' | 'in_progress' | 'done';
+
 export type ExperimentStatus =
   | 'running'
   | 'budget_exhausted'
@@ -19,6 +25,165 @@ export interface SessionRecord {
   cwd: string;
   startedAt: string;
   lastActiveAt: string;
+}
+
+export interface TodoItem {
+  id: string;
+  text: string;
+  status: TodoStatus;
+  position: number;
+}
+
+export type AskUserKind = 'clarification' | 'approval';
+export type AskUserResponseKind = 'open' | 'yes_no' | 'single_choice';
+export type AskUserRecommendedResponse = 'yes' | 'no' | null;
+
+export interface AskUserOption {
+  id: string;
+  label: string;
+  description: string;
+}
+
+export interface PendingUserRequest {
+  sessionId: string;
+  kind: AskUserKind;
+  responseKind: AskUserResponseKind;
+  question: string;
+  context: string | null;
+  options: AskUserOption[] | null;
+  recommendedOptionId: string | null;
+  recommendedResponse: AskUserRecommendedResponse;
+  reason: string | null;
+  createdAt: string;
+  updatedAt: string;
+}
+
+export interface SessionPlanRecord {
+  sessionId: string;
+  createdAt: string;
+  updatedAt: string;
+  goal: string;
+  assumptions: string[];
+  files: string[];
+  steps: string[];
+  validation: string[];
+  risks: string[];
+  planPath: string;
+}
+
+export interface CompactionArtifactPointer {
+  path: string;
+  why: string;
+}
+
+export interface HiddenCompactionStateSnapshot {
+  mode: 'plan' | 'direct';
+  planModePhase: PlanModePhase;
+  approvedPlan: SessionPlanRecord | null;
+  todos: TodoItem[];
+  lastTestStatus: string | null;
+  activeProcessSummary: string[];
+}
+
+export interface PlanDirectCompactionSummary {
+  mode: 'plan' | 'direct';
+  task: {
+    goal: string;
+    constraints: string[];
+    non_goals: string[];
+  };
+  state: {
+    status: string;
+    completed: string[];
+    current_focus: string;
+    next: string[];
+    blockers: string[];
+  };
+  durable_decisions: Array<{
+    decision: string;
+    why: string;
+  }>;
+  implementation_context: {
+    changed_files: string[];
+    relevant_paths: string[];
+    artifacts: CompactionArtifactPointer[];
+  };
+  validation: {
+    last_test_status: string | null;
+    passed_checks: string[];
+    open_failures: string[];
+  };
+  plan_mode_state:
+    | null
+    | {
+        approved_plan_summary: string[];
+        step_status: Array<{
+          step: string;
+          status: 'done' | 'in_progress' | 'pending';
+        }>;
+      };
+  resume_hints: string[];
+}
+
+export interface CreatePlanInput {
+  goal: string;
+  assumptions: string[];
+  files: string[];
+  steps: string[];
+  validation: string[];
+  risks: string[];
+  planMarkdown: string;
+}
+
+export interface CreatePlanResult {
+  sessionId: string;
+  status: 'planned';
+  planPath: string;
+}
+
+export interface ApprovePlanResult {
+  sessionId: string;
+  status: 'execution';
+}
+
+export interface PlanStatusResult {
+  phase: PlanModePhase;
+  plan: SessionPlanRecord | null;
+}
+
+export interface AskUserInput {
+  kind: AskUserKind;
+  responseKind: AskUserResponseKind;
+  question: string;
+  context?: string;
+  options?: AskUserOption[];
+  recommendedOptionId?: string;
+  recommendedResponse?: 'yes' | 'no';
+  reason?: string;
+}
+
+export interface AskUserResult {
+  sessionId: string;
+  status: 'waiting_for_user';
+  kind: AskUserKind;
+  responseKind: AskUserResponseKind;
+  question: string;
+  options: AskUserOption[] | null;
+  recommendedOptionId: string | null;
+  recommendedResponse: AskUserRecommendedResponse;
+  reason: string | null;
+}
+
+export interface UpdateTodosInput {
+  items: Array<{
+    id: string;
+    text: string;
+    status: TodoStatus;
+  }>;
+}
+
+export interface UpdateTodosResult {
+  items: TodoItem[];
 }
 
 export interface TranscriptEntry {
@@ -216,6 +381,7 @@ export interface SessionCheckpointRecord {
   id: number;
   sessionId: string;
   createdAt: string;
+  checkpointKind: 'study' | 'plan_direct';
   goal: string;
   completed: string;
   next: string;
@@ -229,6 +395,8 @@ export interface SessionCheckpointRecord {
   activeExperimentSummaries: ExperimentSearchResult[];
   invalidatedExperimentSummaries: ExperimentSearchResult[];
   checkpointBlock: string;
+  checkpointSummary: PlanDirectCompactionSummary | null;
+  artifacts: CompactionArtifactPointer[];
   tailStartHistoryId: number | null;
 }
 
@@ -251,6 +419,8 @@ export interface ModelSessionRecord {
   reasoningEffort: 'low' | 'medium' | 'high' | null;
   previousResponseId: string | null;
   updatedAt: string;
+  agentMode: AgentMode;
+  planModePhase: PlanModePhase;
 }
 
 export interface OpenAICodexJwtClaims {
@@ -275,11 +445,16 @@ export interface EngineSnapshot {
   transcript: TranscriptEntry[];
   experiments: ExperimentRecord[];
   studyDebts: StudyDebtRecord[];
+  activePlan: SessionPlanRecord | null;
+  pendingUserRequest: PendingUserRequest | null;
+  todos: TodoItem[];
   processingTurn: boolean;
   currentTurnStartedAt: string | null;
   statusText: string;
   model: string;
   reasoningEffort: 'low' | 'medium' | 'high' | null;
+  agentMode: AgentMode;
+  planModePhase: PlanModePhase;
   estimatedContextTokens: number;
   contextWindowTokens: number;
   standardRateContextTokens: number | null;
@@ -415,6 +590,11 @@ export interface AgentTools {
     experimentId: string,
     options?: { apply?: boolean }
   ): Promise<ExperimentAdoptionPreview | ExperimentAdoptionResult>;
+  createPlan?(input: CreatePlanInput): Promise<CreatePlanResult>;
+  askUser?(input: AskUserInput): Promise<AskUserResult>;
+  updateTodos?(input: UpdateTodosInput): Promise<UpdateTodosResult>;
+  approvePlan?(optionId?: string): Promise<ApprovePlanResult>;
+  getPlanStatus?(): Promise<PlanStatusResult>;
   compact?(
     goal: string,
     completed: string,
