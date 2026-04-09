@@ -32,153 +32,169 @@ export function formatToolOutput(name: string, rawArguments: string, output: str
 }
 
 export function formatToolHeader(name: string, rawArguments: string, output?: string): string {
-  const args = parseArguments(rawArguments);
-  const parsedOutput = output ? safeJsonParse(output) : null;
+  try {
+    const args = parseArguments(rawArguments);
+    const parsedOutput = output ? safeJsonParse(output) : null;
 
-  switch (name) {
-    case 'exec_command':
-      return `Exec(${compactTextForHeader(readStringArg(args, 'command'), 72)})`;
-    case 'write_stdin': {
-      const processId = readOptionalNumberArg(args, 'processId');
-      return typeof processId === 'number' ? `Exec(${Math.floor(processId)})` : 'Exec(stdin)';
+    switch (name) {
+      case 'exec_command':
+        return `Exec(${compactTextForHeader(readStringArg(args, 'command'), 72)})`;
+      case 'write_stdin': {
+        const processId = readOptionalNumberArg(args, 'processId');
+        return typeof processId === 'number' ? `Exec(${Math.floor(processId)})` : 'Exec(stdin)';
+      }
+      case 'read':
+        return formatReadHeader(
+          readStringArg(args, 'path'),
+          readOptionalNumberArg(args, 'startLine'),
+          readOptionalNumberArg(args, 'endLine')
+        );
+      case 'ls':
+        return `Ls(${readOptionalStringArg(args, 'path') ?? '.'})`;
+      case 'write':
+        return `Write(${readStringArg(args, 'path')})`;
+      case 'edit':
+        return summarizePatchForHeader(readStringArg(args, 'patch'));
+      case 'glob':
+        return `Glob(${readStringArg(args, 'pattern')})`;
+      case 'rg': {
+        const target = readOptionalStringOrArrayArg(args, 'target');
+        const targetText = Array.isArray(target) ? target.join(' ') : target;
+        return target
+          ? `Rg(${readStringArg(args, 'pattern')} in ${targetText})`
+          : `Rg(${readStringArg(args, 'pattern')})`;
+      }
+      case 'grep': {
+        const target = readOptionalStringOrArrayArg(args, 'target');
+        const targetText = Array.isArray(target) ? target.join(' ') : target;
+        return target
+          ? `Rg(${readStringArg(args, 'pattern')} in ${targetText})`
+          : `Rg(${readStringArg(args, 'pattern')})`;
+      }
+      case 'web_search': {
+        const query = readOptionalStringArg(args, 'query');
+        return query ? `WebSearch(${compactTextForHeader(query, 64)})` : 'WebSearch';
+      }
+      case 'spawn_experiment': {
+        const questionId =
+          readOptionalStringArg(args, 'questionId') ?? readOptionalStringArg(args, 'studyDebtId');
+        return questionId
+          ? `experiment spawn(${questionId}: ${compactTextForHeader(readStringArg(args, 'hypothesis'), 52)})`
+          : `experiment spawn(${compactTextForHeader(readStringArg(args, 'hypothesis'), 64)})`;
+      }
+      case 'read_experiment':
+        return `experiment read(${readStringArg(args, 'experimentId')})`;
+      case 'wait_experiment':
+        return `experiment wait(${readStringArg(args, 'experimentId')})`;
+      case 'search_experiments': {
+        const query = readOptionalStringArg(args, 'query');
+        const questionId = readStringArg(args, 'questionId');
+        return query
+          ? `experiment search(${questionId}: ${compactTextForHeader(query, 44)})`
+          : `experiment search(${questionId})`;
+      }
+      case 'open_question':
+      case 'open_study_debt':
+        return `open question(${compactTextForHeader(
+          readOptionalOutputSummary(parsedOutput) ?? readStringArg(args, 'summary'),
+          56
+        )})`;
+      case 'resolve_question':
+      case 'resolve_study_debt':
+        return `resolve question(${compactTextForHeader(
+          readOptionalOutputSummary(parsedOutput) ??
+            (readOptionalStringArg(args, 'questionId') ?? readStringArg(args, 'debtId')),
+          56
+        )})`;
+      case 'extend_experiment_budget':
+        return `experiment budget(${readStringArg(args, 'experimentId')})`;
+      case 'resolve_experiment':
+        return `experiment resolve(${readStringArg(args, 'experimentId')})`;
+      case 'compact':
+        return `Compact(${compactTextForHeader(readStringArg(args, 'goal'), 56)})`;
+      default:
+        return name;
     }
-    case 'read':
-      return formatReadHeader(
-        readStringArg(args, 'path'),
-        readOptionalNumberArg(args, 'startLine'),
-        readOptionalNumberArg(args, 'endLine')
-      );
-    case 'ls':
-      return `Ls(${readOptionalStringArg(args, 'path') ?? '.'})`;
-    case 'write':
-      return `Write(${readStringArg(args, 'path')})`;
-    case 'edit':
-      return summarizePatchForHeader(readStringArg(args, 'patch'));
-    case 'glob':
-      return `Glob(${readStringArg(args, 'pattern')})`;
-    case 'rg': {
-      const target = readOptionalStringOrArrayArg(args, 'target');
-      const targetText = Array.isArray(target) ? target.join(' ') : target;
-      return target
-        ? `Rg(${readStringArg(args, 'pattern')} in ${targetText})`
-        : `Rg(${readStringArg(args, 'pattern')})`;
-    }
-    case 'grep': {
-      const target = readOptionalStringOrArrayArg(args, 'target');
-      const targetText = Array.isArray(target) ? target.join(' ') : target;
-      return target
-        ? `Rg(${readStringArg(args, 'pattern')} in ${targetText})`
-        : `Rg(${readStringArg(args, 'pattern')})`;
-    }
-    case 'web_search': {
-      const query = readOptionalStringArg(args, 'query');
-      return query ? `WebSearch(${compactTextForHeader(query, 64)})` : 'WebSearch';
-    }
-    case 'spawn_experiment': {
-      const questionId =
-        readOptionalStringArg(args, 'questionId') ?? readOptionalStringArg(args, 'studyDebtId');
-      return questionId
-        ? `experiment spawn(${questionId}: ${compactTextForHeader(readStringArg(args, 'hypothesis'), 52)})`
-        : `experiment spawn(${compactTextForHeader(readStringArg(args, 'hypothesis'), 64)})`;
-    }
-    case 'read_experiment':
-      return `experiment read(${readStringArg(args, 'experimentId')})`;
-    case 'wait_experiment':
-      return `experiment wait(${readStringArg(args, 'experimentId')})`;
-    case 'search_experiments': {
-      const query = readOptionalStringArg(args, 'query');
-      const questionId = readStringArg(args, 'questionId');
-      return query
-        ? `experiment search(${questionId}: ${compactTextForHeader(query, 44)})`
-        : `experiment search(${questionId})`;
-    }
-    case 'open_question':
-    case 'open_study_debt':
-      return `open question(${compactTextForHeader(
-        readOptionalOutputSummary(parsedOutput) ?? readStringArg(args, 'summary'),
-        56
-      )})`;
-    case 'resolve_question':
-    case 'resolve_study_debt':
-      return `resolve question(${compactTextForHeader(
-        readOptionalOutputSummary(parsedOutput) ??
-          (readOptionalStringArg(args, 'questionId') ?? readStringArg(args, 'debtId')),
-        56
-      )})`;
-    case 'extend_experiment_budget':
-      return `experiment budget(${readStringArg(args, 'experimentId')})`;
-    case 'resolve_experiment':
-      return `experiment resolve(${readStringArg(args, 'experimentId')})`;
-    case 'compact':
-      return `Compact(${compactTextForHeader(readStringArg(args, 'goal'), 56)})`;
-    default:
-      return name;
+  } catch {
+    return name;
   }
 }
 
-export function formatLiveToolBody(name: string, rawArguments: string): string[] {
-  const args = parseArguments(rawArguments);
+function fallbackArgumentPreview(rawArguments: string): string[] {
+  const parsed = safeJsonParse(rawArguments);
+  if (parsed && typeof parsed === 'object' && !Array.isArray(parsed)) {
+    return formatJsonArgumentPreview(parsed as Record<string, unknown>);
+  }
+  return rawArguments.trim().length > 0 ? [compactTextForHeader(rawArguments.trim(), 120)] : [];
+}
 
-  switch (name) {
-    case 'exec_command': {
-      const command = readStringArg(args, 'command');
-      const cwd = readOptionalStringArg(args, 'cwd');
-      return cwd ? [`command: ${command}`, `cwd: ${cwd}`] : [`command: ${command}`];
-    }
-    case 'write_stdin': {
-      const processId = readNumberArg(args, 'processId');
-      const body = [`process: ${processId}`];
-      const input = readOptionalStringArg(args, 'input');
-      if (input) {
-        body.push(`input: ${input}`);
+export function formatLiveToolBody(name: string, rawArguments: string): string[] {
+  try {
+    const args = parseArguments(rawArguments);
+
+    switch (name) {
+      case 'exec_command': {
+        const command = readStringArg(args, 'command');
+        const cwd = readOptionalStringArg(args, 'cwd');
+        return cwd ? [`command: ${command}`, `cwd: ${cwd}`] : [`command: ${command}`];
       }
-      if (readOptionalBooleanArg(args, 'closeStdin')) {
-        body.push('stdin: close');
+      case 'write_stdin': {
+        const processId = readNumberArg(args, 'processId');
+        const body = [`process: ${processId}`];
+        const input = readOptionalStringArg(args, 'input');
+        if (input) {
+          body.push(`input: ${input}`);
+        }
+        if (readOptionalBooleanArg(args, 'closeStdin')) {
+          body.push('stdin: close');
+        }
+        if (readOptionalBooleanArg(args, 'terminate')) {
+          body.push('process: terminate');
+        }
+        return body;
       }
-      if (readOptionalBooleanArg(args, 'terminate')) {
-        body.push('process: terminate');
+      case 'read': {
+        const path = readStringArg(args, 'path');
+        const startLine = readOptionalNumberArg(args, 'startLine');
+        const endLine = readOptionalNumberArg(args, 'endLine');
+        const range =
+          typeof startLine === 'number' || typeof endLine === 'number'
+            ? `lines ${typeof startLine === 'number' ? Math.floor(startLine) : 1}-${typeof endLine === 'number' ? Math.floor(endLine) : 'end'}`
+            : null;
+        return range ? [`path: ${path}`, range] : [`path: ${path}`];
       }
-      return body;
-    }
-    case 'read': {
-      const path = readStringArg(args, 'path');
-      const startLine = readOptionalNumberArg(args, 'startLine');
-      const endLine = readOptionalNumberArg(args, 'endLine');
-      const range =
-        typeof startLine === 'number' || typeof endLine === 'number'
-          ? `lines ${typeof startLine === 'number' ? Math.floor(startLine) : 1}-${typeof endLine === 'number' ? Math.floor(endLine) : 'end'}`
-          : null;
-      return range ? [`path: ${path}`, range] : [`path: ${path}`];
-    }
-    case 'ls':
-      return [`path: ${readOptionalStringArg(args, 'path') ?? '.'}`];
-    case 'write':
-      return [`path: ${readStringArg(args, 'path')}`];
-    case 'edit':
-      return summarizePatchForBody(readStringArg(args, 'patch'));
-    case 'glob':
-      return [`pattern: ${readStringArg(args, 'pattern')}`];
-    case 'rg':
-    case 'grep': {
-      const pattern = readStringArg(args, 'pattern');
-      const target = readOptionalStringOrArrayArg(args, 'target');
-      const targetText = Array.isArray(target) ? target.join(' ') : target;
-      return targetText ? [`pattern: ${pattern}`, `target: ${targetText}`] : [`pattern: ${pattern}`];
-    }
-    case 'web_search': {
-      const query = readOptionalStringArg(args, 'query');
-      return query ? [`query: ${query}`] : [];
-    }
-    case 'search_experiments': {
-      const body = [`questionId: ${readStringArg(args, 'questionId')}`];
-      const query = readOptionalStringArg(args, 'query');
-      if (query) {
-        body.push(`query: ${query}`);
+      case 'ls':
+        return [`path: ${readOptionalStringArg(args, 'path') ?? '.'}`];
+      case 'write':
+        return [`path: ${readStringArg(args, 'path')}`];
+      case 'edit':
+        return summarizePatchForBody(readStringArg(args, 'patch'));
+      case 'glob':
+        return [`pattern: ${readStringArg(args, 'pattern')}`];
+      case 'rg':
+      case 'grep': {
+        const pattern = readStringArg(args, 'pattern');
+        const target = readOptionalStringOrArrayArg(args, 'target');
+        const targetText = Array.isArray(target) ? target.join(' ') : target;
+        return targetText ? [`pattern: ${pattern}`, `target: ${targetText}`] : [`pattern: ${pattern}`];
       }
-      return body;
+      case 'web_search': {
+        const query = readOptionalStringArg(args, 'query');
+        return query ? [`query: ${query}`] : [];
+      }
+      case 'search_experiments': {
+        const body = [`questionId: ${readStringArg(args, 'questionId')}`];
+        const query = readOptionalStringArg(args, 'query');
+        if (query) {
+          body.push(`query: ${query}`);
+        }
+        return body;
+      }
+      default:
+        return formatJsonArgumentPreview(args);
     }
-    default:
-      return formatJsonArgumentPreview(args);
+  } catch {
+    return fallbackArgumentPreview(rawArguments);
   }
 }
 
@@ -439,7 +455,7 @@ export const MAIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     type: 'function',
     name: 'open_question',
     description:
-      'Declare a load-bearing unresolved claim that blocks dependent edits. Use this when being wrong could materially change architecture, interfaces, protocol behavior, recovery, durability, retry, ownership, history, or integration behavior. summary should name the concrete claim. whyItMatters should say what would change if the answer goes the other way. In greenfield work, do not open a question merely because several designs exist; open one only when the prompt leaves a product contract underdetermined. Do not spend a question on routine implementation taste or on a capability check that one focused read or tiny local probe can settle immediately unless that check is the true blocker. Open the question before any live external, secret-backed, or runtime probe that could change the implementation.',
+      'Declare a load-bearing unresolved claim that blocks dependent edits. Use this when being wrong could materially change architecture, interfaces, protocol behavior, recovery, durability, retry, ownership, history, or integration behavior. summary should name the concrete claim. whyItMatters should say what would change if the answer goes the other way. In greenfield work, do not open a question merely because several designs exist; open one only when the prompt leaves a product contract underdetermined. If the unresolved choice is a product contract about history, recovery, retry, durability, or ownership semantics, use open_question instead of only stating a commitment note. Do not spend a question on routine implementation taste or on a capability check that one focused read or tiny local probe can settle immediately unless that check is the true blocker. Open the question before any live external, secret-backed, or runtime probe that could change the implementation.',
     parameters: {
       type: 'object',
       properties: {

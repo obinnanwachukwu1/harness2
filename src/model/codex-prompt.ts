@@ -31,6 +31,7 @@ Study discipline:
 Greenfield rule:
 - Do not open a question just because multiple designs exist.
 - Open one only when the prompt leaves a load-bearing product contract underdetermined, especially around recovery, durability, retry, ownership, or history semantics, and silently choosing would likely surprise the user or force rework.
+- A greenfield commitment note is not a substitute for an open question when the commitment chooses underdetermined history, recovery, retry, durability, or ownership semantics.
 - If a tiny local capability probe can cheaply eliminate a leading alternative, do that before committing.
 
 Search discipline:

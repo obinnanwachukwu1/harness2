@@ -209,6 +209,82 @@ test('HeadlessEngine exec_command can keep a background process alive across pol
   assert.equal(typeof finished.exitCode, 'number');
 });
 
+test('HeadlessEngine blocks same-question write_stdin probing while a linked experiment is active', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const started = JSON.parse(
+    await engine.runExecCommand({
+      command: 'node -e "setTimeout(() => {}, 30000)"',
+      yieldTimeMs: 100
+    })
+  ) as {
+    processId: number | null;
+    running: boolean;
+  };
+
+  assert.equal(started.running, true);
+  assert.equal(typeof started.processId, 'number');
+
+  const debt = engine.notebook.openStudyDebt({
+    sessionId: engine.snapshot.session.id,
+    summary: 'stop semantics are still under study',
+    whyItMatters: 'Being wrong would materially change the runtime contract.',
+    kind: 'runtime',
+    affectedPaths: ['.']
+  });
+  const timestamp = nowIso();
+  engine.notebook.upsertExperiment({
+    id: 'exp-running-probe-gate',
+    sessionId: engine.snapshot.session.id,
+    studyDebtId: debt.id,
+    hypothesis: 'inline polling should defer to the active study',
+    command: 'subagent',
+    context: '',
+    baseCommitSha: 'abc123',
+    branchName: 'h2-exp-running-probe-gate',
+    worktreePath: path.join(repoDir, '.h2', 'worktrees', 'exp-running-probe-gate'),
+    status: 'running',
+    budget: 1200,
+    tokensUsed: 0,
+    contextTokensUsed: 0,
+    toolOutputTokensUsed: 0,
+    observationTokensUsed: 0,
+    preserve: false,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    resolvedAt: null,
+    finalVerdict: null,
+    finalSummary: null,
+    discovered: [],
+    artifacts: [],
+    constraints: [],
+    confidenceNote: null,
+    lowSignalWarningEmitted: false,
+    promote: false
+  });
+
+  await assert.rejects(
+    () =>
+      engine.runWriteStdin({
+        processId: started.processId!,
+        yieldTimeMs: 100
+      }),
+    /An active linked experiment already owns this evidence path for write_stdin/
+  );
+
+  await assert.doesNotReject(() =>
+    engine.runWriteStdin({
+      processId: started.processId!,
+      terminate: true,
+      yieldTimeMs: 100
+    })
+  );
+});
+
 test('HeadlessEngine rg accepts whitespace-separated multi-target strings', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));

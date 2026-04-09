@@ -581,6 +581,10 @@ export class HeadlessEngine {
       throw new Error(`Unknown process: ${input.processId}`);
     }
 
+    if (!input.terminate) {
+      this.assertExperimentAllowsInlineProbe(root, 'write_stdin', [session.cwd]);
+    }
+
     if (input.terminate) {
       await this.terminateExecSession(session);
     } else {
@@ -1605,7 +1609,7 @@ export class HeadlessEngine {
 
   private assertExperimentAllowsInlineProbe(
     root: string,
-    toolName: 'exec_command' | 'read' | 'ls' | 'glob' | 'rg',
+    toolName: 'exec_command' | 'write_stdin' | 'read' | 'ls' | 'glob' | 'rg',
     resolvedTargets: string[] = []
   ): void {
     if (root !== this.options.cwd) {

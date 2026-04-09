@@ -60,6 +60,9 @@ export function buildAutoScore(
   if (hardFailReasons.length > 0) {
     notes.push(...hardFailReasons);
   }
+  if (testCase.bucket === 'A' && questionActual) {
+    notes.push('Bucket A control may be stale: this case surfaced a question instead of staying purely obvious/local.');
+  }
 
   return {
     testId: testCase.id,
@@ -122,7 +125,8 @@ function readExperimentHypothesisFalsifiable(
 
 function readWebSearchActual(modelHistory: ModelHistoryItem[]): boolean {
   return modelHistory.some(
-    (item) => item.type === 'function_call' && item.name === 'web_search'
+    (item) =>
+      (item.type === 'function_call' && item.name === 'web_search') || isProviderWebSearchMessage(item)
   );
 }
 
@@ -133,14 +137,11 @@ function readQuestionBeforeWebSearch(
   let sawWebSearch = false;
 
   for (const item of modelHistory) {
-    if (!isFunctionCall(item)) {
-      continue;
-    }
-    if (item.name === 'open_question' || item.name === 'open_study_debt') {
+    if (isQuestionOpenCall(item)) {
       openedQuestion = true;
       continue;
     }
-    if (item.name === 'web_search') {
+    if (isWebSearchHistoryItem(item)) {
       sawWebSearch = true;
       return openedQuestion ? 'yes' : 'no';
     }
@@ -159,16 +160,19 @@ function readDuplicateInlineProbingAfterSpawn(
     return 'n/a';
   }
 
-  const tailCalls = modelHistory.slice(firstSpawnIndex + 1).filter(isFunctionCall);
-  const firstExperimentReadIndex = tailCalls.findIndex((item) =>
-    ['wait_experiment', 'read_experiment', 'resolve_experiment'].includes(item.name)
+  const tailCalls = collectFunctionCallRecords(modelHistory).filter(
+    (record) => record.historyIndex > firstSpawnIndex
+  );
+  const firstExperimentReadIndex = tailCalls.findIndex((record) =>
+    ['wait_experiment', 'read_experiment', 'resolve_experiment'].includes(record.call.name)
   );
   const probeWindow =
     firstExperimentReadIndex === -1 ? tailCalls : tailCalls.slice(0, firstExperimentReadIndex);
 
-  return probeWindow.some((item) =>
-    ['read', 'ls', 'glob', 'rg', 'grep', 'exec_command', 'search_experiments', 'web_search'].includes(
-      item.name
+  return probeWindow.some((record) =>
+    !record.failed &&
+    ['read', 'ls', 'glob', 'rg', 'grep', 'exec_command', 'write_stdin', 'search_experiments', 'web_search'].includes(
+      record.call.name
     )
   )
     ? 'yes'
@@ -253,18 +257,78 @@ function readFinalResolutionMode(studyDebts: StudyDebtRecord[]): EvalResolutionM
 function hasSearchExperimentsBeforeQuestion(modelHistory: ModelHistoryItem[]): boolean {
   let openedQuestion = false;
   for (const item of modelHistory) {
-    if (!isFunctionCall(item)) {
-      continue;
-    }
-    if (item.name === 'open_question' || item.name === 'open_study_debt') {
+    if (isQuestionOpenCall(item)) {
       openedQuestion = true;
       continue;
     }
-    if (!openedQuestion && item.name === 'search_experiments') {
+    if (!openedQuestion && isFunctionCall(item) && item.name === 'search_experiments') {
       return true;
     }
   }
   return false;
+}
+
+interface FunctionCallRecord {
+  call: Extract<ModelHistoryItem, { type: 'function_call' }>;
+  output: Extract<ModelHistoryItem, { type: 'function_call_output' }> | null;
+  historyIndex: number;
+  failed: boolean;
+}
+
+function collectFunctionCallRecords(modelHistory: ModelHistoryItem[]): FunctionCallRecord[] {
+  const records: FunctionCallRecord[] = [];
+  const byCallId = new Map<string, FunctionCallRecord>();
+
+  for (let index = 0; index < modelHistory.length; index += 1) {
+    const item = modelHistory[index]!;
+    if (item.type === 'function_call') {
+      const record: FunctionCallRecord = {
+        call: item,
+        output: null,
+        historyIndex: index,
+        failed: false
+      };
+      records.push(record);
+      byCallId.set(item.call_id, record);
+      continue;
+    }
+    if (item.type === 'function_call_output') {
+      const record = byCallId.get(item.call_id);
+      if (!record) {
+        continue;
+      }
+      record.output = item;
+      record.failed = isFailedFunctionCallOutput(item.output);
+    }
+  }
+
+  return records;
+}
+
+function isFailedFunctionCallOutput(rawOutput: string): boolean {
+  const parsed = safeJsonParse(rawOutput);
+  return Boolean(
+    parsed &&
+      typeof parsed === 'object' &&
+      !Array.isArray(parsed) &&
+      (parsed as Record<string, unknown>).ok === false
+  );
+}
+
+function isQuestionOpenCall(item: ModelHistoryItem): boolean {
+  return isFunctionCall(item) && (item.name === 'open_question' || item.name === 'open_study_debt');
+}
+
+function isWebSearchHistoryItem(item: ModelHistoryItem): boolean {
+  return (isFunctionCall(item) && item.name === 'web_search') || isProviderWebSearchMessage(item);
+}
+
+function isProviderWebSearchMessage(item: ModelHistoryItem): boolean {
+  return (
+    item.type === 'message' &&
+    item.role === 'developer' &&
+    item.content.startsWith('Built-in web_search executed.')
+  );
 }
 
 function isFunctionCall(
@@ -293,4 +357,12 @@ function safeParseArguments(raw: string): Record<string, unknown> {
 
 function hasNonEmptyString(value: unknown): value is string {
   return typeof value === 'string' && value.trim().length > 0;
+}
+
+function safeJsonParse(raw: string): unknown {
+  try {
+    return JSON.parse(raw) as unknown;
+  } catch {
+    return null;
+  }
 }
