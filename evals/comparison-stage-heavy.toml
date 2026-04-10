@@ -1,0 +1,303 @@
+[suite]
+id = "comparison-stage-heavy"
+description = "Heavy 10-prompt compaction coherence benchmarks. H1 and H2 are the primary pair; H3 is the reserve benchmark. Run this manifest in study, plan, and direct with a 75k effective context cap."
+
+[runtime]
+reasoning_effort = "medium"
+thinking = false
+web_search_mode = "live"
+context_window_tokens = 75000
+parallelism = 1
+repeat_count = 2
+
+[clarification]
+auto_reply = "Make the best grounded minimal choice and proceed. Keep the contract explicit."
+mark_as_unnecessary = true
+
+[[fixtures]]
+id = "next-app-router"
+type = "template"
+path = "./fixtures/next-app-router"
+setup_command = "npm ci"
+
+[[fixtures]]
+id = "vercel-chatbot"
+type = "git_checkout"
+path = "https://github.com/vercel/chatbot"
+ref = "146b3cb8cf2ffbb5b985819f06f6b8357bd464e7"
+setup_command = "corepack pnpm install --frozen-lockfile"
+
+[[fixtures]]
+id = "linkding"
+type = "git_checkout"
+path = "https://github.com/sissbruecker/linkding"
+ref = "573b6f5411eaaa18ccc9524544fa27bb594c532b"
+setup_command = "python3 -m pip install --user --upgrade pip && python3 -m pip install --user beautifulsoup4 bleach bleach-allowlist coverage django django-debug-toolbar djangorestframework huey markdown mozilla-django-oidc pytest pytest-django pytest-xdist requests ruff supervisor waybackpy && npm install && mkdir -p data data/assets data/favicons data/previews && python3 manage.py migrate"
+
+[[cases]]
+id = "H1"
+bucket = "C"
+fixture = "next-app-router"
+profile = "heavy greenfield next batch-ai-lab"
+question_expected = true
+experiment_expected = "optional"
+web_search_expected = "yes"
+prompt = """
+In this empty Next.js repo, build a local batch AI lab with:
+- SQLite-backed runs
+- 4 workers
+- per-run prompt snapshots
+- streamed live results
+- Stop / Resume after restart
+- historical safety when prompts change later
+
+Keep it minimal and locally runnable using the OpenAI-compatible env vars when needed.
+
+Before you lock in the runtime-sensitive pieces, verify:
+1. the actual end-to-end streaming + stop contract for this stack
+2. whether one atomic SQLite claim statement is enough to prevent double-claiming under 4 workers
+3. the safest minimal recovery/durability strategy for interrupted runs if it is not statically obvious
+4. whether replay should be hard-blocked, narrowed, or partially allowed when prompt variants drift after an interrupted run
+
+Use bounded studies for residual uncertainty. Prefer parallel experiments only if the risks are genuinely orthogonal.
+"""
+
+[[cases.followups]]
+after_turn = 1
+prompt = """
+Add an explicit duplicate-from-snapshot flow when replay is blocked because current prompt variants drifted. Keep the earlier safety rule intact: do not silently replay old partial results against current prompt definitions.
+"""
+
+[[cases.followups]]
+after_turn = 2
+prompt = """
+Add rerun failed only for completed or interrupted runs. It must reuse the stored per-run snapshots, must not recompute already-completed cells, and must stay consistent with whatever stop/resume contract you chose earlier.
+"""
+
+[[cases.followups]]
+after_turn = 3
+prompt = """
+Add a run debug timeline that shows worker claims, stop requests, recovery resets after restart, replay blocks due to drift, and duplicate-from-snapshot actions. Keep it minimal but make the earlier runtime contract visible.
+"""
+
+[[cases.followups]]
+after_turn = 4
+prompt = """
+Late requirement change: I want stop to be explicitly cooperative, not magical hard abort. If an already-claimed cell may still finish, the UI should say so clearly. Adjust the product behavior and copy without breaking the earlier replay/resume safety model.
+"""
+
+[[cases.followups]]
+after_turn = 5
+prompt = """
+Add saved prompt profiles for starting new runs. Old runs must remain historical snapshots of whatever prompt/profile state they were created with. New runs use the current profiles only.
+"""
+
+[[cases.followups]]
+after_turn = 6
+prompt = """
+Add export/import for completed or interrupted runs. Imported runs should be clearly marked as historical artifacts and should remain read-only unless the user explicitly duplicates from the imported snapshot.
+"""
+
+[[cases.followups]]
+after_turn = 7
+prompt = """
+Add branch run from snapshot: let the user take any past run and start a new run from the stored snapshot but only for a selected subset of inputs or variants. Preserve lineage to the original run instead of mutating it.
+"""
+
+[[cases.followups]]
+after_turn = 8
+prompt = """
+Add provider backpressure: cap active provider streams, queue overflow safely, and keep earlier guarantees around cooperative stop, restart recovery, and drift-safe replay/duplicate-from-snapshot.
+"""
+
+[[cases.followups]]
+after_turn = 9
+prompt = """
+Finish by adding targeted regression coverage and a small admin/status view that explicitly reflects the final contracts for:
+- cooperative stop
+- restart recovery
+- rerun failed only
+- replay block on drift
+- duplicate-from-snapshot
+- branch-from-snapshot lineage
+"""
+
+[cases.env_override]
+env_source = "~/.h2/eval-env/next-app-router-openai.env"
+write_env_file = ".env.local"
+write_env_example = ".env.local.example"
+
+[[cases]]
+id = "H2"
+bucket = "C"
+fixture = "vercel-chatbot"
+profile = "heavy existing product vercel-chatbot"
+question_expected = true
+experiment_expected = "optional"
+web_search_expected = "optional"
+prompt = """
+In this vercel/chatbot repo, turn the app into a small single-user conversation lab with these properties:
+- each conversation snapshots the settings that materially affect generation
+- users can branch from any earlier message
+- unsent drafts survive refresh/restart
+- live streaming stays minimal and locally runnable
+- history should feel clear and safe when settings change later
+
+At minimum, treat these settings as candidates for snapshotting if they affect behavior: model, system prompt, and any retrieval/tool toggle that changes what the assistant can do.
+
+Before you lock in the runtime-sensitive parts, verify:
+1. the actual stream stop/continue contract in this stack
+2. whether unfinished partial assistant output should be resumable, retryable, or branch-only
+3. whether existing conversations should remain historical snapshots when current settings change
+4. how draft restore should behave when the user has branched or changed settings since the draft was last edited
+
+Use bounded studies for residual uncertainty. Prefer parallel experiments only if the risks are genuinely orthogonal.
+"""
+
+[[cases.followups]]
+after_turn = 1
+prompt = """
+Add continue generation for a partial assistant message. It must stay consistent with the snapshot/branch contract you chose earlier; if continuing in place is unsafe, make it an explicit branch instead.
+"""
+
+[[cases.followups]]
+after_turn = 2
+prompt = """
+Add a compare two branches view that shows message-level differences and clearly labels snapshot differences, for example different model/system prompt state.
+"""
+
+[[cases.followups]]
+after_turn = 3
+prompt = """
+Late requirement clarification: old conversations must remain immutable historical snapshots. Only new conversations use current settings by default. Make sure the persistence and UI reflect that clearly.
+"""
+
+[[cases.followups]]
+after_turn = 4
+prompt = """
+Add shareable read-only permalinks for a branch snapshot. Editing from a shared snapshot should create a new branch, not mutate the shared history.
+"""
+
+[[cases.followups]]
+after_turn = 5
+prompt = """
+Make drafts branch-scoped, not chat-scoped. Restoring a draft after branch switching should never attach it to the wrong branch, even if settings changed since the draft was written.
+"""
+
+[[cases.followups]]
+after_turn = 6
+prompt = """
+Add export/import for a conversation branch snapshot. Imported branches should stay historical and detached from the current global settings unless the user explicitly branches from them.
+"""
+
+[[cases.followups]]
+after_turn = 7
+prompt = """
+Add a small audit panel that answers: why does this branch use these settings, where was it forked from, and whether a partial response was continued in place or branched.
+"""
+
+[[cases.followups]]
+after_turn = 8
+prompt = """
+New requirement: if a network interruption happens during generation, the retry affordance should preserve the earlier branch/snapshot rules and must not duplicate already-finished assistant text. Keep this consistent with the continue-generation behavior you already implemented.
+"""
+
+[[cases.followups]]
+after_turn = 9
+prompt = """
+Finish by adding targeted regression coverage plus a compact admin/debug view that proves the app still honors all of the following together:
+- immutable historical conversation snapshots
+- branch lineage
+- branch-scoped drafts
+- continue-generation semantics
+- retry after interruption semantics
+- shareable read-only snapshot permalinks
+"""
+
+[[cases]]
+id = "H3"
+bucket = "C"
+fixture = "linkding"
+profile = "heavy existing product reserve linkding"
+notes = "Reserve heavy benchmark."
+question_expected = true
+experiment_expected = "optional"
+web_search_expected = "no"
+prompt = """
+In this linkding repo, add a background metadata refresh system for bookmarks with these properties:
+- queued refresh jobs
+- retryable failures
+- pause / resume after restart
+- visible per-bookmark refresh status and history
+- historical safety when the bookmark URL/title/tags change later
+
+Keep it minimal and locally runnable.
+
+Before you lock in the runtime-sensitive parts, verify:
+1. the safest minimal queue/claim strategy for background refresh workers in this stack
+2. whether a queued refresh should use the live bookmark state or a stored snapshot when the bookmark changes before execution
+3. how pause/resume after restart should treat running, queued, and failed refreshes
+4. whether retries after URL drift should be hard-blocked, narrowed, or duplicate-from-snapshot only
+
+Use bounded studies for residual uncertainty. Prefer parallel experiments only if the risks are genuinely orthogonal.
+"""
+
+[[cases.followups]]
+after_turn = 1
+prompt = """
+Add an explicit duplicate-from-snapshot flow when a bookmark changed after a failed refresh and the system cannot safely retry against the live bookmark state.
+"""
+
+[[cases.followups]]
+after_turn = 2
+prompt = """
+Add retry failed only and retry selected only without rerunning successful refreshes. Keep it consistent with the earlier snapshot/drift rule.
+"""
+
+[[cases.followups]]
+after_turn = 3
+prompt = """
+Add a per-bookmark refresh timeline/debug view that shows claims, retries, pause/resume, recovery after restart, and drift blocks.
+"""
+
+[[cases.followups]]
+after_turn = 4
+prompt = """
+Late requirement: if a bookmark is deleted while refresh jobs still exist, preserve read-only history but do not let retry or resume resurrect the deleted bookmark.
+"""
+
+[[cases.followups]]
+after_turn = 5
+prompt = """
+Add export/import for bookmark refresh history. Imported history should remain historical and read-only unless the user explicitly duplicates from a stored snapshot.
+"""
+
+[[cases.followups]]
+after_turn = 6
+prompt = """
+Add a second background job type: thumbnail/preview capture. It should share the worker pool safely with metadata refresh without breaking the earlier retry/pause/resume semantics.
+"""
+
+[[cases.followups]]
+after_turn = 7
+prompt = """
+Add global pause/resume for all background jobs and make restart recovery explicit in the UI so users can tell which jobs were recovered, requeued, or left terminal.
+"""
+
+[[cases.followups]]
+after_turn = 8
+prompt = """
+Add a small admin queue view that shows stuck jobs, worker ownership, and why a job is blocked, for example deleted bookmark, drift block, retry budget exhausted.
+"""
+
+[[cases.followups]]
+after_turn = 9
+prompt = """
+Finish by adding targeted regression coverage and a concise admin/debug summary that proves the app still honors all of these together:
+- snapshot-vs-live refresh contract
+- duplicate-from-snapshot on drift
+- retry-failed-only
+- deleted-bookmark history without resurrection
+- shared worker-pool safety across job types
+- pause/resume after restart
+"""

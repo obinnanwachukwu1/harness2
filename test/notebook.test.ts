@@ -415,6 +415,75 @@ test('Notebook persists checkpoints and rebuilds compacted request history from 
   assert.equal(typeof notebook.getTailStartHistoryIdByTokenBudget(session.id, 2), 'number');
 });
 
+test('Notebook normalizes compacted tail boundaries so replay never starts on a function_call_output', async (t) => {
+  const tempDir = await createTempDir('h2-notebook-tail-boundary-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+
+  const session = notebook.createSession('session-tail-boundary', tempDir);
+  notebook.appendModelHistoryItem(session.id, {
+    type: 'message',
+    role: 'user',
+    content: 'build the feature'
+  });
+  notebook.appendModelHistoryItem(session.id, {
+    type: 'function_call',
+    call_id: 'call_1',
+    name: 'exec_command',
+    arguments: '{"command":"npm test"}'
+  });
+  notebook.appendModelHistoryItem(session.id, {
+    type: 'function_call_output',
+    call_id: 'call_1',
+    output: 'tests passed'
+  });
+  notebook.appendModelHistoryItem(session.id, {
+    type: 'message',
+    role: 'assistant',
+    content: 'validated locally'
+  });
+
+  notebook.createSessionCheckpoint({
+    sessionId: session.id,
+    goal: 'continue safely',
+    completed: 'ran one tool call',
+    next: 'make the next change',
+    gitLog: '(clean)',
+    gitStatus: '(clean)',
+    gitDiffStat: '(clean)',
+    activeExperimentSummaries: [],
+    invalidatedExperimentSummaries: [],
+    checkpointBlock: 'Checkpoint',
+    tailStartHistoryId: 3
+  });
+
+  assert.deepEqual(notebook.buildModelRequestHistory(session.id), [
+    {
+      type: 'message',
+      role: 'developer',
+      content: 'Checkpoint'
+    },
+    {
+      type: 'function_call',
+      call_id: 'call_1',
+      name: 'exec_command',
+      arguments: '{"command":"npm test"}'
+    },
+    {
+      type: 'function_call_output',
+      call_id: 'call_1',
+      output: 'tests passed'
+    },
+    {
+      type: 'message',
+      role: 'assistant',
+      content: 'validated locally'
+    }
+  ]);
+});
+
 test('Notebook persists open questions without injecting reminder developer messages into request history', async (t) => {
   const tempDir = await createTempDir('h2-notebook-open-question-');
   t.after(async () => cleanupDir(tempDir));

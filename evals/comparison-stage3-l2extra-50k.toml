@@ -1,0 +1,78 @@
+[suite]
+id = "comparison-stage3-l2extra-50k"
+description = "Single-case long-horizon continuation stress run for L2 with two realistic followups at a 50k context window. Run this manifest three times: study, plan, and direct."
+
+[runtime]
+reasoning_effort = "medium"
+thinking = false
+web_search_mode = "live"
+repeat_count = 1
+context_window_tokens = 50000
+
+[clarification]
+auto_reply = "Make the best grounded minimal choice and proceed. Keep the contract explicit."
+mark_as_unnecessary = true
+
+[[fixtures]]
+id = "next-app-router"
+type = "template"
+path = "./fixtures/next-app-router"
+setup_command = "npm ci"
+
+[[cases]]
+id = "L2extra"
+bucket = "C"
+fixture = "next-app-router"
+profile = "long-horizon batch-ai-lab followups"
+question_expected = true
+experiment_expected = "optional"
+web_search_expected = "yes"
+prompt = """
+In this Next.js repo, build a local batch AI lab with:
+- SQLite-backed runs
+- 4 workers
+- per-run prompt snapshots
+- streamed live results
+- Stop / Resume after restart
+- historical safety when prompts change later
+
+Keep it minimal and locally runnable using the OpenAI-compatible env vars when needed.
+
+Before you lock in the runtime-sensitive pieces, verify:
+1. the actual end-to-end streaming + stop contract for this stack
+2. whether one atomic SQLite claim statement is enough to prevent double-claiming under 4 workers
+3. the safest minimal recovery/durability strategy for interrupted runs if it is not statically obvious
+4. whether replay should be hard-blocked, narrowed, or partially allowed when prompt variants drift after an interrupted run
+
+Use bounded studies for residual uncertainty. Prefer parallel experiments only if the risks are genuinely orthogonal.
+"""
+
+[[cases.followups]]
+after_turn = 1
+prompt = """
+Follow-up: operators now want a safe "rerun with current prompt" action from any completed, stopped, or prompt-drift-blocked run.
+
+Keep the original historical run immutable and still tied to its frozen prompt snapshot.
+The new rerun should inherit the dataset/input and link back to the source run, but it must use the current prompt config and create a new run record with its own prompt snapshot/hash.
+
+Implement the minimal API/UI/storage changes needed for this, and validate the behavior locally if possible.
+"""
+
+[[cases.followups]]
+after_turn = 2
+prompt = """
+Second follow-up: debugging recovery is too opaque.
+
+Add a minimal operator-facing recovery/debug view for each run that shows:
+- current worker/lease status for in-flight work
+- the last heartbeat age
+- whether the run is resumable, rerunnable, or blocked
+- a concise machine-readable reason when resume is blocked (for example prompt drift, already terminal, no interrupted work, or stale recovery in progress)
+
+Keep it minimal and locally runnable. Prefer extending the existing API/UI rather than inventing a separate admin system. Validate locally if possible.
+"""
+
+[cases.env_override]
+env_source = "~/.h2/eval-env/next-app-router-openai.env"
+write_env_file = ".env.local"
+write_env_example = ".env.local.example"

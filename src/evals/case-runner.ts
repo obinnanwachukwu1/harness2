@@ -57,6 +57,7 @@ export async function runEvalCase(input: {
   );
 
   const promptsSent: string[] = [];
+  let scenarioTurnCount = 0;
   let clarificationFallbackUsed = false;
   return withEvalContextWindowOverride(runtime.contextWindowTokens, async () => {
     const engine = await HeadlessEngine.open({
@@ -83,10 +84,59 @@ export async function runEvalCase(input: {
       engine.modelClient.setReasoningEffort(sessionId, runtime.reasoningEffort);
       engine.setThinkingEnabled(runtime.thinking);
 
-      await submitPrompt(engine, input.caseDefinition.prompt);
-      promptsSent.push(input.caseDefinition.prompt);
+      await submitEvalScenarioPrompt(input.caseDefinition.prompt);
 
-      if (runtime.mode === 'plan') {
+      for (const followup of input.caseDefinition.followups) {
+        if (followup.afterTurn !== scenarioTurnCount) {
+          continue;
+        }
+        await submitEvalScenarioPrompt(followup.prompt);
+      }
+
+      const studyDebts = engine.notebook.listStudyDebts(sessionId);
+      const experiments = engine.notebook.listExperiments(sessionId);
+      const modelHistory = engine.notebook.listModelHistory(sessionId);
+      const autoScore = buildAutoScore(
+        input.caseDefinition,
+        modelHistory,
+        studyDebts,
+        experiments,
+        clarificationFallbackUsed
+      );
+      const artifacts = await exportEvalCaseArtifacts({
+        artifactRoot,
+        notebook: engine.notebook,
+        sessionId,
+        runtime,
+        autoScore,
+        workspacePath
+      });
+
+      return {
+        caseId: input.caseDefinition.id,
+        bucket: input.caseDefinition.bucket,
+        fixtureId: input.fixture.id,
+        workspacePath: context.workspacePath,
+        sessionId: context.sessionId,
+        runtime,
+        promptsSent,
+        clarificationFallbackUsed,
+        artifacts,
+        autoScore
+      };
+
+      async function submitEvalScenarioPrompt(prompt: string): Promise<void> {
+        await submitPrompt(engine, prompt);
+        promptsSent.push(prompt);
+        scenarioTurnCount += 1;
+        await drainPlanAutoReplies();
+      }
+
+      async function drainPlanAutoReplies(): Promise<void> {
+        if (runtime.mode !== 'plan') {
+          return;
+        }
+
         let guard = 0;
         while (guard < 8) {
           guard += 1;
@@ -122,46 +172,6 @@ export async function runEvalCase(input: {
           throw new Error('Plan mode is still waiting for user input after eval auto-replies.');
         }
       }
-
-      for (const followup of input.caseDefinition.followups) {
-        if (followup.afterTurn !== promptsSent.length) {
-          continue;
-        }
-        await submitPrompt(engine, followup.prompt);
-        promptsSent.push(followup.prompt);
-      }
-
-      const studyDebts = engine.notebook.listStudyDebts(sessionId);
-      const experiments = engine.notebook.listExperiments(sessionId);
-      const modelHistory = engine.notebook.listModelHistory(sessionId);
-      const autoScore = buildAutoScore(
-        input.caseDefinition,
-        modelHistory,
-        studyDebts,
-        experiments,
-        clarificationFallbackUsed
-      );
-      const artifacts = await exportEvalCaseArtifacts({
-        artifactRoot,
-        notebook: engine.notebook,
-        sessionId,
-        runtime,
-        autoScore,
-        workspacePath
-      });
-
-      return {
-        caseId: input.caseDefinition.id,
-        bucket: input.caseDefinition.bucket,
-        fixtureId: input.fixture.id,
-        workspacePath: context.workspacePath,
-        sessionId: context.sessionId,
-        runtime,
-        promptsSent,
-        clarificationFallbackUsed,
-        artifacts,
-        autoScore
-      };
     } finally {
       await engine.dispose();
     }

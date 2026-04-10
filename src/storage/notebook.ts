@@ -1111,7 +1111,7 @@ export class Notebook {
       )
       .get(sessionId, tailLength - 1) as { id: number } | undefined;
 
-    return row?.id ?? null;
+    return row ? this.normalizeTailStartHistoryId(sessionId, row.id) : null;
   }
 
   getTailStartHistoryIdByTokenBudget(sessionId: string, tailTokenBudget: number): number | null {
@@ -1152,7 +1152,7 @@ export class Notebook {
       tailStartId = row.id;
     }
 
-    return tailStartId;
+    return this.normalizeTailStartHistoryId(sessionId, tailStartId);
   }
 
   listModelHistory(sessionId: string): ModelHistoryItem[] {
@@ -1463,6 +1463,11 @@ export class Notebook {
       return this.listModelHistory(sessionId);
     }
 
+    const normalizedTailStartHistoryId = this.normalizeTailStartHistoryId(
+      sessionId,
+      checkpoint.tailStartHistoryId
+    );
+
     const tailRows = this.db
       .prepare(
         `
@@ -1484,8 +1489,8 @@ export class Notebook {
       )
       .all(
         sessionId,
-        checkpoint.tailStartHistoryId,
-        checkpoint.tailStartHistoryId
+        normalizedTailStartHistoryId,
+        normalizedTailStartHistoryId
       ) as unknown as ModelHistoryRow[];
 
     return [
@@ -1679,6 +1684,53 @@ export class Notebook {
 
   close(): void {
     this.db.close();
+  }
+
+  private normalizeTailStartHistoryId(sessionId: string, candidateId: number | null): number | null {
+    if (candidateId === null) {
+      return null;
+    }
+
+    let normalizedId = candidateId;
+    for (;;) {
+      const row = this.db
+        .prepare(
+          `
+            SELECT id, item_type, call_id
+            FROM model_history_items
+            WHERE session_id = ?
+              AND id = ?
+          `
+        )
+        .get(sessionId, normalizedId) as
+        | { id: number; item_type: string; call_id: string | null }
+        | undefined;
+
+      if (!row || row.item_type !== 'function_call_output' || !row.call_id) {
+        return normalizedId;
+      }
+
+      const matchingCall = this.db
+        .prepare(
+          `
+            SELECT id
+            FROM model_history_items
+            WHERE session_id = ?
+              AND item_type = 'function_call'
+              AND call_id = ?
+              AND id < ?
+            ORDER BY id DESC
+            LIMIT 1
+          `
+        )
+        .get(sessionId, row.call_id, row.id) as { id: number } | undefined;
+
+      if (!matchingCall || matchingCall.id === normalizedId) {
+        return normalizedId;
+      }
+
+      normalizedId = matchingCall.id;
+    }
   }
 }
 
