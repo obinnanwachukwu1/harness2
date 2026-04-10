@@ -101,6 +101,10 @@ interface ExecSession {
 }
 
 export class HeadlessEngine {
+  private static readonly activeEngines = new Set<HeadlessEngine>();
+  private static shutdownHooksInstalled = false;
+  private static exitCleanupRan = false;
+
   static async open(options: OpenEngineOptions): Promise<HeadlessEngine> {
     const sessionId = options.sessionId ?? createSessionId();
     const stateDir = path.join(options.cwd, '.h2');
@@ -132,7 +136,7 @@ export class HeadlessEngine {
       });
     }
 
-    return new HeadlessEngine({
+    const engine = new HeadlessEngine({
       cwd: options.cwd,
       sessionId,
       stateDir,
@@ -143,6 +147,8 @@ export class HeadlessEngine {
       authNotebook,
       runner: new PrototypeRunner()
     });
+    HeadlessEngine.registerActiveEngine(engine);
+    return engine;
   }
 
   private readonly events = new EventEmitter();
@@ -165,6 +171,7 @@ export class HeadlessEngine {
   private lastTestStatus: string | null = null;
   private activeTurnId = 0;
   private lastStudyDebtIntercept: { turnId: number; debtKey: string } | null = null;
+  private disposed = false;
 
   private constructor(
     private readonly options: {
@@ -557,10 +564,53 @@ export class HeadlessEngine {
   }
 
   async dispose(): Promise<void> {
+    if (this.disposed) {
+      return;
+    }
+    this.disposed = true;
+    HeadlessEngine.unregisterActiveEngine(this);
     await this.disposeExecSessions();
     await this.experimentManager.dispose();
     this.options.notebook.close();
     this.options.authNotebook.close();
+  }
+
+  private static registerActiveEngine(engine: HeadlessEngine): void {
+    HeadlessEngine.activeEngines.add(engine);
+    HeadlessEngine.installShutdownHooks();
+  }
+
+  private static unregisterActiveEngine(engine: HeadlessEngine): void {
+    HeadlessEngine.activeEngines.delete(engine);
+  }
+
+  private static installShutdownHooks(): void {
+    if (HeadlessEngine.shutdownHooksInstalled) {
+      return;
+    }
+    HeadlessEngine.shutdownHooksInstalled = true;
+
+    const cleanup = () => {
+      HeadlessEngine.runProcessExitCleanup();
+    };
+
+    process.on('exit', cleanup);
+    process.on('SIGINT', cleanup);
+    process.on('SIGTERM', cleanup);
+    process.on('SIGHUP', cleanup);
+    process.on('uncaughtException', cleanup);
+  }
+
+  private static runProcessExitCleanup(): void {
+    if (HeadlessEngine.exitCleanupRan) {
+      return;
+    }
+    HeadlessEngine.exitCleanupRan = true;
+    for (const engine of HeadlessEngine.activeEngines) {
+      try {
+        engine.forceKillOwnedProcessesSync();
+      } catch {}
+    }
   }
 
   private appendTranscript(role: TranscriptRole, text: string): void {
@@ -1233,6 +1283,41 @@ export class HeadlessEngine {
     await Promise.race([session.waitForExit, delay(1_500)]);
   }
 
+  private forceKillOwnedProcessesSync(): void {
+    const sessions = [...this.execSessions.values()];
+    for (const session of sessions) {
+      this.killExecSessionSync(session);
+    }
+    this.execSessions.clear();
+  }
+
+  private killExecSessionSync(session: ExecSession): void {
+    if (!session.running) {
+      return;
+    }
+
+    const processId = session.child.pid;
+    try {
+      if (process.platform === 'win32') {
+        session.child.kill('SIGKILL');
+      } else if (typeof processId === 'number') {
+        process.kill(-processId, 'SIGKILL');
+      } else {
+        session.child.kill('SIGKILL');
+      }
+    } catch {
+      try {
+        session.child.kill('SIGKILL');
+      } catch {}
+    }
+
+    session.running = false;
+    session.stdinOpen = false;
+    session.exitCode ??= 137;
+    this.resolveExecOutputWaiters(session);
+    session.resolveWaitForExit();
+  }
+
   private async disposeExecSessions(): Promise<void> {
     const sessions = [...this.execSessions.values()];
     await Promise.all(sessions.map((session) => this.terminateExecSession(session)));
@@ -1344,7 +1429,7 @@ export class HeadlessEngine {
     summary: string;
     whyItMatters: string;
     kind?: StudyDebtKind;
-    affectedPaths?: string[];
+    affectedPaths: string[];
     evidencePaths?: string[];
     recommendedStudy?: string;
   }): Promise<{
@@ -1878,7 +1963,7 @@ export class HeadlessEngine {
 
     const blockingDebts = openDebts.filter((debt) => {
       if (!debt.affectedPaths || debt.affectedPaths.length === 0) {
-        return true;
+        return false;
       }
 
       return debt.affectedPaths.some((scope) => {
@@ -1935,7 +2020,7 @@ export class HeadlessEngine {
         const scope =
           debt.affectedPaths && debt.affectedPaths.length > 0
             ? `affected_paths=${debt.affectedPaths.join(', ')}`
-            : 'affected_paths=all main-workspace edits';
+            : 'affected_paths=none';
         const study = debt.recommendedStudy ? ` recommended_study=${debt.recommendedStudy}` : '';
         const invalidated = invalidatedByDebt.get(debt.id) ?? [];
         const invalidation =
@@ -2130,18 +2215,8 @@ export class HeadlessEngine {
     debt: StudyDebtRecord,
     toolName: 'exec_command' | 'write_stdin' | 'read' | 'ls' | 'glob' | 'rg'
   ): string[] | null {
-    const evidencePaths =
-      debt.evidencePaths && debt.evidencePaths.length > 0 ? debt.evidencePaths : null;
-
-    if (toolName === 'read' || toolName === 'ls' || toolName === 'glob' || toolName === 'rg') {
-      return evidencePaths;
-    }
-
-    if (evidencePaths) {
-      return evidencePaths;
-    }
-
-    return debt.affectedPaths;
+    void toolName;
+    return debt.evidencePaths && debt.evidencePaths.length > 0 ? debt.evidencePaths : null;
   }
 
   async runCompact(
@@ -2744,12 +2819,22 @@ function validateStudyDebtPaths(
   affectedPaths: string[] | undefined,
   evidencePaths: string[] | undefined
 ): void {
+  const normalizedAffectedPaths =
+    affectedPaths?.map((scope) => scope.trim()).filter(Boolean) ?? [];
+  if (normalizedAffectedPaths.length === 0) {
+    throw new Error('affectedPaths is required and must contain at least one specific path.');
+  }
+
   for (const [label, paths] of [
     ['affectedPaths', affectedPaths],
     ['evidencePaths', evidencePaths]
   ] as const) {
     if (!paths) {
       continue;
+    }
+    const normalizedPaths = paths.map((scope) => scope.trim()).filter(Boolean);
+    if (normalizedPaths.length === 0) {
+      throw new Error(`${label} must contain at least one specific path.`);
     }
     for (const scope of paths) {
       const trimmed = scope.trim();

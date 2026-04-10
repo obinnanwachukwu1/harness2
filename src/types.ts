@@ -573,7 +573,7 @@ export interface AgentTools {
     summary: string;
     whyItMatters: string;
     kind?: StudyDebtKind;
-    affectedPaths?: string[];
+    affectedPaths: string[];
     evidencePaths?: string[];
     recommendedStudy?: string;
   }): Promise<{ questionId: string; status: 'open' }>;

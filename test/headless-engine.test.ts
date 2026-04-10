@@ -2,6 +2,7 @@ import assert from 'node:assert/strict';
 import { access, mkdir, readFile, writeFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
+import { setTimeout as delay } from 'node:timers/promises';
 
 import { execa } from 'execa';
 
@@ -203,6 +204,25 @@ test('HeadlessEngine rejects repo-root evidence scopes for open questions', asyn
   );
 });
 
+test('HeadlessEngine requires non-empty affectedPaths for open questions', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  await assert.rejects(
+    () =>
+      engine.openStudyDebt({
+        summary: 'claim loop semantics remain unresolved',
+        whyItMatters: 'Missing edit scopes should not become a global block.',
+        kind: 'runtime',
+        affectedPaths: []
+      }),
+    /affectedPaths is required and must contain at least one specific path/
+  );
+});
+
 test('HeadlessEngine read defaults to 100 lines and supports explicit line ranges', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));
@@ -345,7 +365,7 @@ test('HeadlessEngine exec_command can keep a background process alive across pol
   assert.equal(typeof finished.exitCode, 'number');
 });
 
-test('HeadlessEngine blocks same-question write_stdin probing while a linked experiment is active', async (t) => {
+test('HeadlessEngine process-exit cleanup force-kills owned exec sessions', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));
 
@@ -354,7 +374,45 @@ test('HeadlessEngine blocks same-question write_stdin probing while a linked exp
 
   const started = JSON.parse(
     await engine.runExecCommand({
+      command: 'node -e "setInterval(() => {}, 1000)"',
+      yieldTimeMs: 100
+    })
+  ) as {
+    processId: number | null;
+    running: boolean;
+  };
+
+  assert.equal(started.running, true);
+  assert.equal(typeof started.processId, 'number');
+
+  const internal = engine as unknown as {
+    execSessions: Map<number, { child: { pid?: number } }>;
+    forceKillOwnedProcessesSync(): void;
+  };
+  const session = internal.execSessions.get(started.processId!);
+  assert.ok(session);
+  const childPid = session.child.pid;
+  assert.equal(typeof childPid, 'number');
+
+  internal.forceKillOwnedProcessesSync();
+  await delay(150);
+
+  assert.throws(() => process.kill(childPid!, 0));
+});
+
+test('HeadlessEngine does not block same-question write_stdin probing from affectedPaths alone', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  await mkdir(path.join(repoDir, 'src', 'probe'), { recursive: true });
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const started = JSON.parse(
+    await engine.runExecCommand({
       command: 'node -e "setTimeout(() => {}, 30000)"',
+      cwd: 'src/probe',
       yieldTimeMs: 100
     })
   ) as {
@@ -370,7 +428,7 @@ test('HeadlessEngine blocks same-question write_stdin probing while a linked exp
     summary: 'stop semantics are still under study',
     whyItMatters: 'Being wrong would materially change the runtime contract.',
     kind: 'runtime',
-    affectedPaths: ['.']
+    affectedPaths: ['src/queue.js']
   });
   const timestamp = nowIso();
   engine.notebook.upsertExperiment({
@@ -383,6 +441,84 @@ test('HeadlessEngine blocks same-question write_stdin probing while a linked exp
     baseCommitSha: 'abc123',
     branchName: 'h2-exp-running-probe-gate',
     worktreePath: path.join(repoDir, '.h2', 'worktrees', 'exp-running-probe-gate'),
+    status: 'running',
+    budget: 1200,
+    tokensUsed: 0,
+    contextTokensUsed: 0,
+    toolOutputTokensUsed: 0,
+    observationTokensUsed: 0,
+    preserve: false,
+    createdAt: timestamp,
+    updatedAt: timestamp,
+    resolvedAt: null,
+    finalVerdict: null,
+    finalSummary: null,
+    discovered: [],
+    artifacts: [],
+    constraints: [],
+    confidenceNote: null,
+    lowSignalWarningEmitted: false,
+    promote: false
+  });
+
+  await assert.doesNotReject(() =>
+    engine.runWriteStdin({
+      processId: started.processId!,
+      yieldTimeMs: 100
+    })
+  );
+
+  await assert.doesNotReject(() =>
+    engine.runWriteStdin({
+      processId: started.processId!,
+      terminate: true,
+      yieldTimeMs: 100
+    })
+  );
+});
+
+test('HeadlessEngine blocks same-question write_stdin probing only when evidencePaths are explicit', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  await mkdir(path.join(repoDir, 'src', 'probe'), { recursive: true });
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const started = JSON.parse(
+    await engine.runExecCommand({
+      command: 'node -e "setTimeout(() => {}, 30000)"',
+      cwd: 'src/probe',
+      yieldTimeMs: 100
+    })
+  ) as {
+    processId: number | null;
+    running: boolean;
+  };
+
+  assert.equal(started.running, true);
+  assert.equal(typeof started.processId, 'number');
+
+  const debt = engine.notebook.openStudyDebt({
+    sessionId: engine.snapshot.session.id,
+    summary: 'stop semantics are still under study',
+    whyItMatters: 'Being wrong would materially change the runtime contract.',
+    kind: 'runtime',
+    affectedPaths: ['src/queue.js'],
+    evidencePaths: ['src/probe']
+  });
+  const timestamp = nowIso();
+  engine.notebook.upsertExperiment({
+    id: 'exp-running-probe-gate-explicit',
+    sessionId: engine.snapshot.session.id,
+    studyDebtId: debt.id,
+    hypothesis: 'inline polling should defer to the active study',
+    command: 'subagent',
+    context: '',
+    baseCommitSha: 'abc123',
+    branchName: 'h2-exp-running-probe-gate-explicit',
+    worktreePath: path.join(repoDir, '.h2', 'worktrees', 'exp-running-probe-gate-explicit'),
     status: 'running',
     budget: 1200,
     tokensUsed: 0,
@@ -425,6 +561,8 @@ test('HeadlessEngine enforces one inline probe episode per open question', async
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));
 
+  await mkdir(path.join(repoDir, 'src', 'probe'), { recursive: true });
+
   const engine = await HeadlessEngine.open({ cwd: repoDir });
   t.after(async () => engine.dispose());
 
@@ -433,12 +571,14 @@ test('HeadlessEngine enforces one inline probe episode per open question', async
     summary: 'streaming stop semantics are still under study',
     whyItMatters: 'Being wrong would materially change the product contract.',
     kind: 'runtime',
-    affectedPaths: ['.']
+    affectedPaths: ['src/queue.js'],
+    evidencePaths: ['src/probe']
   });
 
   const started = JSON.parse(
     await engine.runExecCommand({
       command: 'echo ready; sleep 30',
+      cwd: 'src/probe',
       yieldTimeMs: 100
     })
   ) as {
@@ -462,6 +602,7 @@ test('HeadlessEngine enforces one inline probe episode per open question', async
     () =>
       engine.runExecCommand({
         command: 'echo second probe',
+        cwd: 'src/probe',
         yieldTimeMs: 100
       }),
     /After one bounded inline probe episode on the same question, either resolve_question, spawn_experiment, or explicitly narrow\/override the claim before more inline probing\./
@@ -1014,7 +1155,7 @@ test('HeadlessEngine latches repeated open-question mutation blocks within the s
   );
 });
 
-test('HeadlessEngine blocks all main-workspace edits when an open question has no affected paths', async (t) => {
+test('HeadlessEngine does not implicitly block all main-workspace edits when an open question has no affected paths', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));
 
@@ -1029,10 +1170,8 @@ test('HeadlessEngine blocks all main-workspace edits when an open question has n
     kind: 'architecture'
   });
 
-  await assert.rejects(
-    () => engine.runWrite('notes.txt', 'blocked\n'),
-    /An open question blocks this edit/
-  );
+  await assert.doesNotReject(() => engine.runWrite('notes.txt', 'allowed\n'));
+  await assert.equal(await readFile(path.join(repoDir, 'notes.txt'), 'utf8'), 'allowed\n');
 });
 
 test('HeadlessEngine does not apply main-session open questions to experiment worktree edits', async (t) => {

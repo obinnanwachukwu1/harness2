@@ -513,7 +513,7 @@ export const MAIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     type: 'function',
     name: 'open_question',
     description:
-      'Declare a load-bearing unresolved claim that blocks dependent edits. Use this when being wrong could materially change architecture, interfaces, protocol behavior, recovery, durability, retry, ownership, history, or integration behavior. summary should name the concrete claim. whyItMatters should say what would change if the answer goes the other way. In greenfield work, do not open a question merely because several designs exist; open one only when the prompt leaves a product contract underdetermined. If the unresolved choice is a product contract about history, recovery, retry, durability, or ownership semantics, use open_question instead of only stating a commitment note. Keep questions narrow; if one umbrella question would gate most of the feature, split or narrow it before spawning. affectedPaths should list only files whose edits depend on the claim, not the whole feature area, and may not be the repo root. evidencePaths should list only the specific paths whose same-question inline probing should pause while a linked experiment is active, and may not be the repo root or wildcard root scopes like . or *. Do not spend a question on routine implementation taste or on a capability check that one focused read or tiny local probe can settle immediately unless that check is the true blocker. Open the question before any live external, secret-backed, or runtime probe that could change the implementation.',
+      'Declare a load-bearing unresolved claim that blocks dependent edits. Use this when being wrong could materially change architecture, interfaces, protocol behavior, recovery, durability, retry, ownership, history, or integration behavior. summary should name the concrete claim. whyItMatters should say what would change if the answer goes the other way. In greenfield work, do not open a question merely because several designs exist; open one only when the prompt leaves a product contract underdetermined. If the unresolved choice is a product contract about history, recovery, retry, durability, or ownership semantics, use open_question instead of only stating a commitment note. Keep questions narrow; if one umbrella question would gate most of the feature, split or narrow it before spawning. affectedPaths is required and should list only the specific files or directories whose edits depend on the claim, not the whole feature area, and may not be the repo root. evidencePaths is optional; use it only when a linked experiment should own same-question inline probing on specific paths. evidencePaths should never be broader than needed and may not be the repo root or wildcard root scopes like . or *. If you omit evidencePaths, the question still gates dependent edits but it does not get implicit probe ownership. Do not spend a question on routine implementation taste or on a capability check that one focused read or tiny local probe can settle immediately unless that check is the true blocker. Open the question before any live external, secret-backed, or runtime probe that could change the implementation.',
     parameters: {
       type: 'object',
       properties: {
@@ -533,7 +533,7 @@ export const MAIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         },
         recommendedStudy: { type: 'string' }
       },
-      required: ['summary', 'whyItMatters'],
+      required: ['summary', 'whyItMatters', 'affectedPaths'],
       additionalProperties: false
     }
   },
@@ -1103,7 +1103,7 @@ async function executeToolCall(call: ToolCall, tools: AgentTools): Promise<strin
           summary: readStringArg(args, 'summary'),
           whyItMatters: readStringArg(args, 'whyItMatters'),
           kind: readOptionalStringArg(args, 'kind') as StudyDebtKind | undefined,
-          affectedPaths: readOptionalStringArrayArg(args, 'affectedPaths'),
+          affectedPaths: readStringArrayArg(args, 'affectedPaths'),
           evidencePaths: readOptionalStringArrayArg(args, 'evidencePaths'),
           recommendedStudy: readOptionalStringArg(args, 'recommendedStudy')
         }),
