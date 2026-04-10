@@ -1,0 +1,184 @@
+[suite]
+id = "public-safe-11"
+description = "Public-safe eval suite using only committed fixtures and no secret-bearing local env sources"
+
+[runtime]
+reasoning_effort = "medium"
+thinking = false
+web_search_mode = "disabled"
+
+[clarification]
+auto_reply = "Make the best grounded minimal choice and proceed. Keep the contract explicit."
+mark_as_unnecessary = true
+
+[[fixtures]]
+id = "node-minimal"
+type = "template"
+path = "../evals/fixtures/node-minimal"
+
+[[fixtures]]
+id = "node-service-starter"
+type = "template"
+path = "../evals/fixtures/node-service-starter"
+
+[[fixtures]]
+id = "next-app-router"
+type = "template"
+path = "../evals/fixtures/next-app-router"
+setup_command = "npm ci"
+
+[[fixtures]]
+id = "vite-react"
+type = "template"
+path = "../evals/fixtures/vite-react"
+setup_command = "npm ci"
+
+[[cases]]
+id = "A1"
+bucket = "A"
+fixture = "vite-react"
+profile = "frontend"
+question_expected = false
+experiment_expected = false
+web_search_expected = "no"
+prompt = """
+In this Vite React repo, add a small Settings panel with three controls: theme (light/dark/system), density (comfortable/compact), and animations (on/off). Persist them locally in localStorage. No sync, no server calls, no multi-user behavior. Most recent local change wins. Keep it minimal and locally runnable.
+"""
+
+[[cases]]
+id = "A2"
+bucket = "A"
+fixture = "next-app-router"
+profile = "frontend/full-stack"
+question_expected = false
+experiment_expected = false
+web_search_expected = "no"
+prompt = """
+Replace the default page with a small product landing page: hero, 3-feature grid, FAQ accordion, and a contact form that posts to a local route and returns a mocked success message. No email delivery, no auth, no persistence. Keep it minimal and locally runnable.
+"""
+
+[[cases]]
+id = "A3"
+bucket = "A"
+fixture = "node-service-starter"
+profile = "backend"
+question_expected = false
+experiment_expected = false
+web_search_expected = "no"
+prompt = """
+Add GET /api/items/export.csv to this service. Export the current items as UTF-8 CSV with header id,name,status,createdAt, newest-first. Return 200 with the header row even if there are no items. Keep it minimal and locally runnable.
+"""
+
+[[cases]]
+id = "A4"
+bucket = "A"
+fixture = "node-minimal"
+profile = "backend/cli"
+question_expected = false
+experiment_expected = false
+web_search_expected = "no"
+prompt = """
+In this Node repo, build a tiny CLI that reads newline-delimited JSON, filters records by exact status, and writes newline-delimited JSON. No streaming, no huge-file support, no config file, no retries, no background work. Keep it minimal.
+"""
+
+[[cases]]
+id = "B2"
+bucket = "B"
+fixture = "vite-react"
+profile = "frontend contract"
+question_expected = true
+experiment_expected = false
+web_search_expected = "no"
+prompt = """
+In this Vite repo, build a tiny local writing app with autosave and draft recovery. It should feel predictable if someone refreshes, closes the tab, opens a second tab, or manually saves while an older autosave exists. Keep it minimal and locally runnable.
+"""
+
+[[cases.followups]]
+after_turn = 1
+prompt = """
+Same-browser multi-tab coordination does matter now, but cross-device sync still doesn’t.
+"""
+
+[[cases]]
+id = "B3"
+bucket = "B"
+fixture = "node-service-starter"
+profile = "backend contract"
+question_expected = true
+experiment_expected = false
+web_search_expected = "no"
+prompt = """
+In this backend service starter, add a tiny local upload queue API. Failed uploads should be retryable later, users can remove items, and restart should feel safe. Keep it minimal and locally runnable. Don’t silently do surprising things with retries or deleted items.
+"""
+
+[[cases]]
+id = "B4"
+bucket = "B"
+fixture = "next-app-router"
+profile = "full-stack history contract"
+question_expected = true
+experiment_expected = false
+web_search_expected = "no"
+prompt = """
+In this Next.js repo, build a tiny local prompt-runner. Users can create one prompt, run it against a short input list, edit the prompt later, and rerun. History should feel clear and safe if the prompt changed between runs. No auth, no sharing, no cancel. Keep it minimal and locally runnable.
+"""
+
+[[cases]]
+id = "B5"
+bucket = "B"
+fixture = "next-app-router"
+profile = "ai-like ui contract"
+question_expected = true
+experiment_expected = false
+web_search_expected = "no"
+prompt = """
+In this Next.js repo, build a tiny single-user chatbot UI with mocked assistant responses only—no real AI call yet. Users can edit the system prompt in settings, start new chats, and restore an unsent draft after refresh. History should feel clear and safe if the system prompt changes after earlier conversations exist. Keep it minimal and locally runnable.
+"""
+
+[[cases.followups]]
+after_turn = 1
+prompt = """
+Existing conversations should remain historical snapshots of the system prompt that created them. New chats should use the current system prompt.
+"""
+
+[[cases]]
+id = "C3"
+bucket = "C"
+fixture = "node-minimal"
+profile = "backend/concurrency"
+question_expected = true
+experiment_expected = true
+web_search_expected = "no"
+prompt = """
+In this Node repo, build a tiny job queue with SQLite and 4 workers. Before you lock in the claim loop, verify whether a single atomic claim statement in this runtime is enough to prevent double-claiming under concurrency, or whether you need a stronger pattern. Keep it minimal and locally runnable.
+"""
+
+[[cases.followups]]
+after_turn = 1
+prompt = """
+Do not rely on a version-specific SQLite quirk. Make the claim loop robust even if the simple atomic pattern changes later.
+"""
+
+[[cases]]
+id = "C4"
+bucket = "C"
+fixture = "node-minimal"
+profile = "backend/durability"
+question_expected = true
+experiment_expected = "optional"
+web_search_expected = "no"
+prompt = """
+In this Node repo, build a tiny file-backed job tracker that survives restart. Before you choose the persistence strategy, verify whether writing to a temp file and renaming it is sufficient to avoid torn reads in this runtime, or whether you need an append-only journal fallback. Keep it minimal and locally runnable.
+"""
+
+[[cases]]
+id = "C5"
+bucket = "C"
+fixture = "node-minimal"
+profile = "frontend/runtime"
+question_expected = true
+experiment_expected = "optional"
+web_search_expected = "no"
+prompt = """
+Build a tiny live-preview tool that reloads when a source Markdown file changes. Before you choose the watcher strategy, verify whether fs.watch in this runtime is reliable enough for editor-style save behavior, or whether you need a debounce/polling fallback. Keep it minimal and locally runnable.
+"""

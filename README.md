@@ -1,34 +1,69 @@
 # harness2
 
-`harness2` is a small experimental coding harness that proves one vertical slice:
+`harness2` is an experimental coding harness for local repository work.
 
-- a headless main engine owns transcript state and tool execution
-- a scoped experiment runs in an isolated `git worktree`
-- experiment state is persisted in SQLite
-- an OpenTUI terminal UI renders the transcript, experiments, status bar, and composer
-- normal user text can now route to a Codex model over OAuth and call the local tool surface
+Today it provides one working vertical slice:
 
-This is still intentionally v0.1. The core vertical slice works, but the harness is still evolving and some UX and tooling edges remain rough.
+- a headless engine that owns transcript state and local tool execution
+- isolated experiment runs in `git worktree`s
+- SQLite-backed session and experiment state
+- an OpenTUI terminal UI
+- a noninteractive print mode for one-shot prompts
+- optional OpenAI Codex OAuth for model-backed interactions
+
+This project is still early. The core path works, but the surface area and UX are still evolving.
 
 ## Requirements
 
 - Node 22+
+- npm 10+
 - Bun 1.x for the OpenTUI frontend
-- a Git repository with at least one commit in the current working directory
-- project dependencies installed with `npm install`
+- a Git repository with at least one commit in the working directory
 
-Core commands (`doctor`, `auth`, `-p` print mode, tests, typecheck, build) run on Node. The interactive OpenTUI path currently requires Bun because `@opentui/core` imports `bun:ffi`.
+Node-only commands such as `doctor`, `help`, `paths`, `auth`, `-p`, `test`, `typecheck`, and `build` do not require Bun. The interactive OpenTUI path does because `@opentui/core` imports `bun:ffi`.
 
-## Run
+## Install
+
+Install from the repository root:
 
 ```bash
 npm install
+```
+
+The root package uses npm workspaces, so this installs the core CLI dependencies and the OpenTUI package dependencies in one step.
+
+## Quick Start
+
+Check the local environment:
+
+```bash
+npm run dev -- doctor
+npm run dev -- help
+```
+
+Run the interactive UI:
+
+```bash
 npm run dev
 ```
 
-`npm run dev` now launches the OpenTUI frontend by default.
+Run the noninteractive print mode:
 
-Useful commands:
+```bash
+npm run dev -- -p "inspect the repo"
+```
+
+Build and test:
+
+```bash
+npm test
+npm run typecheck
+npm run build
+```
+
+## Commands
+
+Useful CLI commands:
 
 ```bash
 npm run dev -- doctor
@@ -48,20 +83,6 @@ npm run dev -- opentui <sessionId>
 npm run dev -- eval run evals/wide-suite.toml --case A1
 npm run dev -- eval score ~/.h2/evals/<run-id>
 ```
-
-Build and test:
-
-```bash
-npm run build
-npm run typecheck
-npm test
-```
-
-`npm run typecheck` covers both the core CLI/engine code and `packages/ui-opentui`.
-
-Eval runner design notes live under `docs/evals/`. The committed wide suite lives in `evals/wide-suite.toml`.
-
-## Interactive commands
 
 Inside the terminal UI, use slash commands:
 
@@ -98,7 +119,24 @@ Inside the terminal UI, use slash commands:
 *** End Patch
 ```
 
-Any non-slash input is sent to the Codex model when OAuth is configured. The model can use the built-in local tools (`exec_command`, `write_stdin`, `read`, `write`, `edit`, `glob`, `grep`, `spawn_experiment`, `read_experiment`, `wait_experiment`, `search_experiments`, `compact`) through the headless engine.
+## Authentication
+
+Model-backed prompt execution requires OpenAI Codex OAuth.
+
+- `h2 auth login` starts a browser-based PKCE flow against `https://auth.openai.com`
+- tokens are stored globally in `~/.h2/auth.sqlite`
+- `h2 auth access` prints a refreshed bearer token to stdout for manual API testing
+- `/auth login`, `/auth status`, and `/auth logout` are available inside OpenTUI
+
+Notes:
+
+- the callback server listens on `127.0.0.1:1455` by default
+- if the browser does not open, the CLI prints the authorization URL
+- token refresh happens automatically when expiry is within five minutes
+- the interactive UI does not print the raw bearer token into the transcript
+- older repo-local auth tokens in `.h2/notebook.sqlite` are migrated into the global auth store automatically
+
+If you are not authenticated, the repo is still usable for local commands, tests, eval tooling, and other non-model workflows.
 
 ## Prompt Mode
 
@@ -111,8 +149,6 @@ npm run dev -- resume <sessionId> -p "continue the previous investigation"
 npm run dev -- resume <sessionId> -thinking -p "continue the previous investigation"
 ```
 
-This runs a single turn through the normal engine path and prints streamed assistant text and tool outputs directly to stdout.
-
 To debug raw model response shapes:
 
 ```bash
@@ -123,41 +159,25 @@ This writes JSONL debug records to `.h2/debug/responses.jsonl`. Override the pat
 
 ## Eval Suites
 
-The committed eval fixtures and suite definitions live under `evals/`.
+Public-safe eval manifests live under `public-evals/`.
+
+- `public-evals/public-safe-suite.toml` is the default public eval pack.
+- `npm run dev -- eval run public-evals/public-safe-suite.toml` runs the full public suite.
+- `npm run dev -- eval run public-evals/public-safe-suite.toml --case A4` runs one public case.
+
+Maintainer-oriented eval fixtures and benchmark manifests live under `evals/`.
 
 - `evals/wide-suite.toml` is the current 15-session suite.
 - `evals/stability-pack.toml` is the 6-case stability pack and defaults to 5 fresh runs.
 - `evals/fixtures/` contains the committed reusable fixture repos.
 - `npm run dev -- eval run evals/wide-suite.toml` runs the full suite.
 - `npm run dev -- eval run evals/wide-suite.toml --case C3` runs one case.
-- `npm run dev -- eval run evals/stability-pack.toml` runs the stability pack 5 times by default.
+- `npm run dev -- eval run evals/stability-pack.toml` runs the stability pack.
 - `npm run dev -- eval run evals/stability-pack.toml --repeat 3` overrides the manifest repeat count.
 - `npm run dev -- eval score ~/.h2/evals/<run-id>` recomputes the score sheet from artifacts.
 - `npm run dev -- eval pack --latest-batch` packs the latest repeated-run batch into one review zip.
 
-## OpenAI Codex OAuth
-
-The prototype now includes a direct OpenAI Codex OAuth flow for local testing.
-
-- `h2 auth login` starts a browser-based PKCE flow against `https://auth.openai.com`
-- tokens are stored globally in `~/.h2/auth.sqlite`
-- `h2 auth access` prints a refreshed bearer token to stdout for manual API testing
-- `/auth login`, `/auth status`, and `/auth logout` are also available inside the OpenTUI UI
-- once logged in, plain text in the interactive app is sent to the Codex backend using the stored OAuth token
-
-Notes:
-
-- the callback server listens on `127.0.0.1:1455` by default
-- if the browser does not open, the CLI prints the authorization URL
-- token refresh happens automatically when expiry is within five minutes
-- the interactive UI does not print the raw bearer token into the transcript
-- older repo-local auth tokens in `.h2/notebook.sqlite` are migrated into the global auth store automatically
-
-To inspect the active repo/global state locations:
-
-```bash
-npm run dev -- paths
-```
+Use [public-evals/README.md](public-evals/README.md) for the public/reproducible path. Use [evals/README.md](evals/README.md) and [docs/evals/manifest-schema.md](docs/evals/manifest-schema.md) for maintainer-specific benchmarking notes.
 
 ## Layout
 
@@ -174,15 +194,18 @@ packages/
 test/
 ```
 
-## Notes
+## State
 
-- State lives under `.h2/notebook.sqlite`.
-- Global auth state lives under `~/.h2/auth.sqlite` unless `H2_HOME` or `H2_AUTH_DB_PATH` overrides it.
-- `h2 paths` prints the repo state dir, repo notebook, legacy `.harness2` dir, and global auth paths.
-- `h2`, `h2 resume`, and `h2 opentui` launch the OpenTUI frontend and therefore require Bun today.
-- `h2 -p "..."` is the Node-only noninteractive path if Bun is not installed.
-- Experiment worktrees live under `.h2/worktrees/<experimentId>`.
-- Adoption previews and patches live under `.h2/adoptions/<experimentId>.patch`.
-- Resolved experiments remove their worktree unless `--preserve` is set.
-- Token usage is currently a simple estimated counter based on emitted observation text.
-- Model integration, cancellation, and richer editing commands are left as TODOs for later versions.
+- repo-local state lives under `.h2/`
+- global auth state lives under `~/.h2/auth.sqlite` unless `H2_HOME` or `H2_AUTH_DB_PATH` overrides it
+- `h2 paths` prints the repo state dir, repo notebook, legacy `.harness2` dir, and global auth paths
+- experiment worktrees live under `.h2/worktrees/<experimentId>`
+- adoption previews and patches live under `.h2/adoptions/<experimentId>.patch`
+
+## Contributing
+
+See [CONTRIBUTING.md](CONTRIBUTING.md), [SECURITY.md](SECURITY.md), and [CODE_OF_CONDUCT.md](CODE_OF_CONDUCT.md).
+
+## License
+
+MIT. See [LICENSE](LICENSE).

@@ -2,7 +2,11 @@
   "name": "harness2",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
   "bin": {
     "h2": "./dist/cli.js"
   },
