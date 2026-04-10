@@ -2,7 +2,7 @@
 set -euo pipefail
 
 if [[ $# -lt 1 ]]; then
-  echo "usage: $0 <eval-dir> [--harness-session SESSION_ID] [--codex-thread THREAD_ID]" >&2
+  echo "usage: $0 <eval-dir> [--harness-session SESSION_ID] [--baseline-thread THREAD_ID]" >&2
   exit 1
 fi
 
@@ -10,7 +10,7 @@ EVAL_DIR="$(cd "$1" && pwd)"
 shift
 
 HARNESS_SESSION_ID=""
-CODEX_THREAD_ID=""
+BASELINE_THREAD_ID=""
 
 while [[ $# -gt 0 ]]; do
   case "$1" in
@@ -18,8 +18,8 @@ while [[ $# -gt 0 ]]; do
       HARNESS_SESSION_ID="${2:-}"
       shift 2
       ;;
-    --codex-thread)
-      CODEX_THREAD_ID="${2:-}"
+    --baseline-thread)
+      BASELINE_THREAD_ID="${2:-}"
       shift 2
       ;;
     *)
@@ -66,13 +66,17 @@ if [[ -n "${HARNESS_SESSION_ID}" ]]; then
   fi
 fi
 
-if [[ -n "${CODEX_THREAD_ID}" ]]; then
-  CODEX_ROOT="${HOME}/.codex"
-  CODEX_SESSION_FILE="$(find "${CODEX_ROOT}/sessions" -type f -name "*${CODEX_THREAD_ID}.jsonl" | sort | tail -n 1)"
-  if [[ -n "${CODEX_SESSION_FILE}" ]]; then
-    cp "${CODEX_SESSION_FILE}" "${BASELINE_ARTIFACTS}/codex-session.jsonl"
-    printf '%s\n' "${CODEX_THREAD_ID}" > "${BASELINE_ARTIFACTS}/codex-thread-id.txt"
-    python3 - "${CODEX_SESSION_FILE}" "${BASELINE_ARTIFACTS}/transcript.txt" <<'PY'
+if [[ -n "${BASELINE_THREAD_ID}" ]]; then
+  BASELINE_ROOT="${BASELINE_SESSION_ROOT:-}"
+  if [[ -z "${BASELINE_ROOT}" ]]; then
+    echo "BASELINE_SESSION_ROOT must be set when using --baseline-thread" >&2
+    exit 1
+  fi
+  BASELINE_SESSION_FILE="$(find "${BASELINE_ROOT}/sessions" -type f -name "*${BASELINE_THREAD_ID}.jsonl" | sort | tail -n 1)"
+  if [[ -n "${BASELINE_SESSION_FILE}" ]]; then
+    cp "${BASELINE_SESSION_FILE}" "${BASELINE_ARTIFACTS}/baseline-session.jsonl"
+    printf '%s\n' "${BASELINE_THREAD_ID}" > "${BASELINE_ARTIFACTS}/baseline-thread-id.txt"
+    python3 - "${BASELINE_SESSION_FILE}" "${BASELINE_ARTIFACTS}/transcript.txt" <<'PY'
 import json
 import sys
 from pathlib import Path

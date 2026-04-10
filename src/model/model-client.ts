@@ -3,19 +3,23 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { execa } from 'execa';
 
-import { OpenAICodexAuth } from '../auth/openai-codex.js';
+import {
+  OPENAI_CODEX_PROVIDER,
+  OPENAI_CODEX_RESPONSES_ENDPOINT,
+  OpenAICodexAuth
+} from '../auth/openai-codex.js';
 import { clampText, estimateTokens, nowIso } from '../lib/utils.js';
 import {
   DIRECT_AGENT_PROMPT,
   EXPERIMENT_SUBAGENT_PROMPT,
   PLAN_AGENT_PROMPT,
   STUDY_AGENT_PROMPT
-} from './codex-prompt.js';
+} from './model-prompt.js';
 import { Notebook } from '../storage/notebook.js';
 import {
   buildObservationHint,
   shouldInjectObservationHint,
-} from './codex-hints.js';
+} from './model-hints.js';
 import {
   executeToolCallBatch,
   DIRECT_TOOL_DEFINITIONS,
@@ -28,13 +32,13 @@ import {
   PLAN_PLANNING_TOOL_DEFINITIONS,
   STUDY_TOOL_DEFINITIONS,
   type ToolDefinition
-} from './codex-tooling.js';
+} from './model-tooling.js';
 import {
   createModelStepResponse,
   type ModelStepResponse,
   type ProviderToolEvent,
   toResponseInputItem
-} from './codex-response.js';
+} from './model-response.js';
 import {
   renderPlanDirectCheckpointBlock,
   runPlanDirectCompactor,
@@ -49,10 +53,9 @@ import type {
   TranscriptRole
 } from '../types.js';
 
-const DEFAULT_MODEL = process.env.H2_CODEX_MODEL ?? 'gpt-5.4';
+const DEFAULT_MODEL = process.env.H2_MODEL ?? 'gpt-5.4';
 const DEFAULT_REASONING_EFFORT = normalizeReasoningEffort(process.env.H2_REASONING_EFFORT) ?? 'medium';
-const DEFAULT_ENDPOINT =
-  process.env.H2_CODEX_BASE_URL ?? 'https://chatgpt.com/backend-api/codex/responses';
+const DEFAULT_ENDPOINT = process.env.H2_MODEL_BASE_URL ?? OPENAI_CODEX_RESPONSES_ENDPOINT;
 const MAX_TRANSIENT_MODEL_RETRIES = 2;
 const DEBUG_RESPONSES_ENABLED = process.env.H2_DEBUG_RESPONSES === '1';
 const DEBUG_RESPONSES_FILE =
@@ -86,7 +89,7 @@ export {
   PLAN_EXECUTION_TOOL_DEFINITIONS,
   PLAN_PLANNING_TOOL_DEFINITIONS,
   STUDY_TOOL_DEFINITIONS
-} from './codex-tooling.js';
+} from './model-tooling.js';
 
 export function resolveSessionPromptAndTools(settings: ModelSessionRecord): {
   instructions: string;
@@ -119,7 +122,7 @@ export function resolveSessionPromptAndTools(settings: ModelSessionRecord): {
   };
 }
 
-interface CodexModelClientOptions {
+interface ModelClientOptions {
   fetchImpl?: typeof fetch;
   endpoint?: string;
   model?: string;
@@ -140,7 +143,7 @@ interface CompactionWindowState extends ContextWindowUsage {
   forceCompactOnly: boolean;
 }
 
-export class CodexModelClient {
+export class ModelClient {
   private readonly fetchImpl: typeof fetch;
   private readonly endpoint: string;
   private readonly defaultModel: string;
@@ -149,7 +152,7 @@ export class CodexModelClient {
   constructor(
     private readonly notebook: Notebook,
     private readonly auth: OpenAICodexAuth,
-    options: CodexModelClientOptions = {}
+    options: ModelClientOptions = {}
   ) {
     this.fetchImpl = options.fetchImpl ?? fetch;
     this.endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
@@ -199,7 +202,7 @@ export class CodexModelClient {
     if (!accessToken || !authRecord) {
       await emit(
         'assistant',
-        'OpenAI Codex OAuth is not configured. Run `/auth login` or `h2 auth login` first.'
+        'Model authentication is not configured. Run `/auth login` or `h2 auth login` first.'
       );
       return;
     }
@@ -283,7 +286,7 @@ export class CodexModelClient {
       const latestSettings = this.getSessionSettings(sessionId);
       this.persistSession({
         sessionId,
-        provider: 'openai-codex',
+        provider: OPENAI_CODEX_PROVIDER,
         model: latestSettings.model,
         reasoningEffort: latestSettings.reasoningEffort,
         previousResponseId,
@@ -777,7 +780,7 @@ export class CodexModelClient {
 
     return {
       sessionId,
-      provider: 'openai-codex',
+      provider: OPENAI_CODEX_PROVIDER,
       model: this.defaultModel,
       reasoningEffort: DEFAULT_REASONING_EFFORT,
       previousResponseId: null,
@@ -1009,10 +1012,6 @@ function getModelContextWindow(model: string): number {
 
   if (normalized === 'gpt-5.4-mini') {
     return 400_000;
-  }
-
-  if (normalized === 'gpt-5-codex' || normalized === 'gpt-5.3-codex') {
-    return 272_000;
   }
 
   return 272_000;

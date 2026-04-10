@@ -12,11 +12,11 @@ import { migrateLegacyRepoLocalAuth, openGlobalAuthNotebook } from '../auth/stor
 import { ExperimentManager } from '../experiments/experiment-manager.js';
 import { clampText, createSessionId, formatUnknownError, lines, nowIso } from '../lib/utils.js';
 import {
-  CodexModelClient,
+  ModelClient,
   EXPERIMENT_TOOL_DEFINITIONS,
   resolveSessionPromptAndTools
-} from '../model/codex-client.js';
-import { EXPERIMENT_SUBAGENT_PROMPT } from '../model/codex-prompt.js';
+} from '../model/model-client.js';
+import { EXPERIMENT_SUBAGENT_PROMPT } from '../model/model-prompt.js';
 import { Notebook } from '../storage/notebook.js';
 import type {
   AgentMode,
@@ -148,7 +148,7 @@ export class HeadlessEngine {
   private readonly events = new EventEmitter();
   private readonly experimentManager: ExperimentManager;
   private readonly auth: OpenAICodexAuth;
-  private readonly model: CodexModelClient;
+  private readonly model: ModelClient;
   private readonly tools: AgentTools;
   private processingTurn = false;
   private currentTurnStartedAt: string | null = null;
@@ -190,7 +190,7 @@ export class HeadlessEngine {
       startSubagent: (experiment) => this.runExperimentSubagent(experiment)
     });
     this.auth = new OpenAICodexAuth(options.authNotebook);
-    this.model = new CodexModelClient(options.notebook, this.auth);
+    this.model = new ModelClient(options.notebook, this.auth);
 
     this.tools = {
       execCommand: (input) => this.runExecCommand(input),
@@ -268,7 +268,7 @@ export class HeadlessEngine {
     return this.options.notebook;
   }
 
-  get modelClient(): CodexModelClient {
+  get modelClient(): ModelClient {
     return this.model;
   }
 

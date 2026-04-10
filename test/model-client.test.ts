@@ -3,13 +3,18 @@ import { readFile } from 'node:fs/promises';
 import path from 'node:path';
 import test from 'node:test';
 
-import { OpenAICodexAuth } from '../src/auth/openai-codex.js';
 import {
-  CodexModelClient,
+  OPENAI_CODEX_ORIGINATOR,
+  OPENAI_CODEX_PROVIDER,
+  OPENAI_CODEX_RESPONSES_ENDPOINT,
+  OpenAICodexAuth
+} from '../src/auth/openai-codex.js';
+import {
+  ModelClient,
   DIRECT_TOOL_DEFINITIONS,
   EXPERIMENT_TOOL_DEFINITIONS
-} from '../src/model/codex-client.js';
-import { DIRECT_AGENT_PROMPT } from '../src/model/codex-prompt.js';
+} from '../src/model/model-client.js';
+import { DIRECT_AGENT_PROMPT } from '../src/model/model-prompt.js';
 import { Notebook } from '../src/storage/notebook.js';
 import type { AgentTools, TranscriptRole } from '../src/types.js';
 import { cleanupDir, createTempDir, createUnsignedJwt } from '../test-support/helpers.js';
@@ -123,7 +128,7 @@ function webSearchCallAdded(id: string, outputIndex = 0) {
   };
 }
 
-test('CodexModelClient performs tool round-trips and persists the latest response id', async (t) => {
+test('ModelClient performs tool round-trips and persists the latest response id', async (t) => {
   const tempDir = await createTempDir('h2-model-');
   t.after(async () => cleanupDir(tempDir));
 
@@ -133,7 +138,7 @@ test('CodexModelClient performs tool round-trips and persists the latest respons
 
   const now = 1_700_000_000_000;
   notebook.upsertOpenAICodexAuth({
-    provider: 'openai-codex',
+    provider: OPENAI_CODEX_PROVIDER,
     type: 'oauth',
     accessToken: createUnsignedJwt({
       exp: Math.floor((now + 3600_000) / 1000)
@@ -153,7 +158,7 @@ test('CodexModelClient performs tool round-trips and persists the latest respons
   const requests: Array<{ url: string; headers: Headers; body: Record<string, unknown> }> = [];
   let responseCount = 0;
   const auth = new OpenAICodexAuth(notebook, { now: () => now });
-  const client = new CodexModelClient(notebook, auth, {
+  const client = new ModelClient(notebook, auth, {
     fetchImpl: async (input, init) => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       requests.push({
@@ -242,8 +247,8 @@ test('CodexModelClient performs tool round-trips and persists the latest respons
   );
 
   assert.equal(requests.length, 2);
-  assert.equal(requests[0]?.url, 'https://chatgpt.com/backend-api/codex/responses');
-  assert.equal(requests[0]?.headers.get('originator'), 'codex_cli_rs');
+  assert.equal(requests[0]?.url, OPENAI_CODEX_RESPONSES_ENDPOINT);
+  assert.equal(requests[0]?.headers.get('originator'), OPENAI_CODEX_ORIGINATOR);
   assert.equal(requests[0]?.headers.get('chatgpt-account-id'), 'acct_123');
   assert.equal(requests[0]?.headers.get('session_id'), 'session-test');
   assert.equal(requests[0]?.body.model, 'gpt-5.4');
@@ -284,7 +289,7 @@ test('CodexModelClient performs tool round-trips and persists the latest respons
   assert.equal(emitted[1]?.text, 'Done reading the file.');
 });
 
-test('CodexModelClient auto-compacts direct mode with a hidden checkpoint before the model turn', async (t) => {
+test('ModelClient auto-compacts direct mode with a hidden checkpoint before the model turn', async (t) => {
   const priorContextWindow = process.env.H2_CONTEXT_WINDOW_TOKENS;
   process.env.H2_CONTEXT_WINDOW_TOKENS = '12000';
   t.after(() => {
@@ -343,7 +348,7 @@ test('CodexModelClient auto-compacts direct mode with a hidden checkpoint before
 
   const requests: Array<{ body: Record<string, unknown> }> = [];
   const auth = new OpenAICodexAuth(notebook, { now: () => now });
-  const client = new CodexModelClient(notebook, auth, {
+  const client = new ModelClient(notebook, auth, {
     fetchImpl: async (_input, init) => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       requests.push({ body });
@@ -463,7 +468,7 @@ test('CodexModelClient auto-compacts direct mode with a hidden checkpoint before
   assert.equal(emitted.at(-1)?.text, 'Done after hidden compaction.');
 });
 
-test('CodexModelClient sends the built-in web_search tool when enabled', async (t) => {
+test('ModelClient sends the built-in web_search tool when enabled', async (t) => {
   const priorMode = process.env.H2_WEB_SEARCH_MODE;
   process.env.H2_WEB_SEARCH_MODE = 'cached';
   t.after(() => {
@@ -502,7 +507,7 @@ test('CodexModelClient sends the built-in web_search tool when enabled', async (
 
   const requests: Array<Record<string, unknown>> = [];
   const auth = new OpenAICodexAuth(notebook, { now: () => now });
-  const client = new CodexModelClient(notebook, auth, {
+  const client = new ModelClient(notebook, auth, {
     fetchImpl: async (_input, init) => {
       requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
       return createResponsesStream([
@@ -552,7 +557,7 @@ test('CodexModelClient sends the built-in web_search tool when enabled', async (
   });
 });
 
-test('CodexModelClient does not route provider-executed web search through the local tool loop', async (t) => {
+test('ModelClient does not route provider-executed web search through the local tool loop', async (t) => {
   const priorMode = process.env.H2_WEB_SEARCH_MODE;
   process.env.H2_WEB_SEARCH_MODE = 'cached';
   t.after(() => {
@@ -590,7 +595,7 @@ test('CodexModelClient does not route provider-executed web search through the l
   });
 
   const auth = new OpenAICodexAuth(notebook, { now: () => now });
-  const client = new CodexModelClient(notebook, auth, {
+  const client = new ModelClient(notebook, auth, {
     fetchImpl: async () =>
       createResponsesStream([
         responseCreated('resp_1'),
@@ -697,7 +702,7 @@ test('CodexModelClient does not route provider-executed web search through the l
   assert.equal(emitted[1]?.text, 'It is rainy.');
 });
 
-test('CodexModelClient does not leak provider web search fallback text when query metadata is missing', async (t) => {
+test('ModelClient does not leak provider web search fallback text when query metadata is missing', async (t) => {
   const tempDir = await createTempDir('h2-model-provider-search-fallback-');
   t.after(async () => cleanupDir(tempDir));
 
@@ -726,7 +731,7 @@ test('CodexModelClient does not leak provider web search fallback text when quer
 
   const emitted: Array<{ role: TranscriptRole; text: string }> = [];
   const auth = new OpenAICodexAuth(notebook, { now: () => now });
-  const client = new CodexModelClient(notebook, auth, {
+  const client = new ModelClient(notebook, auth, {
     fetchImpl: async () =>
       createResponsesStream([
         responseCreated('resp_1'),
@@ -782,7 +787,7 @@ test('CodexModelClient does not leak provider web search fallback text when quer
   );
 });
 
-test('CodexModelClient executes independent read-only tool calls in parallel while preserving output order', async (t) => {
+test('ModelClient executes independent read-only tool calls in parallel while preserving output order', async (t) => {
   const tempDir = await createTempDir('h2-model-parallel-');
   t.after(async () => cleanupDir(tempDir));
 
@@ -811,7 +816,7 @@ test('CodexModelClient executes independent read-only tool calls in parallel whi
 
   let responseCount = 0;
   const auth = new OpenAICodexAuth(notebook, { now: () => now });
-  const client = new CodexModelClient(notebook, auth, {
+  const client = new ModelClient(notebook, auth, {
     fetchImpl: async () => {
       responseCount += 1;
       if (responseCount === 1) {
@@ -892,7 +897,7 @@ test('CodexModelClient executes independent read-only tool calls in parallel whi
   assert.match(emitted[1]?.text ?? '', /^@@tool\trg\tRg\(session in src\)/);
 });
 
-test('CodexModelClient surfaces streaming assistant deltas before completion', async (t) => {
+test('ModelClient surfaces streaming assistant deltas before completion', async (t) => {
   const tempDir = await createTempDir('h2-model-stream-');
   t.after(async () => cleanupDir(tempDir));
 
@@ -920,7 +925,7 @@ test('CodexModelClient surfaces streaming assistant deltas before completion', a
   });
 
   const auth = new OpenAICodexAuth(notebook, { now: () => now });
-  const client = new CodexModelClient(notebook, auth, {
+  const client = new ModelClient(notebook, auth, {
     fetchImpl: async () =>
       createResponsesStream([
         responseCreated('resp_1'),
@@ -981,7 +986,7 @@ test('CodexModelClient surfaces streaming assistant deltas before completion', a
   assert.equal(emitted[0]?.text, 'Hello world');
 });
 
-test('CodexModelClient injects an observation hint for experiment subagents after several tool calls without logging', async (t) => {
+test('ModelClient injects an observation hint for experiment subagents after several tool calls without logging', async (t) => {
   const tempDir = await createTempDir('h2-model-observation-hint-');
   t.after(async () => cleanupDir(tempDir));
 
@@ -1011,7 +1016,7 @@ test('CodexModelClient injects an observation hint for experiment subagents afte
   const requests: Array<Record<string, unknown>> = [];
   let responseCount = 0;
   const auth = new OpenAICodexAuth(notebook, { now: () => now });
-  const client = new CodexModelClient(notebook, auth, {
+  const client = new ModelClient(notebook, auth, {
     fetchImpl: async (_input, init) => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       requests.push(body);
@@ -1090,7 +1095,7 @@ test('CodexModelClient injects an observation hint for experiment subagents afte
   );
 });
 
-test('CodexModelClient surfaces streaming content-part events before completion', async (t) => {
+test('ModelClient surfaces streaming content-part events before completion', async (t) => {
   const tempDir = await createTempDir('h2-model-stream-parts-');
   t.after(async () => cleanupDir(tempDir));
 
@@ -1118,7 +1123,7 @@ test('CodexModelClient surfaces streaming content-part events before completion'
   });
 
   const auth = new OpenAICodexAuth(notebook, { now: () => now });
-  const client = new CodexModelClient(notebook, auth, {
+  const client = new ModelClient(notebook, auth, {
     fetchImpl: async () =>
       createResponsesStream([
         responseCreated('resp_1'),
@@ -1174,7 +1179,7 @@ test('CodexModelClient surfaces streaming content-part events before completion'
   assert.equal(emitted[0]?.text, 'Draft text');
 });
 
-test('CodexModelClient does not duplicate live assistant text when final snapshots overlap deltas', async (t) => {
+test('ModelClient does not duplicate live assistant text when final snapshots overlap deltas', async (t) => {
   const tempDir = await createTempDir('h2-model-stream-dedupe-');
   t.after(async () => cleanupDir(tempDir));
 
@@ -1202,7 +1207,7 @@ test('CodexModelClient does not duplicate live assistant text when final snapsho
   });
 
   const auth = new OpenAICodexAuth(notebook, { now: () => now });
-  const client = new CodexModelClient(notebook, auth, {
+  const client = new ModelClient(notebook, auth, {
     fetchImpl: async () =>
       createResponsesStream([
         responseCreated('resp_1'),
@@ -1272,7 +1277,7 @@ test('CodexModelClient does not duplicate live assistant text when final snapsho
   assert.equal(emitted[0]?.text, 'Hello world');
 });
 
-test('CodexModelClient persists model and reasoning settings per session', async (t) => {
+test('ModelClient persists model and reasoning settings per session', async (t) => {
   const tempDir = await createTempDir('h2-model-settings-');
   t.after(async () => cleanupDir(tempDir));
 
@@ -1281,7 +1286,7 @@ test('CodexModelClient persists model and reasoning settings per session', async
   notebook.createSession('session-test', tempDir);
 
   const auth = new OpenAICodexAuth(notebook);
-  const client = new CodexModelClient(notebook, auth);
+  const client = new ModelClient(notebook, auth);
 
   assert.equal(client.getSettings('session-test').model, 'gpt-5.4');
   assert.equal(client.getSettings('session-test').reasoningEffort, 'medium');
@@ -1294,7 +1299,7 @@ test('CodexModelClient persists model and reasoning settings per session', async
   assert.equal(settings.reasoningEffort, 'high');
 });
 
-test('CodexModelClient rebuilds requests from latest checkpoint plus recent tail', async (t) => {
+test('ModelClient rebuilds requests from latest checkpoint plus recent tail', async (t) => {
   const tempDir = await createTempDir('h2-model-compact-');
   t.after(async () => cleanupDir(tempDir));
 
@@ -1353,7 +1358,7 @@ test('CodexModelClient rebuilds requests from latest checkpoint plus recent tail
 
   const requests: Array<Record<string, unknown>> = [];
   const auth = new OpenAICodexAuth(notebook, { now: () => now });
-  const client = new CodexModelClient(notebook, auth, {
+  const client = new ModelClient(notebook, auth, {
     fetchImpl: async (_input, init) => {
       requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
       return createResponsesStream([
@@ -1398,7 +1403,7 @@ test('CodexModelClient rebuilds requests from latest checkpoint plus recent tail
   ]);
 });
 
-test('CodexModelClient estimates context usage from compacted replay state', async (t) => {
+test('ModelClient estimates context usage from compacted replay state', async (t) => {
   const tempDir = await createTempDir('h2-model-context-');
   t.after(async () => cleanupDir(tempDir));
 
@@ -1435,7 +1440,7 @@ test('CodexModelClient estimates context usage from compacted replay state', asy
   });
 
   const auth = new OpenAICodexAuth(notebook);
-  const client = new CodexModelClient(notebook, auth);
+  const client = new ModelClient(notebook, auth);
   const usage = client.getContextWindowUsage('session-test');
 
   assert.equal(usage.totalTokens, 1_050_000);
@@ -1443,7 +1448,7 @@ test('CodexModelClient estimates context usage from compacted replay state', asy
   assert.ok(usage.usedTokens < 10_000);
 });
 
-test('CodexModelClient does not inject open question reminder developer messages into model requests', async (t) => {
+test('ModelClient does not inject open question reminder developer messages into model requests', async (t) => {
   const tempDir = await createTempDir('h2-model-open-question-');
   t.after(async () => cleanupDir(tempDir));
 
@@ -1484,7 +1489,7 @@ test('CodexModelClient does not inject open question reminder developer messages
 
   const requests: Array<Record<string, unknown>> = [];
   const auth = new OpenAICodexAuth(notebook, { now: () => now });
-  const client = new CodexModelClient(notebook, auth, {
+  const client = new ModelClient(notebook, auth, {
     fetchImpl: async (_input, init) => {
       requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
       return createResponsesStream([
@@ -1527,7 +1532,7 @@ test('CodexModelClient does not inject open question reminder developer messages
   ]);
 });
 
-test('CodexModelClient turns tool-call failures into tool outputs so the loop can continue', async (t) => {
+test('ModelClient turns tool-call failures into tool outputs so the loop can continue', async (t) => {
   const tempDir = await createTempDir('h2-model-tool-error-');
   t.after(async () => cleanupDir(tempDir));
 
@@ -1557,7 +1562,7 @@ test('CodexModelClient turns tool-call failures into tool outputs so the loop ca
   const requests: Array<Record<string, unknown>> = [];
   let responseCount = 0;
   const auth = new OpenAICodexAuth(notebook, { now: () => now });
-  const client = new CodexModelClient(notebook, auth, {
+  const client = new ModelClient(notebook, auth, {
     fetchImpl: async (_input, init) => {
       requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
       responseCount += 1;
@@ -1657,7 +1662,7 @@ test('CodexModelClient turns tool-call failures into tool outputs so the loop ca
   assert.match(emitted[1]?.text ?? '', /concurrency limit was reached/);
 });
 
-test('CodexModelClient retries transient 500 responses before succeeding', async (t) => {
+test('ModelClient retries transient 500 responses before succeeding', async (t) => {
   const tempDir = await createTempDir('h2-model-retry-');
   t.after(async () => cleanupDir(tempDir));
 
@@ -1686,7 +1691,7 @@ test('CodexModelClient retries transient 500 responses before succeeding', async
 
   let attempts = 0;
   const auth = new OpenAICodexAuth(notebook, { now: () => now });
-  const client = new CodexModelClient(notebook, auth, {
+  const client = new ModelClient(notebook, auth, {
     fetchImpl: async () => {
       attempts += 1;
       if (attempts < 3) {
@@ -1744,7 +1749,7 @@ test('CodexModelClient retries transient 500 responses before succeeding', async
   assert.equal(emitted[0]?.text, 'Recovered after retry.');
 });
 
-test('CodexModelClient preserves streamed visible text when completed payload omits output_text', async (t) => {
+test('ModelClient preserves streamed visible text when completed payload omits output_text', async (t) => {
   const tempDir = await createTempDir('h2-model-visible-text-fallback-');
   t.after(async () => cleanupDir(tempDir));
 
@@ -1772,7 +1777,7 @@ test('CodexModelClient preserves streamed visible text when completed payload om
   });
 
   const auth = new OpenAICodexAuth(notebook, { now: () => now });
-  const client = new CodexModelClient(notebook, auth, {
+  const client = new ModelClient(notebook, auth, {
     fetchImpl: async () =>
       createResponsesStream([
         responseCreated('resp_text_only'),
@@ -1825,7 +1830,7 @@ test('CodexModelClient preserves streamed visible text when completed payload om
   assert.equal(emitted[0]?.text, 'Hello world');
 });
 
-test('CodexModelClient reconstructs streamed tool calls when completed payload omits output items', async (t) => {
+test('ModelClient reconstructs streamed tool calls when completed payload omits output items', async (t) => {
   const tempDir = await createTempDir('h2-model-stream-tools-');
   t.after(async () => cleanupDir(tempDir));
 
@@ -1854,7 +1859,7 @@ test('CodexModelClient reconstructs streamed tool calls when completed payload o
 
   let responseCount = 0;
   const auth = new OpenAICodexAuth(notebook, { now: () => now });
-  const client = new CodexModelClient(notebook, auth, {
+  const client = new ModelClient(notebook, auth, {
     fetchImpl: async () => {
       responseCount += 1;
       if (responseCount === 1) {
@@ -1913,7 +1918,7 @@ test('CodexModelClient reconstructs streamed tool calls when completed payload o
   assert.equal(emitted[1]?.text, 'Done.');
 });
 
-test('CodexModelClient formats ranged read tool headers', async (t) => {
+test('ModelClient formats ranged read tool headers', async (t) => {
   const tempDir = await createTempDir('h2-model-read-range-');
   t.after(async () => cleanupDir(tempDir));
 
@@ -1942,7 +1947,7 @@ test('CodexModelClient formats ranged read tool headers', async (t) => {
 
   let responseCount = 0;
   const auth = new OpenAICodexAuth(notebook, { now: () => now });
-  const client = new CodexModelClient(notebook, auth, {
+  const client = new ModelClient(notebook, auth, {
     fetchImpl: async () => {
       responseCount += 1;
       if (responseCount === 1) {
@@ -1999,7 +2004,7 @@ test('CodexModelClient formats ranged read tool headers', async (t) => {
   assert.match(emitted[0]?.text ?? '', /^@@tool\tread\tRead\(README\.md:10-20\)/);
 });
 
-test('CodexModelClient exposes only compact when the reserve buffer is exhausted', async (t) => {
+test('ModelClient exposes only compact when the reserve buffer is exhausted', async (t) => {
   const tempDir = await createTempDir('h2-model-compact-only-');
   t.after(async () => cleanupDir(tempDir));
 
@@ -2044,7 +2049,7 @@ test('CodexModelClient exposes only compact when the reserve buffer is exhausted
   const requests: Array<Record<string, unknown>> = [];
   let responseCount = 0;
   const auth = new OpenAICodexAuth(notebook, { now: () => now });
-  const client = new CodexModelClient(notebook, auth, {
+  const client = new ModelClient(notebook, auth, {
     fetchImpl: async (_input, init) => {
       const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
       requests.push(body);
@@ -2120,7 +2125,7 @@ test('CodexModelClient exposes only compact when the reserve buffer is exhausted
   assert.match(emitted[1]?.text ?? '', /Compacted/);
 });
 
-test('CodexModelClient spills oversized tool outputs to disk before replaying them', async (t) => {
+test('ModelClient spills oversized tool outputs to disk before replaying them', async (t) => {
   const tempDir = await createTempDir('h2-model-tool-spill-');
   t.after(async () => cleanupDir(tempDir));
 
@@ -2151,7 +2156,7 @@ test('CodexModelClient spills oversized tool outputs to disk before replaying th
   let responseCount = 0;
   const largeOutput = '0123456789abcdef'.repeat(1_600);
   const auth = new OpenAICodexAuth(notebook, { now: () => now });
-  const client = new CodexModelClient(notebook, auth, {
+  const client = new ModelClient(notebook, auth, {
     fetchImpl: async (_input, init) => {
       requests.push(JSON.parse(String(init?.body)) as Record<string, unknown>);
       responseCount += 1;

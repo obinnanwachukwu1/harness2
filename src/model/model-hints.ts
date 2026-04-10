@@ -1,5 +1,5 @@
 import type { ModelHistoryItem } from '../types.js';
-import type { ToolDefinition } from './codex-tooling.js';
+import type { ToolDefinition } from './model-tooling.js';
 
 export function shouldInjectObservationHint(
   requestItems: ModelHistoryItem[],

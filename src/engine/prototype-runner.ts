@@ -1,5 +1,5 @@
 import { DEFAULT_EXPERIMENT_BUDGET_TOKENS } from '../lib/utils.js';
-import { formatToolOutput } from '../model/codex-tooling.js';
+import { formatToolOutput } from '../model/model-tooling.js';
 import type {
   AgentRunContext,
   ExperimentAdoptionPreview,

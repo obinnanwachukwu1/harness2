@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { formatLiveToolBody, formatToolHeader } from '../src/model/codex-tooling.js';
+import { formatLiveToolBody, formatToolHeader } from '../src/model/model-tooling.js';
 
 test('formatToolHeader falls back instead of throwing on malformed tool arguments', () => {
   assert.doesNotThrow(() =>

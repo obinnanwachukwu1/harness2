@@ -12,7 +12,9 @@ import type { OpenAICodexAuthRecord, OpenAICodexJwtClaims } from '../types.js';
 export const OPENAI_CODEX_CLIENT_ID = 'app_EMoamEEZ73f0CkXaXp7hrann';
 export const OPENAI_CODEX_AUTH_ENDPOINT = 'https://auth.openai.com/oauth/authorize';
 export const OPENAI_CODEX_TOKEN_ENDPOINT = 'https://auth.openai.com/oauth/token';
+export const OPENAI_CODEX_PROVIDER = 'openai-codex';
 export const OPENAI_CODEX_ORIGINATOR = 'codex_cli_rs';
+export const OPENAI_CODEX_RESPONSES_ENDPOINT = 'https://chatgpt.com/backend-api/codex/responses';
 
 interface PKCECodes {
   codeVerifier: string;
@@ -343,7 +345,7 @@ function buildAuthRecord(payload: TokenResponse, now: () => number): OpenAICodex
   const timestamp = nowIso();
 
   return {
-    provider: 'openai-codex',
+    provider: OPENAI_CODEX_PROVIDER,
     type: 'oauth',
     accessToken: payload.access_token,
     refreshToken: payload.refresh_token ?? '',

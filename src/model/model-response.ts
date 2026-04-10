@@ -2,7 +2,7 @@ import { stepCountIs, streamText, type ModelMessage } from 'ai';
 import { createOpenAI } from '@ai-sdk/openai';
 
 import { OPENAI_CODEX_ORIGINATOR } from '../auth/openai-codex.js';
-import { formatToolHeader, formatLiveToolBody, buildAiSdkTools, parseArguments, type ToolDefinition } from './codex-tooling.js';
+import { formatToolHeader, formatLiveToolBody, buildAiSdkTools, parseArguments, type ToolDefinition } from './model-tooling.js';
 import type { ModelHistoryItem, ModelSessionRecord } from '../types.js';
 
 const DEFAULT_WEB_SEARCH_MODE = 'cached';

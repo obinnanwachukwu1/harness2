@@ -109,7 +109,7 @@ test('Notebook persists transcript and experiment details', async (t) => {
   notebook.upsertModelSession({
     sessionId: session.id,
     provider: 'openai-codex',
-    model: 'gpt-5-codex',
+    model: 'gpt-5.4',
     reasoningEffort: 'medium',
     previousResponseId: 'resp_123',
     updatedAt: timestamp
