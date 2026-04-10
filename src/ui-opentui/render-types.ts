@@ -59,3 +59,15 @@ export interface OpenTuiState {
   blocks: OpenTuiRenderBlock[];
   experiments: OpenTuiExperimentSummary[];
 }
+
+export interface OpenTuiStatePatch {
+  sessionId: string;
+  cwd: string;
+  status?: OpenTuiState['status'];
+  thinkingEnabled?: boolean;
+  inputPlaceholder?: string;
+  upsertBlocks?: OpenTuiRenderBlock[];
+  removeBlockIds?: string[];
+  blockOrder?: string[];
+  experiments?: OpenTuiExperimentSummary[];
+}

@@ -1,6 +1,11 @@
 import path from 'node:path';
 import type { EngineSnapshot, ExperimentRecord, StudyDebtRecord, TranscriptEntry } from '../types.js';
-import type { OpenTuiExperimentSummary, OpenTuiRenderBlock, OpenTuiState } from './render-types.js';
+import type {
+  OpenTuiExperimentSummary,
+  OpenTuiRenderBlock,
+  OpenTuiState,
+  OpenTuiStatePatch
+} from './render-types.js';
 
 type ToolTone = Extract<OpenTuiRenderBlock, { kind: 'tool' }>['tone'];
 
@@ -17,6 +22,53 @@ export function buildOpenTuiState(snapshot: EngineSnapshot): OpenTuiState {
     blocks: buildBlocks(snapshot),
     experiments: snapshot.experiments.map(summarizeExperiment)
   };
+}
+
+export function diffOpenTuiState(
+  previous: OpenTuiState,
+  next: OpenTuiState
+): OpenTuiStatePatch | null {
+  const patch: OpenTuiStatePatch = {
+    sessionId: next.sessionId,
+    cwd: next.cwd
+  };
+  let changed = false;
+
+  if (!statusEquals(previous.status, next.status)) {
+    patch.status = next.status;
+    changed = true;
+  }
+
+  if (previous.thinkingEnabled !== next.thinkingEnabled) {
+    patch.thinkingEnabled = next.thinkingEnabled;
+    changed = true;
+  }
+
+  if (previous.inputPlaceholder !== next.inputPlaceholder) {
+    patch.inputPlaceholder = next.inputPlaceholder;
+    changed = true;
+  }
+
+  if (!experimentListEquals(previous.experiments, next.experiments)) {
+    patch.experiments = next.experiments;
+    changed = true;
+  }
+
+  const blockPatch = diffBlocks(previous.blocks, next.blocks);
+  if (blockPatch.upsertBlocks.length > 0) {
+    patch.upsertBlocks = blockPatch.upsertBlocks;
+    changed = true;
+  }
+  if (blockPatch.removeBlockIds.length > 0) {
+    patch.removeBlockIds = blockPatch.removeBlockIds;
+    changed = true;
+  }
+  if (blockPatch.blockOrder) {
+    patch.blockOrder = blockPatch.blockOrder;
+    changed = true;
+  }
+
+  return changed ? patch : null;
 }
 
 function buildBlocks(snapshot: EngineSnapshot): OpenTuiRenderBlock[] {
@@ -87,6 +139,123 @@ function buildBlocks(snapshot: EngineSnapshot): OpenTuiRenderBlock[] {
   }
 
   return blocks;
+}
+
+function diffBlocks(
+  previous: OpenTuiRenderBlock[],
+  next: OpenTuiRenderBlock[]
+): { upsertBlocks: OpenTuiRenderBlock[]; removeBlockIds: string[]; blockOrder?: string[] } {
+  const previousById = new Map(previous.map((block) => [block.id, block]));
+  const nextById = new Map(next.map((block) => [block.id, block]));
+  const upsertBlocks: OpenTuiRenderBlock[] = [];
+  const removeBlockIds: string[] = [];
+
+  for (const block of previous) {
+    if (!nextById.has(block.id)) {
+      removeBlockIds.push(block.id);
+    }
+  }
+
+  for (const block of next) {
+    const previousBlock = previousById.get(block.id);
+    if (!previousBlock || !blockEquals(previousBlock, block)) {
+      upsertBlocks.push(block);
+    }
+  }
+
+  const previousFirstId = previous[0]?.id ?? null;
+  const nextFirstId = next[0]?.id ?? null;
+  if (previousFirstId !== nextFirstId) {
+    const previousFirst = previousFirstId ? nextById.get(previousFirstId) : undefined;
+    const nextFirst = nextFirstId ? nextById.get(nextFirstId) : undefined;
+
+    if (previousFirst && !upsertBlocks.some((block) => block.id === previousFirst.id)) {
+      upsertBlocks.push(previousFirst);
+    }
+    if (nextFirst && !upsertBlocks.some((block) => block.id === nextFirst.id)) {
+      upsertBlocks.push(nextFirst);
+    }
+  }
+
+  const blockOrder = stringArrayEquals(
+    previous.map((block) => block.id),
+    next.map((block) => block.id)
+  )
+    ? undefined
+    : next.map((block) => block.id);
+
+  return { upsertBlocks, removeBlockIds, blockOrder };
+}
+
+function blockEquals(previous: OpenTuiRenderBlock, next: OpenTuiRenderBlock): boolean {
+  if (previous.kind !== next.kind || previous.id !== next.id) {
+    return false;
+  }
+
+  switch (previous.kind) {
+    case 'user':
+      return next.kind === 'user' && previous.text === next.text;
+    case 'assistant':
+    case 'thinking':
+      return (
+        next.kind === previous.kind &&
+        previous.text === next.text &&
+        previous.live === next.live
+      );
+    case 'tool':
+      return (
+        next.kind === 'tool' &&
+        previous.tone === next.tone &&
+        previous.header === next.header &&
+        previous.live === next.live &&
+        stringArrayEquals(previous.body, next.body) &&
+        stringArrayEquals(previous.footer, next.footer)
+      );
+    case 'diff':
+      return (
+        next.kind === 'diff' &&
+        previous.title === next.title &&
+        previous.diff === next.diff &&
+        previous.filetype === next.filetype &&
+        previous.view === next.view &&
+        previous.live === next.live
+      );
+  }
+}
+
+function stringArrayEquals(previous: string[], next: string[]): boolean {
+  if (previous.length !== next.length) {
+    return false;
+  }
+  return previous.every((value, index) => value === next[index]);
+}
+
+function experimentListEquals(
+  previous: OpenTuiExperimentSummary[],
+  next: OpenTuiExperimentSummary[]
+): boolean {
+  if (previous.length !== next.length) {
+    return false;
+  }
+  return previous.every(
+    (experiment, index) =>
+      experiment.id === next[index]?.id &&
+      experiment.status === next[index]?.status &&
+      experiment.summary === next[index]?.summary &&
+      experiment.meta === next[index]?.meta
+  );
+}
+
+function statusEquals(previous: OpenTuiState['status'], next: OpenTuiState['status']): boolean {
+  return (
+    previous.label === next.label &&
+    previous.modeText === next.modeText &&
+    previous.model === next.model &&
+    previous.contextText === next.contextText &&
+    previous.contextUsagePercent === next.contextUsagePercent &&
+    previous.usageText === next.usageText &&
+    previous.pendingText === next.pendingText
+  );
 }
 
 function pendingUserRequestToBlock(snapshot: EngineSnapshot): OpenTuiRenderBlock {
@@ -686,7 +855,7 @@ function formatTokenCount(value: number): string {
 }
 
 function formatStatus(snapshot: EngineSnapshot): OpenTuiState['status'] {
-  const ctxLimit = snapshot.standardRateContextTokens || snapshot.contextWindowTokens;
+  const ctxLimit = snapshot.contextWindowTokens;
   const usedPercent = ctxLimit > 0 ? Math.max(0, Math.round((snapshot.estimatedContextTokens / ctxLimit) * 100)) : 0;
   const phaseSuffix =
     snapshot.agentMode === 'plan' && snapshot.planModePhase

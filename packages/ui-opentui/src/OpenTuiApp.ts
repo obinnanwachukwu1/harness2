@@ -15,9 +15,10 @@ import type { OpenTuiBridgeEvent } from '../../../src/ui-opentui/protocol.js';
 import type {
   OpenTuiExperimentSummary,
   OpenTuiRenderBlock,
-  OpenTuiState
+  OpenTuiState,
+  OpenTuiStatePatch
 } from '../../../src/ui-opentui/render-types.js';
-import { captureHeapSnapshot } from '../../../src/ui-opentui/heap-snapshot.js';
+import { captureHeapSnapshot, writeDiagnosticReport } from '../../../src/ui-opentui/heap-snapshot.js';
 import { BridgeClient } from './bridge-client.js';
 import { copyToClipboard } from './clipboard.js';
 import { createBlockView, updateBlockView, type BlockView } from './render-block-view.js';
@@ -52,11 +53,18 @@ export class OpenTuiApp {
   private readonly experimentChildIds = new Set<string>();
   private destroyed = false;
   private lastBridgeError: string | null = null;
+  private lastRenderedStatus: OpenTuiState['status'] | null = null;
+  private lastInputPlaceholder: string | null = null;
   private resolveRun?: () => void;
   private transientStatus: { message: string; timeout: ReturnType<typeof setTimeout> | null } | null = null;
   private capturingHeap = false;
   private readonly handleSigUsr2 = (): void => {
     void this.captureHeapSnapshots('signal');
+  };
+  private readonly handleSigTerm = (): void => {
+    void this.captureDiagnosticReports('signal').finally(() => {
+      process.exit(0);
+    });
   };
 
   private constructor(
@@ -77,6 +85,7 @@ export class OpenTuiApp {
     this.bindInput();
     this.bindSelection();
     process.on('SIGUSR2', this.handleSigUsr2);
+    process.on('SIGTERM', this.handleSigTerm);
     this.input.focus();
   }
 
@@ -244,7 +253,7 @@ export class OpenTuiApp {
       }
 
       if (key.ctrl && key.name === 'y') {
-        void this.captureHeapSnapshots('ui');
+        void this.captureDiagnosticReports('ui');
         return;
       }
 
@@ -331,9 +340,9 @@ export class OpenTuiApp {
       return;
     }
 
-    if (event.type === 'heapSnapshot') {
+    if (event.type === 'diagnosticCapture') {
       const rssMb = Math.round(event.rss / (1024 * 1024));
-      this.setTransientStatus(`${event.processType} heap ${rssMb}MB`);
+      this.setTransientStatus(`${event.processType} ${event.mode} ${rssMb}MB`);
       this.renderer.requestRender();
       return;
     }
@@ -343,16 +352,58 @@ export class OpenTuiApp {
       return;
     }
 
-    this.applyState(event.state);
+    if (event.type === 'hydrate') {
+      this.applyState(event.state);
+      return;
+    }
+
+    this.applyStatePatch(event.patch);
   }
 
   private applyState(state: OpenTuiState): void {
     this.lastBridgeError = null;
     this.state = state;
-    this.input.placeholder = state.inputPlaceholder;
+    if (this.lastInputPlaceholder !== state.inputPlaceholder) {
+      this.input.placeholder = state.inputPlaceholder;
+      this.lastInputPlaceholder = state.inputPlaceholder;
+    }
     this.syncTranscript(state.blocks);
     this.syncExperiments(state.experiments);
-    this.renderStatusLine(state.status);
+    if (!statusLineEquals(this.lastRenderedStatus, state.status)) {
+      this.renderStatusLine(state.status);
+    }
+    this.renderer.requestRender();
+  }
+
+  private applyStatePatch(patch: OpenTuiStatePatch): void {
+    if (!this.state) {
+      return;
+    }
+
+    this.lastBridgeError = null;
+    const nextState = mergeStatePatch(this.state, patch);
+    this.state = nextState;
+
+    if (
+      Object.prototype.hasOwnProperty.call(patch, 'inputPlaceholder') &&
+      this.lastInputPlaceholder !== nextState.inputPlaceholder
+    ) {
+      this.input.placeholder = nextState.inputPlaceholder;
+      this.lastInputPlaceholder = nextState.inputPlaceholder;
+    }
+
+    if (patch.upsertBlocks || patch.removeBlockIds || patch.blockOrder) {
+      this.syncTranscriptPatch(this.currentBlocks, nextState.blocks, patch);
+    }
+
+    if (patch.experiments) {
+      this.syncExperiments(nextState.experiments);
+    }
+
+    if (patch.status && !statusLineEquals(this.lastRenderedStatus, nextState.status)) {
+      this.renderStatusLine(nextState.status);
+    }
+
     this.renderer.requestRender();
   }
 
@@ -379,6 +430,47 @@ export class OpenTuiApp {
     }
 
     this.currentBlocks = blocks;
+  }
+
+  private syncTranscriptPatch(
+    previousBlocks: OpenTuiRenderBlock[],
+    nextBlocks: OpenTuiRenderBlock[],
+    patch: OpenTuiStatePatch
+  ): void {
+    const removeBlockIds = new Set(patch.removeBlockIds ?? []);
+    const upsertBlockIds = new Set((patch.upsertBlocks ?? []).map((block) => block.id));
+    const previousIndexById = new Map(previousBlocks.map((block, index) => [block.id, index]));
+
+    for (const id of removeBlockIds) {
+      const view = this.blockViews.get(id);
+      if (!view) {
+        continue;
+      }
+      this.transcriptContent.remove(view.container.id);
+      this.blockViews.delete(id);
+    }
+
+    for (const [index, block] of nextBlocks.entries()) {
+      const existing = this.blockViews.get(block.id);
+      if (!existing) {
+        const view = createBlockView(this.renderer, block, { isFirst: index === 0 });
+        this.transcriptContent.add(view.container, index);
+        this.blockViews.set(block.id, view);
+        continue;
+      }
+
+      if (upsertBlockIds.has(block.id)) {
+        updateBlockView(this.renderer, existing, block, { isFirst: index === 0 });
+      }
+
+      const previousIndex = previousIndexById.get(block.id);
+      if (previousIndex !== undefined && previousIndex !== index) {
+        this.transcriptContent.remove(existing.container.id);
+        this.transcriptContent.add(existing.container, index);
+      }
+    }
+
+    this.currentBlocks = nextBlocks;
   }
 
   private syncExperiments(experiments: OpenTuiExperimentSummary[]): void {
@@ -456,6 +548,7 @@ export class OpenTuiApp {
 
   private renderStatusLine(status: OpenTuiState['status']): void {
     clearStatusRow(this.statusRow);
+    this.lastRenderedStatus = { ...status };
 
     const sessionLabel = this.state?.sessionId?.replace(/^session-/, '');
     const leftIds = {
@@ -582,6 +675,7 @@ export class OpenTuiApp {
 
     this.destroyed = true;
     process.off('SIGUSR2', this.handleSigUsr2);
+    process.off('SIGTERM', this.handleSigTerm);
     if (this.transientStatus?.timeout) {
       clearTimeout(this.transientStatus.timeout);
       this.transientStatus = null;
@@ -589,6 +683,49 @@ export class OpenTuiApp {
     await this.bridge.dispose();
     this.renderer.destroy();
     this.resolveRun?.();
+  }
+
+  private diagnosticExtra(): Record<string, unknown> {
+    return {
+      ui: {
+        blockViews: this.blockViews.size,
+        currentBlocks: this.currentBlocks.length,
+        experimentCards: this.experimentChildIds.size,
+        rendererSelectionActive: this.renderer.hasSelection
+      },
+      state: this.state
+        ? {
+            sessionId: this.state.sessionId,
+            cwd: this.state.cwd,
+            blocks: this.state.blocks.length,
+            experiments: this.state.experiments.length,
+            thinkingEnabled: this.state.thinkingEnabled
+          }
+        : null
+    };
+  }
+
+  private async captureDiagnosticReports(trigger: 'ui' | 'signal'): Promise<void> {
+    this.setTransientStatus('capturing diagnostic reports…');
+    try {
+      const cwd = this.state?.cwd ?? process.cwd();
+      const report = await writeDiagnosticReport({
+        cwd,
+        processType: 'tui',
+        trigger,
+        extra: this.diagnosticExtra()
+      });
+      const rssMb = Math.round(report.rss / (1024 * 1024));
+      this.setTransientStatus(`tui report ${rssMb}MB`);
+      this.bridge.send({
+        type: 'captureDiagnostics',
+        mode: 'report',
+        trigger
+      });
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.setTransientStatus(`diagnostic report failed: ${message}`);
+    }
   }
 
   private async captureHeapSnapshots(trigger: 'ui' | 'signal'): Promise<void> {
@@ -604,12 +741,14 @@ export class OpenTuiApp {
       const snapshot = await captureHeapSnapshot({
         cwd,
         processType: 'tui',
-        trigger
+        trigger,
+        extra: this.diagnosticExtra()
       });
       const rssMb = Math.round(snapshot.rss / (1024 * 1024));
       this.setTransientStatus(`tui heap ${rssMb}MB`);
       this.bridge.send({
-        type: 'captureHeap',
+        type: 'captureDiagnostics',
+        mode: 'heap',
         trigger
       });
     } catch (error) {
@@ -653,11 +792,15 @@ function clearStatusRow(container: BoxRenderable): void {
   for (const id of [
     'status-row-status',
     'status-row-gap-1',
+    'status-row-mode',
+    'status-row-gap-1b',
     'status-row-model',
     'status-row-gap-2',
     'status-row-context',
     'status-row-gap-3',
     'status-row-usage',
+    'status-row-gap-3b',
+    'status-row-pending',
     'status-row-spacer',
     'status-row-transient',
     'status-row-gap-4',
@@ -665,4 +808,68 @@ function clearStatusRow(container: BoxRenderable): void {
   ]) {
     container.remove(id);
   }
+}
+
+function statusLineEquals(
+  left: OpenTuiState['status'] | null,
+  right: OpenTuiState['status']
+): boolean {
+  if (!left) {
+    return false;
+  }
+
+  return (
+    left.label === right.label &&
+    left.modeText === right.modeText &&
+    left.model === right.model &&
+    left.contextText === right.contextText &&
+    left.contextUsagePercent === right.contextUsagePercent &&
+    left.usageText === right.usageText &&
+    left.pendingText === right.pendingText
+  );
+}
+
+function mergeStatePatch(state: OpenTuiState, patch: OpenTuiStatePatch): OpenTuiState {
+  let blocks = state.blocks;
+  if (patch.removeBlockIds || patch.upsertBlocks || patch.blockOrder) {
+    const blockById = new Map(state.blocks.map((block) => [block.id, block]));
+    for (const id of patch.removeBlockIds ?? []) {
+      blockById.delete(id);
+    }
+    for (const block of patch.upsertBlocks ?? []) {
+      blockById.set(block.id, block);
+    }
+    const seen = new Set<string>();
+    const orderedIds = patch.blockOrder ?? state.blocks.map((block) => block.id);
+    blocks = orderedIds
+      .map((id) => {
+        const block = blockById.get(id);
+        if (!block) {
+          return null;
+        }
+        seen.add(id);
+        return block;
+      })
+      .filter((block): block is OpenTuiRenderBlock => block !== null);
+
+    for (const block of patch.upsertBlocks ?? []) {
+      if (seen.has(block.id)) {
+        continue;
+      }
+      blocks.push(block);
+    }
+  }
+
+  return {
+    sessionId: patch.sessionId,
+    cwd: patch.cwd,
+    status: patch.status ?? state.status,
+    thinkingEnabled:
+      Object.prototype.hasOwnProperty.call(patch, 'thinkingEnabled')
+        ? patch.thinkingEnabled!
+        : state.thinkingEnabled,
+    inputPlaceholder: patch.inputPlaceholder ?? state.inputPlaceholder,
+    blocks,
+    experiments: patch.experiments ?? state.experiments
+  };
 }

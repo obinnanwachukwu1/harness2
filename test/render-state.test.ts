@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildOpenTuiState } from '../src/ui-opentui/render-state.js';
+import { buildOpenTuiState, diffOpenTuiState } from '../src/ui-opentui/render-state.js';
 import type { EngineSnapshot } from '../src/types.js';
 
 function createSnapshot(overrides: Partial<EngineSnapshot> = {}): EngineSnapshot {
@@ -224,4 +224,116 @@ test('buildOpenTuiState surfaces a pending single-choice ask_user request', () =
   assert.ok(toolBlock && toolBlock.kind === 'tool');
   assert.equal(toolBlock.header, 'ask_user  clarification  single_choice');
   assert.match(toolBlock.body.join('\n'), /b \[recommended\]/);
+});
+
+test('buildOpenTuiState uses the actual context window for status text and percent', () => {
+  const state = buildOpenTuiState(
+    createSnapshot({
+      model: 'gpt-5.4',
+      estimatedContextTokens: 50_000,
+      contextWindowTokens: 75_000,
+      standardRateContextTokens: 272_000
+    })
+  );
+
+  assert.equal(state.status.contextText, '50k/75k');
+  assert.equal(state.status.contextUsagePercent, 67);
+  assert.equal(state.status.usageText, '67% used');
+});
+
+test('diffOpenTuiState omits unchanged blocks and only upserts the changed live block', () => {
+  const previous = buildOpenTuiState(
+    createSnapshot({
+      transcript: [
+        {
+          id: 1,
+          sessionId: 'session-test',
+          role: 'user',
+          text: 'hello',
+          createdAt: '2026-04-07T00:00:01.000Z'
+        }
+      ],
+      liveTurnEvents: [
+        {
+          id: 'live-assistant-1',
+          kind: 'assistant',
+          text: 'draft',
+          live: true
+        }
+      ]
+    })
+  );
+  const next = buildOpenTuiState(
+    createSnapshot({
+      transcript: [
+        {
+          id: 1,
+          sessionId: 'session-test',
+          role: 'user',
+          text: 'hello',
+          createdAt: '2026-04-07T00:00:01.000Z'
+        }
+      ],
+      liveTurnEvents: [
+        {
+          id: 'live-assistant-1',
+          kind: 'assistant',
+          text: 'draft with more text',
+          live: true
+        }
+      ]
+    })
+  );
+
+  const patch = diffOpenTuiState(previous, next);
+
+  assert.ok(patch);
+  assert.equal(patch.removeBlockIds, undefined);
+  assert.equal(patch.blockOrder, undefined);
+  assert.deepEqual(patch.upsertBlocks?.map((block) => block.id), ['live-assistant-1']);
+});
+
+test('diffOpenTuiState emits block order when the transcript shape changes', () => {
+  const previous = buildOpenTuiState(
+    createSnapshot({
+      transcript: [
+        {
+          id: 1,
+          sessionId: 'session-test',
+          role: 'assistant',
+          text: 'first',
+          createdAt: '2026-04-07T00:00:01.000Z'
+        }
+      ]
+    })
+  );
+  const next = buildOpenTuiState(
+    createSnapshot({
+      transcript: [
+        {
+          id: 2,
+          sessionId: 'session-test',
+          role: 'user',
+          text: 'new first',
+          createdAt: '2026-04-07T00:00:00.000Z'
+        },
+        {
+          id: 1,
+          sessionId: 'session-test',
+          role: 'assistant',
+          text: 'first',
+          createdAt: '2026-04-07T00:00:01.000Z'
+        }
+      ]
+    })
+  );
+
+  const patch = diffOpenTuiState(previous, next);
+
+  assert.ok(patch);
+  assert.deepEqual(patch.blockOrder, ['user-2', 'assistant-1']);
+  assert.deepEqual(
+    patch.upsertBlocks?.map((block) => block.id).sort(),
+    ['assistant-1', 'user-2']
+  );
 });

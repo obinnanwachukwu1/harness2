@@ -1,4 +1,4 @@
-import type { OpenTuiState } from './render-types.js';
+import type { OpenTuiState, OpenTuiStatePatch } from './render-types.js';
 
 export type OpenTuiBridgeCommand =
   | {
@@ -10,7 +10,8 @@ export type OpenTuiBridgeCommand =
       enabled: boolean;
     }
   | {
-      type: 'captureHeap';
+      type: 'captureDiagnostics';
+      mode: 'report' | 'heap';
       trigger?: 'ui' | 'signal';
     }
   | {
@@ -24,19 +25,24 @@ export type OpenTuiBridgeEvent =
       cwd: string;
     }
   | {
-      type: 'state';
+      type: 'hydrate';
       state: OpenTuiState;
+    }
+  | {
+      type: 'statePatch';
+      patch: OpenTuiStatePatch;
     }
   | {
       type: 'error';
       message: string;
     }
   | {
-      type: 'heapSnapshot';
+      type: 'diagnosticCapture';
       processType: 'tui' | 'bridge';
+      mode: 'report' | 'heap';
       trigger: 'ui' | 'signal';
       path: string;
-      metaPath: string;
+      metaPath?: string;
       pid: number;
       rss: number;
       heapUsed: number;
