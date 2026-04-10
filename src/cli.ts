@@ -13,6 +13,8 @@ class CliUsageError extends Error {}
 
 const EVAL_RUN_USAGE =
   'Usage: h2 eval run <manifest> [--case <id>] [--parallel <n>] [--repeat <n>] [--mode <study|plan|direct>]';
+const HARBOR_RUN_USAGE =
+  'Usage: h2 harbor-run --output-dir <path> (--instruction "<text>" | --instruction-file <path>) [--session <id>] [--model <name>] [--reasoning-effort <off|low|medium|high>] [--web-search-mode <disabled|cached|live>] [--thinking|--no-thinking] [--json]';
 
 async function main(): Promise<void> {
   const [, , ...rawArgs] = process.argv;
@@ -62,6 +64,12 @@ async function main(): Promise<void> {
   if (command === 'eval') {
     assertSupportedNodeRuntime();
     await runEvalCommand(args.slice(1), mode);
+    return;
+  }
+
+  if (command === 'harbor-run') {
+    assertSupportedNodeRuntime();
+    await runHarborCommand(args.slice(1), mode);
     return;
   }
 
@@ -267,7 +275,7 @@ function printDoctor(report: {
 }
 
 function printUsage(): void {
-  console.log('Usage: h2 [--mode <study|plan|direct>] [resume [sessionId]] [opentui] | h2 auth <login|status|access|logout> | h2 doctor | h2 paths | h2 eval run <manifest> [--case <id>] [--parallel <n>] [--repeat <n>] [--mode <study|plan|direct>] | h2 eval score <run-dir> | h2 eval pack [run-id-or-suffix] [--latest-batch]');
+  console.log('Usage: h2 [--mode <study|plan|direct>] [resume [sessionId]] [opentui] | h2 auth <login|status|access|logout> | h2 doctor | h2 paths | h2 eval run <manifest> [--case <id>] [--parallel <n>] [--repeat <n>] [--mode <study|plan|direct>] | h2 eval score <run-dir> | h2 eval pack [run-id-or-suffix] [--latest-batch] | h2 harbor-run --output-dir <path> (--instruction "<text>" | --instruction-file <path>)');
   console.log('');
   console.log('Examples:');
   console.log('h2');
@@ -283,6 +291,7 @@ function printUsage(): void {
   console.log('h2 eval score ~/.h2/evals/<run-id>');
   console.log('h2 eval pack 0e5484');
   console.log('h2 eval pack --latest-batch');
+  console.log('h2 harbor-run --output-dir /tmp/harbor-agent --instruction-file /tmp/instruction.md --json');
 }
 
 async function runEvalCommand(
@@ -454,6 +463,101 @@ async function runEvalCommand(
   }
 }
 
+async function runHarborCommand(
+  args: string[],
+  modeOverride?: 'study' | 'plan' | 'direct'
+): Promise<void> {
+  const parsed = await parseHarborRunArgs(args);
+  const { runHarborTask } = await import('./integrations/harbor/run.js');
+
+  let streamedAssistant = '';
+  let pendingThinking = '';
+  const maxWidth = Math.max(20, output.columns ?? 100);
+  const shouldStream = !parsed.json;
+
+  const result = await runHarborTask({
+    cwd: process.cwd(),
+    outputDir: parsed.outputDir,
+    instruction: parsed.instruction,
+    sessionId: parsed.sessionId,
+    mode: modeOverride,
+    model: parsed.model,
+    reasoningEffort: parsed.reasoningEffort,
+    thinking: parsed.thinking,
+    webSearchMode: parsed.webSearchMode,
+    onAssistantStream: shouldStream
+      ? async (text) => {
+          const delta = text.startsWith(streamedAssistant) ? text.slice(streamedAssistant.length) : text;
+          if (delta) {
+            output.write(truncatePrintLines(delta, maxWidth));
+          }
+          streamedAssistant = text;
+        }
+      : undefined,
+    onReasoningSummaryStream: shouldStream
+      ? async (text) => {
+          pendingThinking = `[thinking] ${normalizeReasoningSummaryText(text)}`;
+        }
+      : undefined,
+    onTranscriptEntry: shouldStream
+      ? async (role, text) => {
+          if (role === 'user') {
+            return;
+          }
+
+          if (role !== 'system' && pendingThinking) {
+            output.write(`${truncatePrintLines(pendingThinking, maxWidth)}\n`);
+            pendingThinking = '';
+          }
+
+          if (role === 'assistant') {
+            if (streamedAssistant) {
+              if (text.startsWith(streamedAssistant)) {
+                const suffix = text.slice(streamedAssistant.length);
+                if (suffix) {
+                  output.write(truncatePrintLines(suffix, maxWidth));
+                }
+              } else if (text !== streamedAssistant) {
+                output.write(`\n${truncatePrintLines(text, maxWidth)}`);
+              }
+
+              output.write('\n');
+              streamedAssistant = '';
+              return;
+            }
+
+            output.write(`${truncatePrintLines(text, maxWidth)}\n`);
+            return;
+          }
+
+          if (streamedAssistant) {
+            output.write('\n');
+            streamedAssistant = '';
+          }
+
+          output.write(`${truncatePrintLines(formatTranscriptEntry(role, text), maxWidth)}\n`);
+        }
+      : undefined
+  });
+
+  if (shouldStream && streamedAssistant) {
+    output.write('\n');
+  }
+  if (shouldStream && pendingThinking) {
+    output.write(`${truncatePrintLines(pendingThinking, maxWidth)}\n`);
+  }
+
+  if (parsed.json) {
+    console.log(JSON.stringify(result, null, 2));
+    return;
+  }
+
+  console.log('');
+  console.log(`harbor run session: ${result.sessionId}`);
+  console.log(`artifacts: ${result.outputDir}`);
+  console.log(`trajectory: ${result.artifacts.trajectoryJsonPath}`);
+}
+
 function printStatePaths(cwd: string): void {
   for (const entry of describeStatePaths(cwd)) {
     console.log(`${entry.label}: ${entry.path}`);
@@ -492,6 +596,110 @@ function parsePrintRequest(
   }
 
   return null;
+}
+
+async function parseHarborRunArgs(args: string[]): Promise<{
+  outputDir: string;
+  instruction: string;
+  sessionId?: string;
+  model?: string;
+  reasoningEffort?: 'off' | 'low' | 'medium' | 'high';
+  thinking: boolean;
+  webSearchMode?: 'disabled' | 'cached' | 'live';
+  json: boolean;
+}> {
+  let outputDir: string | undefined;
+  let instruction: string | undefined;
+  let instructionFile: string | undefined;
+  let sessionId: string | undefined;
+  let model: string | undefined;
+  let reasoningEffort: 'off' | 'low' | 'medium' | 'high' | undefined;
+  let webSearchMode: 'disabled' | 'cached' | 'live' | undefined;
+  let thinking = true;
+  let json = false;
+
+  for (let index = 0; index < args.length; index += 1) {
+    const token = args[index];
+    switch (token) {
+      case '--output-dir':
+        outputDir = args[index + 1];
+        index += 1;
+        break;
+      case '--instruction':
+        instruction = args[index + 1];
+        index += 1;
+        break;
+      case '--instruction-file':
+        instructionFile = args[index + 1];
+        index += 1;
+        break;
+      case '--session':
+        sessionId = args[index + 1];
+        index += 1;
+        break;
+      case '--model':
+        model = args[index + 1];
+        index += 1;
+        break;
+      case '--reasoning-effort': {
+        const candidate = args[index + 1];
+        if (candidate !== 'off' && candidate !== 'low' && candidate !== 'medium' && candidate !== 'high') {
+          throw new CliUsageError(HARBOR_RUN_USAGE);
+        }
+        reasoningEffort = candidate;
+        index += 1;
+        break;
+      }
+      case '--web-search-mode': {
+        const candidate = args[index + 1];
+        if (candidate !== 'disabled' && candidate !== 'cached' && candidate !== 'live') {
+          throw new CliUsageError(HARBOR_RUN_USAGE);
+        }
+        webSearchMode = candidate;
+        index += 1;
+        break;
+      }
+      case '--thinking':
+        thinking = true;
+        break;
+      case '--no-thinking':
+        thinking = false;
+        break;
+      case '--json':
+        json = true;
+        break;
+      default:
+        throw new CliUsageError(`Unknown harbor-run argument: ${token}\n\n${HARBOR_RUN_USAGE}`);
+    }
+  }
+
+  if (!outputDir) {
+    throw new CliUsageError(HARBOR_RUN_USAGE);
+  }
+
+  if (instruction && instructionFile) {
+    throw new CliUsageError(`Specify either --instruction or --instruction-file, not both.\n\n${HARBOR_RUN_USAGE}`);
+  }
+
+  if (instructionFile) {
+    const { readFile } = await import('node:fs/promises');
+    instruction = await readFile(path.resolve(instructionFile), 'utf8');
+  }
+
+  if (!instruction?.trim()) {
+    throw new CliUsageError(HARBOR_RUN_USAGE);
+  }
+
+  return {
+    outputDir: path.resolve(outputDir),
+    instruction,
+    sessionId,
+    model,
+    reasoningEffort,
+    thinking,
+    webSearchMode,
+    json
+  };
 }
 
 function extractModeArg(

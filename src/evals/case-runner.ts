@@ -64,7 +64,8 @@ export async function runEvalCase(input: {
       cwd: workspacePath,
       revealExportsInFinder: false,
       webSearchMode: runtime.webSearchMode === 'fixed' ? undefined : runtime.webSearchMode,
-      agentMode: runtime.mode
+      agentMode: runtime.mode,
+      forceStudyCompactionOnce: runtime.forceUnresolvedCompactionOnce
     });
     try {
       const sessionId = engine.snapshot.session.id;

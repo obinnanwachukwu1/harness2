@@ -732,6 +732,11 @@ test('HeadlessEngine compact persists harness checkpoint with git state and acti
     lowSignalWarningEmitted: false,
     promote: false
   });
+  notebook.appendObservation(
+    'exp-running',
+    'Observed one in-flight claim still completing after stop request.',
+    ['discovery']
+  );
   notebook.upsertExperiment({
     id: 'exp-budget-exhausted',
     sessionId: engine.snapshot.session.id,
@@ -822,6 +827,9 @@ test('HeadlessEngine compact persists harness checkpoint with git state and acti
   assert.match(checkpoint?.checkpointBlock ?? '', /active_experiments:/);
   assert.match(checkpoint?.checkpointBlock ?? '', /invalidated_experiments:/);
   assert.match(checkpoint?.checkpointBlock ?? '', /open_questions:/);
+  assert.match(checkpoint?.checkpointBlock ?? '', /why_it_matters: Being wrong would change the next implementation step\./);
+  assert.match(checkpoint?.checkpointBlock ?? '', /affected_paths: src\/engine/);
+  assert.match(checkpoint?.checkpointBlock ?? '', /last_observation: Observed one in-flight claim still completing after stop request\./);
   assert.match(checkpoint?.checkpointBlock ?? '', /current_commitments: runs remain historical snapshots/);
   assert.match(
     checkpoint?.checkpointBlock ?? '',

@@ -66,13 +66,15 @@ interface OpenEngineOptions {
   revealExportsInFinder?: boolean;
   webSearchMode?: 'disabled' | 'cached' | 'live';
   agentMode?: AgentMode;
+  forceStudyCompactionOnce?: boolean;
 }
 
 const DEFAULT_EXPERIMENT_MODEL = process.env.H2_EXPERIMENT_MODEL ?? 'gpt-5.4-mini';
 const DEFAULT_EXPERIMENT_REASONING_EFFORT =
   (process.env.H2_EXPERIMENT_REASONING_EFFORT as 'low' | 'medium' | 'high' | 'off' | undefined) ??
   'high';
-const DEFAULT_COMMAND_SHELL = process.env.H2_COMMAND_SHELL ?? process.env.SHELL ?? 'zsh';
+const DEFAULT_COMMAND_SHELL =
+  process.env.H2_COMMAND_SHELL ?? process.env.SHELL ?? (process.platform === 'darwin' ? 'zsh' : 'bash');
 const DEFAULT_EXEC_YIELD_MS = 1_000;
 const DEFAULT_EXEC_MAX_OUTPUT_CHARS = 12_000;
 const MAX_EXEC_PENDING_OUTPUT_CHARS = 200_000;
@@ -143,6 +145,7 @@ export class HeadlessEngine {
       experimentStateDir,
       revealExportsInFinder: options.revealExportsInFinder ?? true,
       webSearchMode: options.webSearchMode,
+      forceStudyCompactionOnce: options.forceStudyCompactionOnce ?? false,
       notebook,
       authNotebook,
       runner: new PrototypeRunner()
@@ -181,6 +184,7 @@ export class HeadlessEngine {
       experimentStateDir: string;
       revealExportsInFinder: boolean;
       webSearchMode?: 'disabled' | 'cached' | 'live';
+      forceStudyCompactionOnce: boolean;
       notebook: Notebook;
       authNotebook: Notebook;
       runner: AgentRunner;
@@ -520,7 +524,9 @@ export class HeadlessEngine {
                 modeConfig.instructions,
                 onToolStart,
                 onToolFinish,
-                () => this.buildHiddenCompactionStateSnapshot(settings)
+                settings.agentMode !== 'study',
+                () => this.buildHiddenCompactionStateSnapshot(settings),
+                this.options.forceStudyCompactionOnce
               );
             } else {
               await this.model.runTurn(
@@ -536,7 +542,9 @@ export class HeadlessEngine {
                 modeConfig.instructions,
                 onToolStart,
                 onToolFinish,
-                () => this.buildHiddenCompactionStateSnapshot(settings)
+                settings.agentMode !== 'study',
+                () => this.buildHiddenCompactionStateSnapshot(settings),
+                this.options.forceStudyCompactionOnce
               );
             }
           }
@@ -635,7 +643,37 @@ export class HeadlessEngine {
       approvedPlan: this.options.notebook.getSessionPlan(this.options.sessionId),
       todos: this.options.notebook.listSessionTodos(this.options.sessionId),
       lastTestStatus: this.lastTestStatus,
-      activeProcessSummary
+      activeProcessSummary,
+      experimentState: null
+    };
+  }
+
+  private async buildExperimentCompactionStateSnapshot(
+    experiment: ExperimentRecord
+  ): Promise<HiddenCompactionStateSnapshot> {
+    const activeProcessSummary = [...this.execSessions.values()]
+      .filter((session) => session.running && session.root === experiment.worktreePath)
+      .map((session) => {
+        const command = clampText(session.command, 120);
+        const cwd = relativeToWorkspace(session.root, session.cwd);
+        return `${command} | cwd ${cwd} | process ${session.id}`;
+      });
+
+    return {
+      mode: 'experiment',
+      planModePhase: null,
+      approvedPlan: null,
+      todos: [],
+      lastTestStatus: null,
+      activeProcessSummary,
+      experimentState: {
+        id: experiment.id,
+        hypothesis: experiment.hypothesis,
+        budget: experiment.budget,
+        tokensUsed: experiment.tokensUsed,
+        worktreePath: experiment.worktreePath,
+        branchName: experiment.branchName
+      }
     };
   }
 
@@ -1862,7 +1900,11 @@ export class HeadlessEngine {
       false,
       undefined,
       EXPERIMENT_TOOL_DEFINITIONS,
-      EXPERIMENT_SUBAGENT_PROMPT
+      EXPERIMENT_SUBAGENT_PROMPT,
+      undefined,
+      undefined,
+      true,
+      () => this.buildExperimentCompactionStateSnapshot(experiment)
     );
   }
 
@@ -2245,6 +2287,24 @@ export class HeadlessEngine {
         return leftRank - rightRank || left.experimentId.localeCompare(right.experimentId);
       });
     const openStudyDebts = this.options.notebook.listOpenStudyDebts(this.options.sessionId);
+    const checkpointStudyDebts = openStudyDebts.map((debt) => ({
+      id: debt.id,
+      kind: debt.kind,
+      summary: debt.summary,
+      whyItMatters: debt.whyItMatters,
+      affectedPaths: debt.affectedPaths ?? [],
+      evidencePaths: debt.evidencePaths ?? []
+    }));
+    const activeExperimentDetails = activeExperimentSummaries.map((summary) => {
+      const details = this.options.notebook.getExperimentDetails(summary.experimentId);
+      const lastObservation = details?.observations.at(-1)?.message ?? null;
+      return {
+        experimentId: summary.experimentId,
+        status: summary.status,
+        hypothesis: summary.hypothesis,
+        lastObservation
+      };
+    });
     const invalidatedExperimentSummaries = Array.from(
       new Map(
         openStudyDebts
@@ -2276,7 +2336,8 @@ export class HeadlessEngine {
       lastTestStatus: this.lastTestStatus,
       activeExperimentSummaries,
       invalidatedExperimentSummaries,
-      openStudyDebts
+      openStudyDebts: checkpointStudyDebts,
+      activeExperimentDetails
     });
 
     const checkpoint = this.options.notebook.createSessionCheckpoint({
@@ -2349,13 +2410,24 @@ export class HeadlessEngine {
       id: string;
       kind: string;
       summary: string;
+      whyItMatters: string;
+      affectedPaths: string[];
+      evidencePaths: string[];
+    }>;
+    activeExperimentDetails: Array<{
+      experimentId: string;
+      status: string;
+      hypothesis: string;
+      lastObservation: string | null;
     }>;
   }): string {
     const experimentLines =
-      input.activeExperimentSummaries.length > 0
-        ? input.activeExperimentSummaries.map(
-            (experiment) =>
-              `- ${experiment.experimentId} | ${experiment.status} | ${experiment.hypothesis}`
+      input.activeExperimentDetails.length > 0
+        ? input.activeExperimentDetails.map((experiment) =>
+            [
+              `- ${experiment.experimentId} | ${experiment.status} | ${experiment.hypothesis}`,
+              `  last_observation: ${experiment.lastObservation ?? 'none'}`
+            ].join('\n')
           )
         : ['- none'];
     const invalidatedExperimentLines =
@@ -2367,7 +2439,14 @@ export class HeadlessEngine {
         : ['- none'];
     const studyDebtLines =
       input.openStudyDebts.length > 0
-        ? input.openStudyDebts.map((debt) => `- ${debt.id} | ${debt.kind} | ${debt.summary}`)
+        ? input.openStudyDebts.map((debt) =>
+            [
+              `- ${debt.id} | ${debt.kind} | ${debt.summary}`,
+              `  why_it_matters: ${debt.whyItMatters}`,
+              `  affected_paths: ${debt.affectedPaths.join(', ') || 'none'}`,
+              `  evidence_paths: ${debt.evidencePaths.join(', ') || 'none'}`
+            ].join('\n')
+          )
         : ['- none'];
 
     return [

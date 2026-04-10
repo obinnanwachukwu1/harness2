@@ -18,6 +18,7 @@ export interface EvalRuntimeConfig {
   thinking: boolean;
   webSearchMode: EvalWebSearchMode;
   contextWindowTokens?: number;
+  forceUnresolvedCompactionOnce?: boolean;
   parallelism?: number;
   repeatCount?: number;
   defaultExperimentBudget?: number;

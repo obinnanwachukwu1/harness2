@@ -1,0 +1,108 @@
+[suite]
+id = "comparison-stage-hc1"
+description = "Targeted unresolved-state compaction proof. HC1 is a single heavy study-oriented case designed to force compaction while one question remains open and one experiment remains active."
+
+[runtime]
+reasoning_effort = "medium"
+thinking = false
+web_search_mode = "live"
+context_window_tokens = 75000
+force_unresolved_compaction_once = true
+parallelism = 1
+repeat_count = 1
+
+[clarification]
+auto_reply = "Make the best grounded minimal choice and proceed. Keep the contract explicit."
+mark_as_unnecessary = true
+
+[[fixtures]]
+id = "vercel-chatbot"
+type = "git_checkout"
+path = "https://github.com/vercel/chatbot"
+ref = "146b3cb8cf2ffbb5b985819f06f6b8357bd464e7"
+setup_command = "corepack pnpm install --frozen-lockfile"
+
+[[cases]]
+id = "HC1"
+bucket = "C"
+fixture = "vercel-chatbot"
+profile = "targeted unresolved-state compaction existing product"
+notes = "Designed to force compaction while one question and one linked experiment are still live."
+question_expected = true
+experiment_expected = "yes"
+web_search_expected = "optional"
+prompt = """
+In this vercel/chatbot repo, turn the app into a small single-user conversation lab with these properties:
+- each conversation snapshots the settings that materially affect generation
+- users can branch from any earlier message
+- unsent drafts survive refresh/restart
+- live streaming stays minimal and locally runnable
+- history should feel clear and safe when settings change later
+
+At minimum, treat these settings as candidates for snapshotting if they affect behavior: model, system prompt, and any retrieval/tool toggle that changes what the assistant can do.
+
+This is a compaction stress benchmark. Do not collapse all uncertainty into one umbrella question.
+Keep at least one implementation-changing question explicitly open until later followups resolve it, and if you need a bounded study for one live runtime claim, keep that experiment active until you have enough later evidence to close it.
+
+Before you lock in the runtime-sensitive parts, verify:
+1. the actual stream stop/continue contract in this stack
+2. whether unfinished partial assistant output should be resumable, retryable, or branch-only
+3. whether existing conversations should remain historical snapshots when current settings change
+4. how draft restore should behave when the user has branched or changed settings since the draft was last edited
+
+Use bounded studies for residual uncertainty. Prefer separate questions when the risks are orthogonal.
+"""
+
+[[cases.followups]]
+after_turn = 1
+prompt = """
+Follow-up 1: add a compare two branches view that shows message-level differences and clearly labels snapshot differences, for example different model/system prompt state.
+
+If your continue-generation semantics are still uncertain, keep that question open; do not silently finalize it just to move on.
+"""
+
+[[cases.followups]]
+after_turn = 2
+prompt = """
+Follow-up 2: add continue generation for a partial assistant message, but only if it is consistent with the snapshot/branch contract you are still verifying.
+
+If you are still running a bounded study on interruption/continue semantics, keep it live and use this follow-up as additional evidence instead of closing it prematurely.
+"""
+
+[[cases.followups]]
+after_turn = 3
+prompt = """
+Follow-up 3: old conversations must remain immutable historical snapshots. Only new conversations use current settings by default.
+
+Implement the minimum persistence/UI changes needed for this without losing whatever live question or experiment still governs continue-generation behavior.
+"""
+
+[[cases.followups]]
+after_turn = 4
+prompt = """
+Follow-up 4: add shareable read-only permalinks for a branch snapshot. Editing from a shared snapshot should create a new branch, not mutate shared history.
+"""
+
+[[cases.followups]]
+after_turn = 5
+prompt = """
+Follow-up 5: make drafts branch-scoped, not chat-scoped. Restoring a draft after branch switching should never attach it to the wrong branch, even if settings changed since the draft was written.
+"""
+
+[[cases.followups]]
+after_turn = 6
+prompt = """
+Follow-up 6: a network interruption during generation should expose a retry affordance that preserves the earlier branch/snapshot rules and must not duplicate already-finished assistant text.
+
+If this finally settles the continue-generation question or its linked study, close it explicitly and use that answer consistently.
+"""
+
+[[cases.followups]]
+after_turn = 7
+prompt = """
+Follow-up 7: finish by adding targeted regression coverage plus a compact admin/debug view that answers:
+- why this branch uses these settings
+- where it forked from
+- whether a partial response was continued in place, retried safely, or branched
+- whether any historical snapshot is read-only and why
+"""

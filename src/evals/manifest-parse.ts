@@ -22,6 +22,7 @@ const runtimeSchema = z.object({
   thinking: z.boolean().optional().default(false),
   web_search_mode: z.enum(['disabled', 'cached', 'live', 'fixed']).optional().default('fixed'),
   context_window_tokens: z.number().int().positive().optional(),
+  force_unresolved_compaction_once: z.boolean().optional(),
   max_steps: z.number().int().positive().optional(),
   parallelism: z.number().int().positive().optional(),
   repeat_count: z.number().int().positive().optional(),
@@ -113,6 +114,7 @@ export async function parseEvalManifest(manifestPath: string): Promise<ParsedEva
     thinking: parsed.runtime.thinking,
     webSearchMode: parsed.runtime.web_search_mode,
     contextWindowTokens: parsed.runtime.context_window_tokens,
+    forceUnresolvedCompactionOnce: parsed.runtime.force_unresolved_compaction_once,
     parallelism: parsed.runtime.parallelism,
     repeatCount: parsed.runtime.repeat_count,
     defaultExperimentBudget: parsed.runtime.default_experiment_budget
@@ -195,6 +197,7 @@ function normalizeRuntimeOverride(
     thinking: input.thinking,
     webSearchMode: input.web_search_mode,
     contextWindowTokens: input.context_window_tokens,
+    forceUnresolvedCompactionOnce: input.force_unresolved_compaction_once,
     parallelism: input.parallelism,
     repeatCount: input.repeat_count,
     defaultExperimentBudget: input.default_experiment_budget

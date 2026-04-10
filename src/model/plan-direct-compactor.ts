@@ -34,6 +34,7 @@ Rules:
 - If a detail already exists in structured state (approved plan, todo list, git status, last test status, artifact paths), do not restate it unless it materially changes interpretation.
 - For direct mode, do not rewrite the work into a formal plan.
 - For plan mode, preserve the currently approved plan and its execution status, but do not expand or improve it.
+- For experiment mode, preserve the bounded hypothesis, useful findings, and next step, but do not broaden the experiment scope.
 - When uncertain whether a detail still matters, omit it.
 - Output valid JSON only, matching the schema exactly.`;
 
@@ -43,7 +44,7 @@ const PLAN_DIRECT_COMPACTOR_SCHEMA = {
     type: 'object',
     additionalProperties: false,
     properties: {
-      mode: { type: 'string', enum: ['plan', 'direct'] },
+      mode: { type: 'string', enum: ['plan', 'direct', 'experiment'] },
       task: {
         type: 'object',
         additionalProperties: false,
@@ -151,7 +152,7 @@ const PLAN_DIRECT_COMPACTOR_SCHEMA = {
 } as const;
 
 export interface PlanDirectCompactorInput {
-  mode: 'plan' | 'direct';
+  mode: 'plan' | 'direct' | 'experiment';
   previousCheckpoint: PlanDirectCompactionSummary | null;
   structuredState: HiddenCompactionStateSnapshot;
   transcriptMiddle: ModelHistoryItem[];
@@ -217,6 +218,7 @@ export async function runPlanDirectCompactor(
               todos: summarizeTodos(input.input.structuredState.todos),
               last_test_status: input.input.structuredState.lastTestStatus,
               active_process_summary: input.input.structuredState.activeProcessSummary,
+              experiment_state: input.input.structuredState.experimentState,
               git_log: input.input.gitLog,
               git_status: input.input.gitStatus,
               git_diff_stat: input.input.gitDiffStat,
@@ -325,6 +327,16 @@ export function renderPlanDirectCheckpointBlock(input: {
     input.structuredState.activeProcessSummary.length > 0
       ? input.structuredState.activeProcessSummary.map((line) => `- ${line}`)
       : ['- none'];
+  const experimentLines =
+    input.structuredState.experimentState !== null
+      ? [
+          `id: ${input.structuredState.experimentState.id}`,
+          `hypothesis: ${input.structuredState.experimentState.hypothesis}`,
+          `budget: ${input.structuredState.experimentState.tokensUsed}/${input.structuredState.experimentState.budget}`,
+          `worktree_path: ${input.structuredState.experimentState.worktreePath}`,
+          `branch_name: ${input.structuredState.experimentState.branchName}`
+        ]
+      : ['none'];
   const artifactLines = input.compactionArtifacts.pointers.map(
     (pointer) => `- ${pointer.path} | ${pointer.why}`
   );
@@ -348,6 +360,9 @@ export function renderPlanDirectCheckpointBlock(input: {
     '',
     'active_processes:',
     ...activeProcessLines,
+    '',
+    'experiment_state:',
+    ...experimentLines,
     '',
     'recent_commits:',
     input.gitLog,
@@ -426,7 +441,7 @@ function isPlanDirectCompactionSummary(value: unknown): value is PlanDirectCompa
 
   const summary = value as PlanDirectCompactionSummary;
   return (
-    (summary.mode === 'plan' || summary.mode === 'direct') &&
+    (summary.mode === 'plan' || summary.mode === 'direct' || summary.mode === 'experiment') &&
     Boolean(summary.task && typeof summary.task.goal === 'string') &&
     Array.isArray(summary.task.constraints) &&
     Array.isArray(summary.task.non_goals) &&

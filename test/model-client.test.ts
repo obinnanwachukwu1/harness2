@@ -12,9 +12,14 @@ import {
 import {
   ModelClient,
   DIRECT_TOOL_DEFINITIONS,
-  EXPERIMENT_TOOL_DEFINITIONS
+  EXPERIMENT_TOOL_DEFINITIONS,
+  STUDY_TOOL_DEFINITIONS
 } from '../src/model/model-client.js';
-import { DIRECT_AGENT_PROMPT } from '../src/model/model-prompt.js';
+import {
+  DIRECT_AGENT_PROMPT,
+  EXPERIMENT_SUBAGENT_PROMPT,
+  STUDY_AGENT_PROMPT
+} from '../src/model/model-prompt.js';
 import { Notebook } from '../src/storage/notebook.js';
 import type { AgentTools, TranscriptRole } from '../src/types.js';
 import { cleanupDir, createTempDir, createUnsignedJwt } from '../test-support/helpers.js';
@@ -448,7 +453,10 @@ test('ModelClient auto-compacts direct mode with a hidden checkpoint before the 
     false,
     undefined,
     DIRECT_TOOL_DEFINITIONS,
-    DIRECT_AGENT_PROMPT
+    DIRECT_AGENT_PROMPT,
+    undefined,
+    undefined,
+    true
   );
 
   assert.equal(requests.length, 2);
@@ -466,6 +474,198 @@ test('ModelClient auto-compacts direct mode with a hidden checkpoint before the 
     )
   );
   assert.equal(emitted.at(-1)?.text, 'Done after hidden compaction.');
+});
+
+test('ModelClient auto-compacts experiment subagents against the model context window', async (t) => {
+  const priorContextWindow = process.env.H2_CONTEXT_WINDOW_TOKENS;
+  process.env.H2_CONTEXT_WINDOW_TOKENS = '12000';
+  t.after(() => {
+    if (priorContextWindow === undefined) {
+      delete process.env.H2_CONTEXT_WINDOW_TOKENS;
+    } else {
+      process.env.H2_CONTEXT_WINDOW_TOKENS = priorContextWindow;
+    }
+  });
+
+  const tempDir = await createTempDir('h2-model-hidden-experiment-compact-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('experiment-session', tempDir);
+  notebook.appendModelHistoryItem('experiment-session', {
+    type: 'message',
+    role: 'user',
+    content: 'run a bounded experiment '.repeat(1800)
+  });
+  notebook.appendModelHistoryItem('experiment-session', {
+    type: 'message',
+    role: 'assistant',
+    content: 'experiment observations '.repeat(650)
+  });
+
+  const now = 1_700_000_000_000;
+  notebook.upsertOpenAICodexAuth({
+    provider: 'openai-codex',
+    type: 'oauth',
+    accessToken: createUnsignedJwt({
+      exp: Math.floor((now + 3600_000) / 1000)
+    }),
+    refreshToken: 'refresh-token',
+    idToken: createUnsignedJwt({
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: 'acct_123'
+      }
+    }),
+    accountId: 'acct_123',
+    expiresAt: now + 3600_000,
+    createdAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString()
+  });
+
+  const requests: Array<{ body: Record<string, unknown> }> = [];
+  const auth = new OpenAICodexAuth(notebook, { now: () => now });
+  const client = new ModelClient(notebook, auth, {
+    fetchImpl: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      requests.push({ body });
+
+      if (body.model === 'gpt-5.4-mini') {
+        const summary = {
+          mode: 'experiment',
+          task: {
+            goal: 'Validate the bounded experiment after hidden compaction.',
+            constraints: ['stay inside the experiment worktree', 'do not broaden scope'],
+            non_goals: ['do not implement the main-task feature']
+          },
+          state: {
+            status: 'in_progress',
+            completed: ['Re-read the scoped experiment context and prior observations.'],
+            current_focus: 'Finish validating the current hypothesis.',
+            next: ['Run one final targeted validation.', 'Resolve the experiment once evidence is sufficient.'],
+            blockers: []
+          },
+          durable_decisions: [
+            {
+              decision: 'Keep the work bounded to the isolated experiment.',
+              why: 'The experiment remains a scoped validation task.'
+            }
+          ],
+          implementation_context: {
+            changed_files: [],
+            relevant_paths: ['.h2/worktrees/exp-1'],
+            artifacts: []
+          },
+          validation: {
+            last_test_status: null,
+            passed_checks: [],
+            open_failures: []
+          },
+          plan_mode_state: null,
+          resume_hints: ['Continue the bounded experiment from the hidden checkpoint.']
+        };
+
+        return createResponsesStream([
+          responseCreated('resp_exp_compact', 'gpt-5.4-mini'),
+          {
+            type: 'response.output_text.delta',
+            item_id: 'msg_exp_compact',
+            delta: JSON.stringify(summary)
+          },
+          responseCompleted('resp_exp_compact', 'gpt-5.4-mini')
+        ]);
+      }
+
+      return createResponsesStream([
+        responseCreated('resp_exp_final'),
+        {
+          type: 'response.output_text.delta',
+          item_id: 'msg_exp_final',
+          delta: 'Experiment continued after hidden compaction.'
+        },
+        responseCompleted('resp_exp_final')
+      ]);
+    }
+  });
+
+  const tools: AgentTools = {
+    execCommand: async () => '',
+    writeStdin: async () => '',
+    read: async () => '',
+    write: async () => '',
+    edit: async () => '',
+    glob: async () => [],
+    grep: async () => '',
+    spawnExperiment: async () => {
+      throw new Error('not used');
+    },
+    readExperiment: async () => {
+      throw new Error('not used');
+    },
+    logObservation: async () => '',
+    resolveExperiment: async () => ({} as any),
+    authLogin: async () => '',
+    authStatus: async () => '',
+    authLogout: async () => '',
+    getModelSettings: async () => '',
+    setModel: async () => '',
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
+  };
+
+  const emitted: Array<{ role: TranscriptRole; text: string }> = [];
+  await client.runTurn(
+    'experiment-session',
+    'Continue the bounded experiment',
+    tools,
+    async (role, text) => {
+      emitted.push({ role, text });
+    },
+    undefined,
+    undefined,
+    false,
+    undefined,
+    EXPERIMENT_TOOL_DEFINITIONS,
+    EXPERIMENT_SUBAGENT_PROMPT,
+    undefined,
+    undefined,
+    true,
+    async () => ({
+      mode: 'experiment',
+      planModePhase: null,
+      approvedPlan: null,
+      todos: [],
+      lastTestStatus: null,
+      activeProcessSummary: [],
+      experimentState: {
+        id: 'exp-1',
+        hypothesis: 'sqlite claim remains safe under contention',
+        budget: 25,
+        tokensUsed: 3,
+        worktreePath: path.join(tempDir, '.h2', 'worktrees', 'exp-1'),
+        branchName: 'h2-exp-1'
+      }
+    })
+  );
+
+  assert.equal(requests.length, 2);
+  assert.equal(requests[0]?.body.model, 'gpt-5.4-mini');
+  assert.equal(requests[1]?.body.model, 'gpt-5.4');
+  assert.equal(
+    notebook.getLatestSessionCheckpoint('experiment-session')?.checkpointKind,
+    'experiment_subagent'
+  );
+  assert.equal(
+    notebook.getLatestSessionCheckpoint('experiment-session')?.checkpointSummary?.mode,
+    'experiment'
+  );
+  assert.ok(
+    (notebook.getLatestSessionCheckpoint('experiment-session')?.checkpointSummary?.task.goal ?? '').includes(
+      'bounded experiment'
+    )
+  );
+  assert.equal(emitted.at(-1)?.text, 'Experiment continued after hidden compaction.');
 });
 
 test('ModelClient sends the built-in web_search tool when enabled', async (t) => {
@@ -2123,6 +2323,177 @@ test('ModelClient exposes only compact when the reserve buffer is exhausted', as
   );
   assert.equal(emitted[0]?.role, 'tool');
   assert.match(emitted[1]?.text ?? '', /Compacted/);
+});
+
+test('ModelClient can force one study compaction while unresolved state is live without hidden study compaction', async (t) => {
+  const tempDir = await createTempDir('h2-model-study-force-compact-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-test', tempDir);
+  const debt = notebook.openStudyDebt({
+    sessionId: 'session-test',
+    summary: 'continue-generation semantics remain unresolved',
+    whyItMatters: 'This changes whether partial output can resume in place.',
+    kind: 'runtime',
+    affectedPaths: ['app/api/chat'],
+    evidencePaths: ['app/api/chat']
+  });
+  notebook.upsertExperiment({
+    id: 'exp-running',
+    sessionId: 'session-test',
+    studyDebtId: debt.id,
+    hypothesis: 'This stack cannot resume an interrupted partial assistant message in place.',
+    command: 'subagent',
+    context: '',
+    baseCommitSha: 'abc123',
+    branchName: 'h2-exp-running',
+    worktreePath: path.join(tempDir, '.h2', 'worktrees', 'exp-running'),
+    status: 'running',
+    budget: 5000,
+    tokensUsed: 25,
+    contextTokensUsed: 10,
+    toolOutputTokensUsed: 10,
+    observationTokensUsed: 5,
+    preserve: true,
+    createdAt: new Date(1_700_000_000_000).toISOString(),
+    updatedAt: new Date(1_700_000_000_000).toISOString(),
+    resolvedAt: null,
+    finalVerdict: null,
+    finalSummary: null,
+    discovered: [],
+    artifacts: [],
+    constraints: [],
+    confidenceNote: null,
+    lowSignalWarningEmitted: false,
+    promote: false
+  });
+
+  const now = 1_700_000_000_000;
+  notebook.upsertOpenAICodexAuth({
+    provider: 'openai-codex',
+    type: 'oauth',
+    accessToken: createUnsignedJwt({
+      exp: Math.floor((now + 3600_000) / 1000)
+    }),
+    refreshToken: 'refresh-token',
+    idToken: createUnsignedJwt({
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: 'acct_123'
+      }
+    }),
+    accountId: 'acct_123',
+    expiresAt: now + 3600_000,
+    createdAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString()
+  });
+
+  const requests: Array<Record<string, unknown>> = [];
+  let responseCount = 0;
+  const auth = new OpenAICodexAuth(notebook, { now: () => now });
+  const client = new ModelClient(notebook, auth, {
+    fetchImpl: async (_input, init) => {
+      const body = JSON.parse(String(init?.body)) as Record<string, unknown>;
+      requests.push(body);
+      responseCount += 1;
+
+      if (responseCount === 1) {
+        return createResponsesStream([
+          responseCreated('resp_1'),
+          functionCallDone('call_1', 'compact', {
+            goal: 'preserve unresolved-state continuity',
+            completed: 'captured the current unresolved work',
+            next: 'resume from the checkpoint with the same open question and experiment',
+            currentCommitments: 'keep historical snapshots immutable'
+          }),
+          responseCompleted('resp_1')
+        ]);
+      }
+
+      return createResponsesStream([
+        responseCreated('resp_2'),
+        { type: 'response.output_text.delta', item_id: 'msg_2', delta: 'Checkpointed unresolved state.' },
+        responseCompleted('resp_2')
+      ]);
+    }
+  });
+
+  let compactCalls = 0;
+  const emitted: Array<{ role: TranscriptRole; text: string }> = [];
+  const tools: AgentTools = {
+    execCommand: async () => {
+      throw new Error('exec_command should not be available during forced study compaction.');
+    },
+    writeStdin: async () => '',
+    read: async () => '',
+    write: async () => '',
+    edit: async () => '',
+    glob: async () => [],
+    grep: async () => '',
+    spawnExperiment: async () => {
+      throw new Error('not used');
+    },
+    readExperiment: async () => {
+      throw new Error('not used');
+    },
+    compact: async () => {
+      compactCalls += 1;
+      return { ok: true, checkpointId: 1 };
+    },
+    authLogin: async () => '',
+    authStatus: async () => '',
+    authLogout: async () => '',
+    getModelSettings: async () => '',
+    setModel: async () => '',
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
+  };
+
+  await client.runTurn(
+    'session-test',
+    'keep going',
+    tools,
+    async (role, text) => {
+      emitted.push({ role, text });
+    },
+    undefined,
+    undefined,
+    false,
+    undefined,
+    STUDY_TOOL_DEFINITIONS,
+    STUDY_AGENT_PROMPT,
+    undefined,
+    undefined,
+    false,
+    async () => ({
+      mode: 'direct',
+      planModePhase: null,
+      approvedPlan: null,
+      todos: [],
+      lastTestStatus: null,
+      activeProcessSummary: [],
+      experimentState: null
+    }),
+    true
+  );
+
+  assert.equal(compactCalls, 1);
+  assert.equal(requests.length, 2);
+  assert.deepEqual(
+    requests.map((request) => request.model),
+    ['gpt-5.4', 'gpt-5.4']
+  );
+  assert.equal(JSON.stringify(requests[0]).includes('"name":"compact"'), true);
+  assert.equal(JSON.stringify(requests[0]).includes('"name":"read"'), false);
+  assert.match(
+    JSON.stringify(requests[0].input),
+    /A checkpoint is required now to test unresolved-state continuity\./
+  );
+  assert.equal(notebook.getLatestSessionCheckpoint('session-test'), null);
+  assert.equal(emitted[0]?.role, 'tool');
+  assert.match(emitted[1]?.text ?? '', /Checkpointed unresolved state/);
 });
 
 test('ModelClient spills oversized tool outputs to disk before replaying them', async (t) => {

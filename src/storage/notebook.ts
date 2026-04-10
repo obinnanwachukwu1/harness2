@@ -168,7 +168,7 @@ interface SessionCheckpointRow {
   id: number;
   session_id: string;
   created_at: string;
-  checkpoint_kind: 'study' | 'plan_direct';
+  checkpoint_kind: 'study' | 'plan_direct' | 'experiment_subagent';
   goal: string;
   completed: string;
   next: string;
@@ -1505,7 +1505,7 @@ export class Notebook {
 
   createSessionCheckpoint(input: {
     sessionId: string;
-    checkpointKind?: 'study' | 'plan_direct';
+    checkpointKind?: 'study' | 'plan_direct' | 'experiment_subagent';
     goal: string;
     completed: string;
     next: string;

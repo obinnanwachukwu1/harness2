@@ -83,3 +83,43 @@ prompt = "/read README.md"
   const parsed = await parseEvalManifest(manifestPath);
   assert.equal(parsed.manifest.runtime.contextWindowTokens, 75000);
 });
+
+test('parseEvalManifest reads force_unresolved_compaction_once for diagnostic study runs', async (t) => {
+  const tempDir = await createTempDir('h2-eval-runtime-force-compact-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const fixtureDir = path.join(tempDir, 'fixtures', 'tiny-app');
+  await mkdir(fixtureDir, { recursive: true });
+  await writeFile(path.join(fixtureDir, 'README.md'), '# fixture\n', 'utf8');
+  const manifestPath = path.join(tempDir, 'suite.toml');
+  await writeFile(
+    manifestPath,
+    `
+[suite]
+id = "hc1"
+
+[runtime]
+reasoning_effort = "medium"
+thinking = false
+web_search_mode = "fixed"
+context_window_tokens = 75000
+force_unresolved_compaction_once = true
+
+[[fixtures]]
+id = "tiny-app"
+type = "template"
+path = "./fixtures/tiny-app"
+
+[[cases]]
+id = "HC1"
+bucket = "C"
+fixture = "tiny-app"
+profile = "diagnostic"
+prompt = "/read README.md"
+`,
+    'utf8'
+  );
+
+  const parsed = await parseEvalManifest(manifestPath);
+  assert.equal(parsed.manifest.runtime.forceUnresolvedCompactionOnce, true);
+});

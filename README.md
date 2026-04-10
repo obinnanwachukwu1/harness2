@@ -82,6 +82,7 @@ npm run dev -- opentui
 npm run dev -- opentui <sessionId>
 npm run dev -- eval run evals/wide-suite.toml --case A1
 npm run dev -- eval score ~/.h2/evals/<run-id>
+npm run dev -- harbor-run --output-dir /tmp/harbor-agent --instruction-file /tmp/instruction.md --json
 ```
 
 Inside the terminal UI, use slash commands:
@@ -157,6 +158,21 @@ H2_DEBUG_RESPONSES=1 npm run dev -- -p "inspect the repo"
 
 This writes JSONL debug records to `.h2/debug/responses.jsonl`. Override the path with `H2_DEBUG_RESPONSES_FILE=/absolute/path.jsonl` if needed.
 
+## Harbor
+
+For Harbor/Terminal-Bench integration, use the single-session Harbor entrypoint instead of `h2 eval run`:
+
+```bash
+npm run dev -- harbor-run \
+  --output-dir /tmp/harbor-agent \
+  --instruction-file /tmp/instruction.md \
+  --json
+```
+
+This exports Harbor-friendly artifacts including `trajectory.json`, `session.md`, `transcript.json`, `model-history.json`, and `summary.json`.
+
+Use [docs/harbor/README.md](docs/harbor/README.md) for the wrapper contract and the sample Harbor custom installed-agent.
+
 ## Eval Suites
 
 Public-safe eval manifests live under `public-evals/`.
@@ -187,6 +203,7 @@ src/
   commands/doctor.ts
   engine/
   experiments/
+  integrations/
   storage/
   ui-opentui/
 packages/

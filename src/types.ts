@@ -77,16 +77,26 @@ export interface CompactionArtifactPointer {
 }
 
 export interface HiddenCompactionStateSnapshot {
-  mode: 'plan' | 'direct';
+  mode: 'plan' | 'direct' | 'experiment';
   planModePhase: PlanModePhase;
   approvedPlan: SessionPlanRecord | null;
   todos: TodoItem[];
   lastTestStatus: string | null;
   activeProcessSummary: string[];
+  experimentState:
+    | null
+    | {
+        id: string;
+        hypothesis: string;
+        budget: number;
+        tokensUsed: number;
+        worktreePath: string;
+        branchName: string;
+      };
 }
 
 export interface PlanDirectCompactionSummary {
-  mode: 'plan' | 'direct';
+  mode: 'plan' | 'direct' | 'experiment';
   task: {
     goal: string;
     constraints: string[];
@@ -381,7 +391,7 @@ export interface SessionCheckpointRecord {
   id: number;
   sessionId: string;
   createdAt: string;
-  checkpointKind: 'study' | 'plan_direct';
+  checkpointKind: 'study' | 'plan_direct' | 'experiment_subagent';
   goal: string;
   completed: string;
   next: string;
