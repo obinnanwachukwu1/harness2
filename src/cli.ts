@@ -58,7 +58,8 @@ async function main(): Promise<void> {
   if (printRequest) {
     assertSupportedNodeRuntime();
     await assertInsideGitRepository(process.cwd());
-    await runPrintMode(printRequest.prompt, printRequest.sessionId, printRequest.thinking, mode);
+    const resolvedSessionId = await resolveResumeAlias(process.cwd(), printRequest.sessionId);
+    await runPrintMode(printRequest.prompt, resolvedSessionId, printRequest.thinking, mode);
     return;
   }
 
@@ -103,7 +104,7 @@ async function main(): Promise<void> {
     return;
   }
 
-  const sessionId = command === 'resume' ? args[1] : undefined;
+  const sessionId = command === 'resume' ? await resolveResumeAlias(process.cwd(), args[1]) : undefined;
   if (command === 'resume' && !sessionId) {
     await assertInsideGitRepository(process.cwd());
     await printRecentSessions(process.cwd());
@@ -926,6 +927,25 @@ async function assertKnownSession(cwd: string, sessionId?: string): Promise<void
   }
 }
 
+async function resolveResumeAlias(cwd: string, sessionId?: string): Promise<string | undefined> {
+  if (sessionId !== 'last') {
+    return sessionId;
+  }
+
+  const { Notebook } = await import('./storage/notebook.js');
+  const notebook = new Notebook(getRepoNotebookPath(cwd));
+  try {
+    const latest = notebook.listRecentSessions(1)[0];
+    if (latest) {
+      return latest.id;
+    }
+  } finally {
+    notebook.close();
+  }
+
+  throw new Error('No saved sessions in this repo yet, so `h2 resume last` has nothing to resume.');
+}
+
 async function printRecentSessions(cwd: string): Promise<void> {
   const { Notebook } = await import('./storage/notebook.js');
   const notebook = new Notebook(getRepoNotebookPath(cwd));
@@ -952,9 +972,23 @@ function formatSessionList(sessions: SessionRecord[]): string {
   return sessions
     .map(
       (session) =>
-        `${session.id}  last active ${session.lastActiveAt}  started ${session.startedAt}`
+        `${session.id}  last active ${formatResumeTimestamp(session.lastActiveAt)}  started ${formatResumeTimestamp(session.startedAt)}`
     )
     .join('\n');
+}
+
+function formatResumeTimestamp(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) {
+    return value;
+  }
+
+  const year = String(date.getFullYear());
+  const month = String(date.getMonth() + 1).padStart(2, '0');
+  const day = String(date.getDate()).padStart(2, '0');
+  const hours = String(date.getHours()).padStart(2, '0');
+  const minutes = String(date.getMinutes()).padStart(2, '0');
+  return `${year}-${month}-${day} ${hours}:${minutes}`;
 }
 
 async function assertBunAvailable(): Promise<void> {
