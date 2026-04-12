@@ -1881,7 +1881,7 @@ export class HeadlessEngine {
     this.model.setModel(experimentSessionId, DEFAULT_EXPERIMENT_MODEL);
     this.model.setReasoningEffort(experimentSessionId, DEFAULT_EXPERIMENT_REASONING_EFFORT);
     const prompt = [
-      `Run a scoped experiment in the isolated worktree at ${experiment.worktreePath}.`,
+      `Run a scoped experiment in an isolated copy of the current workspace at ${experiment.worktreePath}.`,
       `Hypothesis: ${experiment.hypothesis}`,
       `Budget: ${experiment.budget} estimated tokens`,
       experiment.context ? `Context: ${experiment.context}` : '',

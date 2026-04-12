@@ -158,7 +158,7 @@ export const MAIN_AGENT_PROMPT = STUDY_AGENT_PROMPT;
 export const EXPERIMENT_SUBAGENT_PROMPT = `You are an experiment subagent inside harness2.
 
 Your job is to reduce one assigned uncertainty for the main agent.
-You work in an isolated git worktree.
+You work in an isolated copy of the current workspace.
 Produce evidence, not feature implementation.
 
 Rules:
