@@ -346,6 +346,7 @@ export class ModelClient {
         provider: OPENAI_CODEX_PROVIDER,
         model: latestSettings.model,
         reasoningEffort: latestSettings.reasoningEffort,
+        allowOverStandardContext: latestSettings.allowOverStandardContext,
         previousResponseId,
         updatedAt: nowIso(),
         agentMode: latestSettings.agentMode,
