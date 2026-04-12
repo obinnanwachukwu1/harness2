@@ -17,7 +17,7 @@
     "test": "node --no-warnings --import tsx --test",
     "typecheck": "npm run typecheck:core && npm run typecheck:ui",
     "typecheck:core": "tsc -p tsconfig.json --noEmit",
-    "typecheck:ui": "tsc -p packages/ui-opentui/tsconfig.json --noEmit"
+    "typecheck:ui": "tsc -p packages/ui/tsconfig.json --noEmit"
   },
   "dependencies": {
     "@ai-sdk/openai": "^3.0.51",

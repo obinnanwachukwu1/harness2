@@ -7,7 +7,7 @@ Today it provides one working vertical slice:
 - a headless engine that owns transcript state and local tool execution
 - isolated experiment runs in `git worktree`s
 - SQLite-backed session and experiment state
-- an OpenTUI terminal UI
+- an UI terminal UI
 - a noninteractive print mode for one-shot prompts
 - optional OpenAI Codex OAuth for model-backed interactions
 
@@ -17,10 +17,10 @@ This project is still early. The core path works, but the surface area and UX ar
 
 - Node 22+
 - npm 10+
-- Bun 1.x for the OpenTUI frontend
+- Bun 1.x for the UI frontend
 - a Git repository with at least one commit in the working directory
 
-Node-only commands such as `doctor`, `help`, `paths`, `auth`, `-p`, `test`, `typecheck`, and `build` do not require Bun. The interactive OpenTUI path does because `@opentui/core` imports `bun:ffi`.
+Node-only commands such as `doctor`, `help`, `paths`, `auth`, `-p`, `test`, `typecheck`, and `build` do not require Bun. The interactive UI path does because `@opentui/core` imports `bun:ffi`.
 
 ## Install
 
@@ -30,7 +30,7 @@ Install from the repository root:
 npm install
 ```
 
-The root package uses npm workspaces, so this installs the core CLI dependencies and the OpenTUI package dependencies in one step.
+The root package uses npm workspaces, so this installs the core CLI dependencies and the UI package dependencies in one step.
 
 ## Quick Start
 
@@ -78,8 +78,8 @@ npm run dev -- -thinking -p "inspect the repo"
 npm run dev -- resume <sessionId> -p "continue from here"
 npm run dev -- resume <sessionId> -thinking -p "continue from here"
 npm run dev -- resume <sessionId>
-npm run dev -- opentui
-npm run dev -- opentui <sessionId>
+npm run dev -- ui
+npm run dev -- ui <sessionId>
 npm run dev -- eval run evals/wide-suite.toml --case A1
 npm run dev -- eval score ~/.h2/evals/<run-id>
 npm run dev -- harbor-run --output-dir /tmp/harbor-agent --instruction-file /tmp/instruction.md --json
@@ -127,7 +127,7 @@ Model-backed prompt execution requires OpenAI Codex OAuth.
 - `h2 auth login` starts a browser-based PKCE flow against `https://auth.openai.com`
 - tokens are stored globally in `~/.h2/auth.sqlite`
 - `h2 auth access` prints a refreshed bearer token to stdout for manual API testing
-- `/auth login`, `/auth status`, and `/auth logout` are available inside OpenTUI
+- `/auth login`, `/auth status`, and `/auth logout` are available inside UI
 
 Notes:
 
@@ -205,9 +205,9 @@ src/
   experiments/
   integrations/
   storage/
-  ui-opentui/
+  ui/
 packages/
-  ui-opentui/
+  ui/
 test/
 ```
 

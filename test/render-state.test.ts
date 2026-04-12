@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import test from 'node:test';
 
-import { buildOpenTuiState, diffOpenTuiState } from '../src/ui-opentui/render-state.js';
+import { buildState, diffState } from '../src/ui/render-state.js';
 import type { EngineSnapshot } from '../src/types.js';
 
 function createSnapshot(overrides: Partial<EngineSnapshot> = {}): EngineSnapshot {
@@ -37,9 +37,9 @@ function createSnapshot(overrides: Partial<EngineSnapshot> = {}): EngineSnapshot
   };
 }
 
-test('buildOpenTuiState keeps current-turn completed tools in the live tail order', () => {
+test('buildState keeps current-turn completed tools in the live tail order', () => {
   const startedAt = '2026-04-07T00:00:02.000Z';
-  const state = buildOpenTuiState(
+  const state = buildState(
     createSnapshot({
       processingTurn: true,
       currentTurnStartedAt: startedAt,
@@ -88,8 +88,8 @@ test('buildOpenTuiState keeps current-turn completed tools in the live tail orde
   );
 });
 
-test('buildOpenTuiState includes live tool argument previews', () => {
-  const state = buildOpenTuiState(
+test('buildState includes live tool argument previews', () => {
+  const state = buildState(
     createSnapshot({
       liveTurnEvents: [
         {
@@ -114,8 +114,8 @@ test('buildOpenTuiState includes live tool argument previews', () => {
   assert.equal(toolBlock.live, true);
 });
 
-test('buildOpenTuiState summarizes exec output rows', () => {
-  const state = buildOpenTuiState(
+test('buildState summarizes exec output rows', () => {
+  const state = buildState(
     createSnapshot({
       transcript: [
         {
@@ -135,8 +135,8 @@ test('buildOpenTuiState summarizes exec output rows', () => {
   assert.deepEqual(toolBlock.body, ['process  4', 'status  running', 'ready']);
 });
 
-test('buildOpenTuiState shows question ids in headers and summaries in the body', () => {
-  const state = buildOpenTuiState(
+test('buildState shows question ids in headers and summaries in the body', () => {
+  const state = buildState(
     createSnapshot({
       transcript: [
         {
@@ -161,8 +161,8 @@ test('buildOpenTuiState shows question ids in headers and summaries in the body'
   ]);
 });
 
-test('buildOpenTuiState renders experiment notices as experiment tool rows', () => {
-  const state = buildOpenTuiState(
+test('buildState renders experiment notices as experiment tool rows', () => {
+  const state = buildState(
     createSnapshot({
       processingTurn: true,
       currentTurnStartedAt: '2026-04-07T00:00:03.000Z',
@@ -196,8 +196,8 @@ test('buildOpenTuiState renders experiment notices as experiment tool rows', () 
   ]);
 });
 
-test('buildOpenTuiState surfaces a pending single-choice ask_user request', () => {
-  const state = buildOpenTuiState(
+test('buildState surfaces a pending single-choice ask_user request', () => {
+  const state = buildState(
     createSnapshot({
       agentMode: 'plan',
       planModePhase: 'planning',
@@ -229,8 +229,8 @@ test('buildOpenTuiState surfaces a pending single-choice ask_user request', () =
   assert.match(toolBlock.body.join('\n'), /b \[recommended\]/);
 });
 
-test('buildOpenTuiState uses the actual context window for status text and percent', () => {
-  const state = buildOpenTuiState(
+test('buildState uses the actual context window for status text and percent', () => {
+  const state = buildState(
     createSnapshot({
       model: 'gpt-5.4',
       estimatedContextTokens: 50_000,
@@ -245,8 +245,8 @@ test('buildOpenTuiState uses the actual context window for status text and perce
   assert.equal(state.status.usageText, '67% used');
 });
 
-test('diffOpenTuiState omits unchanged blocks and only upserts the changed live block', () => {
-  const previous = buildOpenTuiState(
+test('diffState omits unchanged blocks and only upserts the changed live block', () => {
+  const previous = buildState(
     createSnapshot({
       transcript: [
         {
@@ -267,7 +267,7 @@ test('diffOpenTuiState omits unchanged blocks and only upserts the changed live 
       ]
     })
   );
-  const next = buildOpenTuiState(
+  const next = buildState(
     createSnapshot({
       transcript: [
         {
@@ -289,7 +289,7 @@ test('diffOpenTuiState omits unchanged blocks and only upserts the changed live 
     })
   );
 
-  const patch = diffOpenTuiState(previous, next);
+  const patch = diffState(previous, next);
 
   assert.ok(patch);
   assert.equal(patch.removeBlockIds, undefined);
@@ -297,8 +297,8 @@ test('diffOpenTuiState omits unchanged blocks and only upserts the changed live 
   assert.deepEqual(patch.upsertBlocks?.map((block) => block.id), ['live-assistant-1']);
 });
 
-test('diffOpenTuiState emits block order when the transcript shape changes', () => {
-  const previous = buildOpenTuiState(
+test('diffState emits block order when the transcript shape changes', () => {
+  const previous = buildState(
     createSnapshot({
       transcript: [
         {
@@ -311,7 +311,7 @@ test('diffOpenTuiState emits block order when the transcript shape changes', () 
       ]
     })
   );
-  const next = buildOpenTuiState(
+  const next = buildState(
     createSnapshot({
       transcript: [
         {
@@ -332,7 +332,7 @@ test('diffOpenTuiState emits block order when the transcript shape changes', () 
     })
   );
 
-  const patch = diffOpenTuiState(previous, next);
+  const patch = diffState(previous, next);
 
   assert.ok(patch);
   assert.deepEqual(patch.blockOrder, ['user-2', 'assistant-1']);

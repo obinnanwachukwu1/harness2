@@ -75,10 +75,10 @@ async function main(): Promise<void> {
     return;
   }
 
-  if (command === 'opentui') {
+  if (command === 'ui' || command === 'opentui') {
     assertSupportedNodeRuntime();
     await assertInsideGitRepository(process.cwd());
-    await runOpenTui(args[1], mode);
+    await runApp(args[1], mode);
     return;
   }
 
@@ -116,13 +116,13 @@ async function main(): Promise<void> {
   }
   assertSupportedNodeRuntime();
   await assertInsideGitRepository(process.cwd());
-  await runOpenTui(sessionId, mode);
+  await runApp(sessionId, mode);
 }
 
-async function runOpenTui(sessionId?: string, mode?: 'study' | 'plan' | 'direct'): Promise<void> {
+async function runApp(sessionId?: string, mode?: 'study' | 'plan' | 'direct'): Promise<void> {
   await assertKnownSession(process.cwd(), sessionId);
   const repoRoot = resolveHarnessRoot();
-  const entryPath = path.join(repoRoot, 'packages/ui-opentui/src/index.ts');
+  const entryPath = path.join(repoRoot, 'packages/ui/src/index.ts');
   await assertBunAvailable();
   const args = ['run', entryPath, '--cwd', process.cwd()];
   if (sessionId) {
@@ -306,10 +306,12 @@ function printDoctor(report: {
 }
 
 function printUsage(): void {
-  console.log('Usage: h2 [--mode <study|plan|direct>] [resume [sessionId]] [opentui] | h2 auth <login|status|access|logout> | h2 doctor | h2 paths | h2 eval run <manifest> [--case <id>] [--parallel <n>] [--repeat <n>] [--mode <study|plan|direct>] | h2 eval score <run-dir> | h2 eval pack [run-id-or-suffix] [--latest-batch] | h2 harbor-run --output-dir <path> (--instruction "<text>" | --instruction-file <path>)');
+  console.log('Usage: h2 [--mode <study|plan|direct>] [resume [sessionId]] [ui] | h2 auth <login|status|access|logout> | h2 doctor | h2 paths | h2 eval run <manifest> [--case <id>] [--parallel <n>] [--repeat <n>] [--mode <study|plan|direct>] | h2 eval score <run-dir> | h2 eval pack [run-id-or-suffix] [--latest-batch] | h2 harbor-run --output-dir <path> (--instruction "<text>" | --instruction-file <path>)');
   console.log('');
   console.log('Examples:');
   console.log('h2');
+  console.log('h2 ui');
+  console.log('h2 opentui   # compatibility alias');
   console.log('h2 --mode plan');
   console.log('h2 -p "inspect the repo"');
   console.log('h2 resume');
@@ -1001,7 +1003,7 @@ async function assertBunAvailable(): Promise<void> {
   }
 
   throw new Error(
-    'OpenTUI currently requires Bun because @opentui/core imports bun:ffi. Install Bun, or use print mode (`h2 -p "..."`) for a Node-only path.'
+    'The UI currently requires Bun because @opentui/core imports bun:ffi. Install Bun, or use print mode (`h2 -p "..."`) for a Node-only path.'
   );
 }
 
@@ -1012,7 +1014,7 @@ function resolveHarnessRoot(): string {
   ];
 
   for (const candidate of candidates) {
-    const uiEntry = path.join(candidate, 'packages/ui-opentui/src/index.ts');
+    const uiEntry = path.join(candidate, 'packages/ui/src/index.ts');
     if (existsSync(uiEntry)) {
       return candidate;
     }
