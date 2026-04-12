@@ -98,9 +98,6 @@ Inside the terminal UI, use slash commands:
 /edit <patch>
 /glob "src/**/*.ts"
 /grep HeadlessEngine src
-/spawn --hypothesis "node is available in isolation"
-/experiment exp-12345678
-/adopt exp-12345678
 /auth login
 /auth status
 /auth logout

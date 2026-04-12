@@ -57,7 +57,7 @@ id = "A1"
 bucket = "A"
 fixture = "tiny-app"
 profile = "backend"
-prompt = "/write note.txt :: hello from eval"
+prompt = "/help"
 question_expected = false
 experiment_expected = false
 `,
@@ -75,8 +75,6 @@ experiment_expected = false
   assert.equal(caseResult.autoScore.experimentActual, 0);
 
   await assert.doesNotReject(() => access(caseResult.artifacts.sessionMarkdownPath));
-  await assert.doesNotReject(() => access(path.join(caseResult.workspacePath, 'note.txt')));
-  assert.equal(await readFile(path.join(caseResult.workspacePath, 'note.txt'), 'utf8'), 'hello from eval');
   assert.equal(
     await readFile(path.join(caseResult.workspacePath, '.env'), 'utf8'),
     await readFile(envSourcePath, 'utf8')
@@ -129,7 +127,7 @@ id = "A2"
 bucket = "A"
 fixture = "repo-fixture"
 profile = "existing"
-prompt = "/read README.md"
+prompt = "/help"
 question_expected = false
 experiment_expected = false
 `,
@@ -142,7 +140,7 @@ experiment_expected = false
   });
 
   const transcript = JSON.parse(await readFile(result.cases[0]!.artifacts.transcriptJsonPath, 'utf8')) as Array<{ text: string }>;
-  assert.ok(transcript.some((entry) => entry.text.includes('README.md')));
+  assert.ok(transcript.some((entry) => entry.text.includes('Commands:')));
 });
 
 test('runEvalSuite supports bounded case parallelism', async (t) => {
@@ -186,14 +184,14 @@ id = "A1"
 bucket = "A"
 fixture = "tiny-app"
 profile = "backend"
-prompt = "/write one.txt :: one"
+prompt = "/help"
 
 [[cases]]
 id = "A2"
 bucket = "A"
 fixture = "tiny-app"
 profile = "backend"
-prompt = "/write two.txt :: two"
+prompt = "/help"
 `,
     'utf8'
   );
@@ -203,8 +201,14 @@ prompt = "/write two.txt :: two"
   });
 
   assert.equal(result.cases.length, 2);
-  assert.equal(await readFile(path.join(result.cases[0]!.workspacePath, 'one.txt'), 'utf8'), 'one');
-  assert.equal(await readFile(path.join(result.cases[1]!.workspacePath, 'two.txt'), 'utf8'), 'two');
+  const firstTranscript = JSON.parse(
+    await readFile(result.cases[0]!.artifacts.transcriptJsonPath, 'utf8')
+  ) as Array<{ text: string }>;
+  const secondTranscript = JSON.parse(
+    await readFile(result.cases[1]!.artifacts.transcriptJsonPath, 'utf8')
+  ) as Array<{ text: string }>;
+  assert.ok(firstTranscript.some((entry) => entry.text.includes('Commands:')));
+  assert.ok(secondTranscript.some((entry) => entry.text.includes('Commands:')));
 });
 
 test('runEvalSuite applies runtime overrides such as mode when requested', async (t) => {
@@ -247,7 +251,7 @@ id = "A1"
 bucket = "A"
 fixture = "tiny-app"
 profile = "backend"
-prompt = "/read README.md"
+prompt = "/help"
 `,
     'utf8'
   );
@@ -304,7 +308,7 @@ id = "A1"
 bucket = "A"
 fixture = "tiny-app"
 profile = "backend"
-prompt = "/write note.txt :: hello"
+prompt = "/help"
 `,
     'utf8'
   );
@@ -371,7 +375,7 @@ id = "A1"
 bucket = "A"
 fixture = "tiny-app"
 profile = "backend"
-prompt = "/write note.txt :: hello"
+prompt = "/help"
 `,
     'utf8'
   );

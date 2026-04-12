@@ -25,7 +25,7 @@ test('HeadlessEngine migrates legacy .harness2 worktrees into .h2/worktrees', as
   await assert.rejects(() => access(path.join(repoDir, '.harness2', 'worktrees', 'exp-legacy', 'notes.txt')));
 });
 
-test('HeadlessEngine routes slash commands through the prototype runner', async (t) => {
+test('HeadlessEngine routes supported app-level slash commands through the prototype runner', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));
 
@@ -37,23 +37,11 @@ test('HeadlessEngine routes slash commands through the prototype runner', async 
     engine.modelClient.runTurn = originalRunTurn;
   });
 
-  await engine.submit('/write notes.txt :: hello from harness2');
-  await engine.submit('/read notes.txt');
-  await engine.submit(
-    '/spawn --hypothesis "inspect the repo in isolation" --local-evidence "The repo has a notes file and the main workspace is writable." --residual-uncertainty "Whether an isolated worktree can inspect the repo safely without touching the main workspace."'
-  );
-
-  await waitFor(
-    () => engine.snapshot.experiments[0],
-    (experiment) => Boolean(experiment)
-  );
+  await engine.submit('/help');
 
   const transcript = engine.snapshot.transcript.map((entry) => entry.text).join('\n\n');
-  assert.match(transcript, /Wrote 19 chars to notes\.txt\./);
-  assert.match(transcript, /notes\.txt/);
-  assert.match(transcript, /Spawned exp-/);
-  assert.equal(engine.snapshot.experiments.length, 1);
-  assert.equal(engine.snapshot.experiments[0]?.budget, DEFAULT_EXPERIMENT_BUDGET_TOKENS);
+  assert.match(transcript, /Commands:/);
+  assert.match(transcript, /\/model/);
 
   const notebook = engine.notebook;
   const modelHistory = notebook.listModelHistory(engine.snapshot.session.id);
@@ -63,9 +51,22 @@ test('HeadlessEngine routes slash commands through the prototype runner', async 
         item.type === 'message' &&
         item.role === 'assistant' &&
         typeof item.content === 'string' &&
-        item.content.includes('Spawned exp-')
+        item.content.includes('Commands:')
     )
   );
+});
+
+test('HeadlessEngine rejects removed model-tool slash commands from user input', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir, revealExportsInFinder: false });
+  t.after(async () => engine.dispose());
+
+  await engine.submit('/read notes.txt');
+
+  const transcript = engine.snapshot.transcript.map((entry) => entry.text).join('\n\n');
+  assert.match(transcript, /Unknown command: read/);
 });
 
 test('HeadlessEngine plan mode pauses on ask_user approval and resumes after yes', async (t) => {
@@ -140,6 +141,31 @@ test('HeadlessEngine ask_user supports single-choice clarification with one reco
   assert.equal(pending?.responseKind, 'single_choice');
   assert.equal(pending?.recommendedOptionId, 'a');
   assert.equal(pending?.options?.[0]?.id, 'a');
+});
+
+test('HeadlessEngine passes hidden-compaction gating correctly for study sessions without web search mode', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir, forceStudyCompactionOnce: true });
+  t.after(async () => engine.dispose());
+
+  const originalRunTurn = engine.modelClient.runTurn;
+  const capturedCalls: any[][] = [];
+  engine.modelClient.runTurn = async (...args: any[]) => {
+    capturedCalls.push(args);
+  };
+  t.after(() => {
+    engine.modelClient.runTurn = originalRunTurn;
+  });
+
+  await engine.submit('Check the current state.');
+
+  assert.equal(capturedCalls.length, 1);
+  assert.equal(capturedCalls[0]?.[7], undefined);
+  assert.equal(capturedCalls[0]?.[12], false);
+  assert.equal(typeof capturedCalls[0]?.[13], 'function');
+  assert.equal(capturedCalls[0]?.[14], true);
 });
 
 test('HeadlessEngine submit normalizes single-choice replies into the selected option', async (t) => {
@@ -224,7 +250,7 @@ test('HeadlessEngine requires non-empty affectedPaths for open questions', async
   );
 });
 
-test('HeadlessEngine read defaults to 100 lines and supports explicit line ranges', async (t) => {
+test('HeadlessEngine read helper defaults to 100 lines and supports explicit line ranges', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));
 
@@ -234,16 +260,15 @@ test('HeadlessEngine read defaults to 100 lines and supports explicit line range
   const largeFile = Array.from({ length: 150 }, (_, index) => `line ${index + 1}`).join('\n');
   await writeFile(path.join(repoDir, 'slice.txt'), largeFile, 'utf8');
 
-  await engine.submit('/read slice.txt');
-  await engine.submit('/read slice.txt 120 125');
+  const firstRead = await engine.runRead('slice.txt');
+  const secondRead = await engine.runRead('slice.txt', 120, 125);
 
-  const transcript = engine.snapshot.transcript.map((entry) => entry.text).join('\n\n');
-  assert.match(transcript, /slice\.txt \(lines 1-100 of 150\)/);
-  assert.match(transcript, /1: line 1/);
-  assert.doesNotMatch(transcript, /101: line 101/);
-  assert.match(transcript, /slice\.txt \(lines 120-125 of 150\)/);
-  assert.match(transcript, /120: line 120/);
-  assert.match(transcript, /125: line 125/);
+  assert.match(firstRead, /slice\.txt \(lines 1-100 of 150\)/);
+  assert.match(firstRead, /1: line 1/);
+  assert.doesNotMatch(firstRead, /101: line 101/);
+  assert.match(secondRead, /slice\.txt \(lines 120-125 of 150\)/);
+  assert.match(secondRead, /120: line 120/);
+  assert.match(secondRead, /125: line 125/);
 });
 
 test('HeadlessEngine edit applies patch-style file creation and updates', async (t) => {
@@ -853,14 +878,14 @@ test('HeadlessEngine submit can stream transcript callbacks for noninteractive c
   t.after(async () => engine.dispose());
 
   const emitted: Array<{ role: string; text: string }> = [];
-  await engine.submit('/read README.md', {
+  await engine.submit('/help', {
     onTranscriptEntry: async (role, text) => {
       emitted.push({ role, text });
     }
   });
 
   assert.ok(emitted.some((entry) => entry.role === 'tool' || entry.role === 'assistant'));
-  assert.ok(emitted.some((entry) => entry.text.includes('README.md')));
+  assert.ok(emitted.some((entry) => entry.text.includes('Commands:')));
 });
 
 test('HeadlessEngine persists a thinking summary once and clears the live overlay when it is appended', async (t) => {
@@ -925,6 +950,7 @@ test('HeadlessEngine preserves completed tool events until the next turn starts'
   });
 
   const originalRunTurn = engine.modelClient.runTurn;
+  let emittedToolTurn = false;
   engine.modelClient.runTurn = async (
     _sessionId: string,
     _input: string,
@@ -933,6 +959,7 @@ test('HeadlessEngine preserves completed tool events until the next turn starts'
     _onAssistantStream: ((text: string) => Promise<void>) | undefined,
     _onReasoningSummaryStream: ((text: string) => Promise<void>) | undefined,
     _thinkingEnabled: boolean,
+    _webSearchMode: unknown,
     _toolDefinitions: unknown,
     _instructions: string,
     onToolCallStart: ((toolCall: {
@@ -945,6 +972,11 @@ test('HeadlessEngine preserves completed tool events until the next turn starts'
     }) => Promise<void>) | undefined,
     onToolCallFinish: ((toolCallId: string, transcriptText?: string) => Promise<void>) | undefined
   ) => {
+    if (emittedToolTurn) {
+      await emit('assistant', 'done');
+      return;
+    }
+    emittedToolTurn = true;
     await onToolCallStart?.({
       toolCallId: 'call_exec_1',
       toolName: 'exec_command',
@@ -1001,7 +1033,7 @@ test('HeadlessEngine preserves completed tool events until the next turn starts'
     }
   ]);
 
-  await engine.submit('/read README.md');
+  await engine.submit('thanks');
   assert.equal(
     engine.snapshot.liveTurnEvents.some(
       (event) => event.kind === 'tool' && event.callId === 'call_exec_1'
@@ -1062,19 +1094,22 @@ test('HeadlessEngine can preview and apply a preserved experiment back into the 
     promote: true
   });
 
-  await engine.submit('/adopt exp-adopt');
-  let transcript = engine.snapshot.transcript.map((entry) => entry.text).join('\n\n');
-  assert.match(transcript, /Experiment adoption preview/);
-  assert.match(transcript, /feature\.txt/);
-  assert.match(transcript, /Run \/adopt exp-adopt --apply/);
+  const preview = await engine.adoptExperiment('exp-adopt', { apply: false });
+  const previewText = [
+    'Experiment adoption preview',
+    `id: ${preview.experimentId}`,
+    `changed_files: ${preview.changedFiles.join(' | ')}`,
+    preview.diffStat
+  ].join('\n');
+  assert.match(previewText, /Experiment adoption preview/);
+  assert.match(previewText, /feature\.txt/);
 
   const rootReadmeBefore = await readFile(path.join(repoDir, 'README.md'), 'utf8');
   assert.equal(rootReadmeBefore, '# temp repo\n');
 
-  await engine.submit('/adopt exp-adopt --apply');
-  transcript = engine.snapshot.transcript.map((entry) => entry.text).join('\n\n');
-  assert.match(transcript, /Experiment adoption applied/);
-  assert.match(transcript, /rollback: h2-adopt-backup-/);
+  const applied = await engine.adoptExperiment('exp-adopt', { apply: true });
+  assert.ok('appliedAt' in applied);
+  assert.match(applied.rollbackBranchName, /h2-adopt-backup-/);
 
   const rootReadmeAfter = await readFile(path.join(repoDir, 'README.md'), 'utf8');
   const adoptedFile = await readFile(path.join(repoDir, 'feature.txt'), 'utf8');
@@ -1909,7 +1944,7 @@ test('HeadlessEngine exports the current session to markdown via /export', async
   const engine = await HeadlessEngine.open({ cwd: repoDir, revealExportsInFinder: false });
   t.after(async () => engine.dispose());
 
-  await engine.submit('/read README.md');
+  await engine.submit('/help');
   await engine.submit('/export');
 
   const exportPath = path.join(repoDir, '.h2', 'session-exports', `${engine.snapshot.session.id}.md`);
@@ -1918,7 +1953,7 @@ test('HeadlessEngine exports the current session to markdown via /export', async
   const exported = await readFile(exportPath, 'utf8');
   assert.match(exported, new RegExp(`# Session Export ${engine.snapshot.session.id}`));
   assert.match(exported, /## Transcript/);
-  assert.match(exported, /README\.md/);
+  assert.match(exported, /Commands:/);
 
   const transcript = engine.snapshot.transcript.map((entry) => entry.text).join('\n\n');
   assert.match(transcript, /Exported .*session-exports/);
