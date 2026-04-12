@@ -761,7 +761,7 @@ export class OpenTuiApp {
 }
 
 function getStatusColor(status: string): string {
-  if (status === 'running turn') {
+  if (status === 'running' || status === 'running turn') {
     return '#60a5fa';
   }
   if (status === 'error') {
