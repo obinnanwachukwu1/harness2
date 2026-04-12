@@ -275,6 +275,42 @@ test('ModelClient performs tool round-trips and persists the latest response id'
   ]);
 
   assert.equal(notebook.getModelSession('session-test')?.previousResponseId, 'resp_2');
+  assert.deepEqual(notebook.listModelUsage('session-test').map((entry) => ({
+    responseId: entry.responseId,
+    inputTokens: entry.inputTokens,
+    cachedInputTokens: entry.cachedInputTokens,
+    outputTokens: entry.outputTokens,
+    reasoningTokens: entry.reasoningTokens,
+    totalTokens: entry.totalTokens
+  })), [
+    {
+      responseId: 'resp_1',
+      inputTokens: 1,
+      cachedInputTokens: 0,
+      outputTokens: 1,
+      reasoningTokens: 0,
+      totalTokens: 2
+    },
+    {
+      responseId: 'resp_2',
+      inputTokens: 1,
+      cachedInputTokens: 0,
+      outputTokens: 1,
+      reasoningTokens: 0,
+      totalTokens: 2
+    }
+  ]);
+  assert.deepEqual(notebook.getModelUsageSummary('session-test'), {
+    responseCount: 2,
+    inputTokens: 2,
+    cachedInputTokens: 0,
+    outputTokens: 2,
+    reasoningTokens: 0,
+    totalTokens: 4,
+    maxInputTokens: 1,
+    maxOutputTokens: 1,
+    maxTotalTokens: 2
+  });
   assert.deepEqual(streamed, ['Done reading the file.']);
   assert.deepEqual(liveToolEvents, [
     {
@@ -1947,6 +1983,171 @@ test('ModelClient retries transient 500 responses before succeeding', async (t) 
   assert.equal(attempts, 3);
   assert.equal(emitted[0]?.role, 'assistant');
   assert.equal(emitted[0]?.text, 'Recovered after retry.');
+});
+
+test('ModelClient retries transient transport failures before succeeding', async (t) => {
+  const tempDir = await createTempDir('h2-model-network-retry-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-test', tempDir);
+
+  const now = 1_700_000_000_000;
+  notebook.upsertOpenAICodexAuth({
+    provider: 'openai-codex',
+    type: 'oauth',
+    accessToken: createUnsignedJwt({
+      exp: Math.floor((now + 3600_000) / 1000)
+    }),
+    refreshToken: 'refresh-token',
+    idToken: createUnsignedJwt({
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: 'acct_123'
+      }
+    }),
+    accountId: 'acct_123',
+    expiresAt: now + 3600_000,
+    createdAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString()
+  });
+
+  let attempts = 0;
+  const auth = new OpenAICodexAuth(notebook, { now: () => now });
+  const client = new ModelClient(notebook, auth, {
+    fetchImpl: async () => {
+      attempts += 1;
+      if (attempts < 3) {
+        throw Object.assign(new Error('fetch failed: getaddrinfo EAI_AGAIN chatgpt.com'), {
+          code: 'EAI_AGAIN'
+        });
+      }
+
+      return createResponsesStream([
+        responseCreated('resp_1'),
+        {
+          type: 'response.output_text.delta',
+          item_id: 'msg_1',
+          delta: 'Recovered after network retry.'
+        },
+        responseCompleted('resp_1')
+      ]);
+    }
+  });
+
+  const emitted: Array<{ role: TranscriptRole; text: string }> = [];
+  const tools: AgentTools = {
+    execCommand: async () => '',
+    writeStdin: async () => '',
+    read: async () => '',
+    write: async () => '',
+    edit: async () => '',
+    glob: async () => [],
+    grep: async () => '',
+    spawnExperiment: async () => {
+      throw new Error('not used');
+    },
+    readExperiment: async () => {
+      throw new Error('not used');
+    },
+    authLogin: async () => '',
+    authStatus: async () => '',
+    authLogout: async () => '',
+    getModelSettings: async () => '',
+    setModel: async () => '',
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
+  };
+
+  await client.runTurn(
+    'session-test',
+    'hello',
+    tools,
+    async (role, text) => {
+      emitted.push({ role, text });
+    }
+  );
+
+  assert.equal(attempts, 3);
+  assert.equal(emitted[0]?.role, 'assistant');
+  assert.equal(emitted[0]?.text, 'Recovered after network retry.');
+});
+
+test('ModelClient records transient provider failure after retries are exhausted', async (t) => {
+  const tempDir = await createTempDir('h2-model-provider-failure-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-test', tempDir);
+
+  const now = 1_700_000_000_000;
+  notebook.upsertOpenAICodexAuth({
+    provider: 'openai-codex',
+    type: 'oauth',
+    accessToken: createUnsignedJwt({
+      exp: Math.floor((now + 3600_000) / 1000)
+    }),
+    refreshToken: 'refresh-token',
+    idToken: createUnsignedJwt({
+      'https://api.openai.com/auth': {
+        chatgpt_account_id: 'acct_123'
+      }
+    }),
+    accountId: 'acct_123',
+    expiresAt: now + 3600_000,
+    createdAt: new Date(now).toISOString(),
+    updatedAt: new Date(now).toISOString()
+  });
+
+  const auth = new OpenAICodexAuth(notebook, { now: () => now });
+  const client = new ModelClient(notebook, auth, {
+    fetchImpl: async () => {
+      throw Object.assign(new Error('Cannot connect to API: getaddrinfo EAI_AGAIN chatgpt.com'), {
+        code: 'EAI_AGAIN'
+      });
+    }
+  });
+
+  const emitted: Array<{ role: TranscriptRole; text: string }> = [];
+  const tools: AgentTools = {
+    execCommand: async () => '',
+    writeStdin: async () => '',
+    read: async () => '',
+    write: async () => '',
+    edit: async () => '',
+    glob: async () => [],
+    grep: async () => '',
+    spawnExperiment: async () => {
+      throw new Error('not used');
+    },
+    readExperiment: async () => {
+      throw new Error('not used');
+    },
+    authLogin: async () => '',
+    authStatus: async () => '',
+    authLogout: async () => '',
+    getModelSettings: async () => '',
+    setModel: async () => '',
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
+  };
+
+  await client.runTurn(
+    'session-test',
+    'hello',
+    tools,
+    async (role, text) => {
+      emitted.push({ role, text });
+    }
+  );
+
+  assert.equal(emitted[0]?.role, 'system');
+  assert.match(emitted[0]?.text ?? '', /@@provider_error\tkind=transient/);
+  assert.equal(emitted[1]?.role, 'assistant');
+  assert.match(emitted[1]?.text ?? '', /Model provider request failed after retries:/);
 });
 
 test('ModelClient preserves streamed visible text when completed payload omits output_text', async (t) => {

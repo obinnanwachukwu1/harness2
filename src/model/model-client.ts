@@ -34,6 +34,7 @@ import {
   type ToolDefinition
 } from './model-tooling.js';
 import {
+  classifyModelProviderFailure,
   createModelStepResponse,
   type ModelStepResponse,
   type ProviderToolEvent,
@@ -262,35 +263,63 @@ export class ModelClient {
           : null,
         buildCompactionHint(compactionState, effectiveToolDefinitions)
       ].filter((value): value is string => Boolean(value));
-      const response = await this.createResponse({
-        accessToken,
-        accountId: authRecord.accountId,
-        sessionId,
-        settings,
-        input: [
-          ...hints.map((hint) => ({
-            role: 'developer' as const,
-            content: hint
-          })),
-          ...requestItems.map(toResponseInputItem)
-        ],
-        onAssistantStream,
-        onReasoningSummaryStream,
-        thinkingEnabled,
-        webSearchMode,
-        toolDefinitions: effectiveToolDefinitions,
-        instructions,
-        onToolCallStart,
-        onProviderToolEvent: async (event) => {
-          this.persistHistoryItem(sessionId, {
-            type: 'message',
-            role: 'developer',
-            content: event.historyNotice
-          });
-          await emit('tool', event.transcript);
-          await onToolCallFinish?.(event.toolCallId, event.transcript);
-        }
-      });
+      let response: ModelStepResponse;
+      try {
+        response = await this.createResponse({
+          accessToken,
+          accountId: authRecord.accountId,
+          sessionId,
+          settings,
+          input: [
+            ...hints.map((hint) => ({
+              role: 'developer' as const,
+              content: hint
+            })),
+            ...requestItems.map(toResponseInputItem)
+          ],
+          onAssistantStream,
+          onReasoningSummaryStream,
+          thinkingEnabled,
+          webSearchMode,
+          toolDefinitions: effectiveToolDefinitions,
+          instructions,
+          onToolCallStart,
+          onProviderToolEvent: async (event) => {
+            this.persistHistoryItem(sessionId, {
+              type: 'message',
+              role: 'developer',
+              content: event.historyNotice
+            });
+            await emit('tool', event.transcript);
+            await onToolCallFinish?.(event.toolCallId, event.transcript);
+          }
+        });
+      } catch (error) {
+        const failure = classifyModelProviderFailure(error);
+        const marker = `@@provider_error\tkind=${failure.kind}${
+          failure.status ? `\tstatus=${failure.status}` : ''
+        }${failure.code ? `\tcode=${failure.code}` : ''}\tmessage=${failure.message}`;
+        const assistantMessage =
+          failure.kind === 'auth'
+            ? `Model authentication failed: ${failure.message}`
+            : failure.kind === 'transient'
+              ? `Model provider request failed after retries: ${failure.message}`
+              : `Model provider error: ${failure.message}`;
+
+        this.persistHistoryItem(sessionId, {
+          type: 'message',
+          role: 'developer',
+          content: marker
+        });
+        this.persistHistoryItem(sessionId, {
+          type: 'message',
+          role: 'assistant',
+          content: assistantMessage
+        });
+        await emit('system', marker);
+        await emit('assistant', assistantMessage);
+        return;
+      }
 
       previousResponseId = response.id ?? previousResponseId;
       const latestSettings = this.getSessionSettings(sessionId);
@@ -303,6 +332,15 @@ export class ModelClient {
         updatedAt: nowIso(),
         agentMode: latestSettings.agentMode,
         planModePhase: latestSettings.planModePhase
+      });
+      this.notebook.appendModelUsage({
+        sessionId,
+        responseId: response.id ?? null,
+        inputTokens: response.usage.inputTokens,
+        cachedInputTokens: response.usage.cachedInputTokens,
+        outputTokens: response.usage.outputTokens,
+        reasoningTokens: response.usage.reasoningTokens,
+        totalTokens: response.usage.totalTokens
       });
 
       const toolCalls = response.toolCalls;

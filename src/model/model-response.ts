@@ -11,6 +11,13 @@ export interface ModelStepResponse {
   id?: string;
   assistantText: string;
   reasoningSummary: string;
+  usage: {
+    inputTokens: number;
+    cachedInputTokens: number;
+    outputTokens: number;
+    reasoningTokens: number;
+    totalTokens: number;
+  };
   toolCalls: Array<{ name: string; callId: string; rawArguments: string }>;
   providerToolEvents: ProviderToolEvent[];
 }
@@ -20,6 +27,13 @@ export interface ProviderToolEvent {
   toolCallId: string;
   transcript: string;
   historyNotice: string;
+}
+
+export interface ModelProviderFailure {
+  kind: 'transient' | 'auth' | 'fatal';
+  message: string;
+  code?: string;
+  status?: number;
 }
 
 interface ResponseInputItemMessage {
@@ -199,6 +213,7 @@ export async function createModelStepResponse(input: {
     (event) => !emittedProviderToolResults.has(event.toolCallId)
   );
   const localToolCalls = toolCalls.filter((call) => !call.providerExecuted);
+  const usage = normalizeModelUsage(await result.usage);
 
   await input.debugResponse?.('sdk_response', {
     id: response.id ?? null,
@@ -213,19 +228,59 @@ export async function createModelStepResponse(input: {
     })),
     toolResults,
     sources,
-    usage: await result.usage
+    usage
   });
 
   return {
     id: response.id ?? undefined,
     assistantText: assistantText.trim() || liveAssistantText.trim(),
     reasoningSummary: reasoningSummary?.trim() || liveReasoningSummary.trim(),
+    usage,
     toolCalls: localToolCalls.map((call) => ({
       name: call.toolName,
       callId: call.toolCallId,
       rawArguments: JSON.stringify(call.input)
     })),
     providerToolEvents
+  };
+}
+
+function normalizeModelUsage(input: unknown): {
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+} {
+  if (!input || typeof input !== 'object') {
+    return {
+      inputTokens: 0,
+      cachedInputTokens: 0,
+      outputTokens: 0,
+      reasoningTokens: 0,
+      totalTokens: 0
+    };
+  }
+
+  const value = input as {
+    inputTokens?: number;
+    cachedInputTokens?: number;
+    outputTokens?: number;
+    reasoningTokens?: number;
+    totalTokens?: number;
+  };
+  const inputTokens = value.inputTokens ?? 0;
+  const cachedInputTokens = value.cachedInputTokens ?? 0;
+  const outputTokens = value.outputTokens ?? 0;
+  const reasoningTokens = value.reasoningTokens ?? 0;
+  const totalTokens = value.totalTokens ?? inputTokens + outputTokens;
+
+  return {
+    inputTokens,
+    cachedInputTokens,
+    outputTokens,
+    reasoningTokens,
+    totalTokens
   };
 }
 
@@ -393,22 +448,37 @@ async function fetchWithRetries(
 ): Promise<Response> {
   let attempt = 0;
   let lastResponse: Response | null = null;
+  let lastError: unknown = null;
 
   while (attempt <= maxRetries) {
-    const response = await fetchImpl(input, init);
-    if (response.status !== 500) {
-      return response;
-    }
+    try {
+      const response = await fetchImpl(input, init);
+      if (!isRetryableResponse(response)) {
+        return response;
+      }
 
-    lastResponse = response;
-    if (attempt === maxRetries) {
-      return response;
-    }
+      lastResponse = response;
+      if (attempt === maxRetries) {
+        return response;
+      }
 
-    attempt += 1;
-    await delay(250 * attempt);
+      attempt += 1;
+      await delay(resolveRetryDelayMs(response, attempt));
+      continue;
+    } catch (error) {
+      lastError = error;
+      if (!isRetryableTransportError(error) || attempt === maxRetries) {
+        throw error;
+      }
+
+      attempt += 1;
+      await delay(resolveRetryDelayMs(undefined, attempt));
+    }
   }
 
+  if (lastError) {
+    throw lastError;
+  }
   return lastResponse ?? fetchImpl(input, init);
 }
 
@@ -416,4 +486,139 @@ function delay(ms: number): Promise<void> {
   return new Promise((resolve) => {
     setTimeout(resolve, ms);
   });
+}
+
+function isRetryableResponse(response: Response): boolean {
+  return [408, 429, 500, 502, 503, 504].includes(response.status);
+}
+
+function resolveRetryDelayMs(response: Response | undefined, attempt: number): number {
+  const retryAfterMs = response ? parseRetryAfterMs(response) : null;
+  if (retryAfterMs !== null) {
+    return retryAfterMs;
+  }
+  return Math.min(5_000, 250 * 2 ** Math.max(0, attempt - 1));
+}
+
+function parseRetryAfterMs(response: Response): number | null {
+  const header = response.headers.get('retry-after')?.trim();
+  if (!header) {
+    return null;
+  }
+
+  const seconds = Number(header);
+  if (Number.isFinite(seconds) && seconds >= 0) {
+    return Math.min(30_000, Math.round(seconds * 1000));
+  }
+
+  const retryAt = Date.parse(header);
+  if (Number.isNaN(retryAt)) {
+    return null;
+  }
+
+  return Math.min(30_000, Math.max(0, retryAt - Date.now()));
+}
+
+function isRetryableTransportError(error: unknown): boolean {
+  const message = errorMessage(error).toLowerCase();
+  const code = errorCode(error)?.toUpperCase();
+
+  return (
+    code === 'EAI_AGAIN' ||
+    code === 'ECONNRESET' ||
+    code === 'ETIMEDOUT' ||
+    code === 'ECONNREFUSED' ||
+    code === 'ENOTFOUND' ||
+    code === 'ECONNABORTED' ||
+    code === 'UND_ERR_CONNECT_TIMEOUT' ||
+    code === 'UND_ERR_HEADERS_TIMEOUT' ||
+    code === 'UND_ERR_BODY_TIMEOUT' ||
+    message.includes('eai_again') ||
+    message.includes('timed out') ||
+    message.includes('timeout') ||
+    message.includes('connect timeout') ||
+    message.includes('connection reset') ||
+    message.includes('socket hang up') ||
+    message.includes('fetch failed') ||
+    message.includes('network error') ||
+    message.includes('temporarily unavailable') ||
+    message.includes('enotfound')
+  );
+}
+
+export function classifyModelProviderFailure(error: unknown): ModelProviderFailure {
+  const message = errorMessage(error);
+  const messageLower = message.toLowerCase();
+  const code = errorCode(error);
+  const status = errorStatus(error);
+
+  if (
+    status === 401 ||
+    status === 403 ||
+    messageLower.includes('unauthorized') ||
+    messageLower.includes('forbidden') ||
+    messageLower.includes('authentication') ||
+    messageLower.includes('invalid api key') ||
+    messageLower.includes('incorrect api key')
+  ) {
+    return {
+      kind: 'auth',
+      message,
+      code: code ?? undefined,
+      status: status ?? undefined
+    };
+  }
+
+  if ((status !== null && isRetryableStatus(status)) || isRetryableTransportError(error)) {
+    return {
+      kind: 'transient',
+      message,
+      code: code ?? undefined,
+      status: status ?? undefined
+    };
+  }
+
+  return {
+    kind: 'fatal',
+    message,
+    code: code ?? undefined,
+    status: status ?? undefined
+  };
+}
+
+function isRetryableStatus(status: number): boolean {
+  return [408, 429, 500, 502, 503, 504].includes(status);
+}
+
+function errorCode(error: unknown): string | null {
+  if (!error || typeof error !== 'object') {
+    return null;
+  }
+  const value = Reflect.get(error, 'code');
+  return typeof value === 'string' ? value : null;
+}
+
+function errorStatus(error: unknown): number | null {
+  if (!error || typeof error !== 'object') {
+    return null;
+  }
+  const direct = Reflect.get(error, 'status');
+  if (typeof direct === 'number' && Number.isFinite(direct)) {
+    return direct;
+  }
+  const response = Reflect.get(error, 'response');
+  if (response && typeof response === 'object') {
+    const nested = Reflect.get(response, 'status');
+    if (typeof nested === 'number' && Number.isFinite(nested)) {
+      return nested;
+    }
+  }
+  return null;
+}
+
+function errorMessage(error: unknown): string {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
 }

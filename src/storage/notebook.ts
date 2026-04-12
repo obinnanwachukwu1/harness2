@@ -19,6 +19,8 @@ import type {
   ExperimentStatus,
   ExperimentSearchResult,
   ModelHistoryItem,
+  ModelUsageRecord,
+  ModelUsageSummary,
   ModelMessageRole,
   ModelSessionRecord,
   OpenAICodexAuthRecord,
@@ -137,6 +139,18 @@ interface ModelHistoryRow {
   call_id: string | null;
   arguments_text: string | null;
   content_text: string | null;
+  created_at: string;
+}
+
+interface ModelUsageRow {
+  id: number;
+  session_id: string;
+  response_id: string | null;
+  input_tokens: number;
+  cached_input_tokens: number;
+  output_tokens: number;
+  reasoning_tokens: number;
+  total_tokens: number;
   created_at: string;
 }
 
@@ -307,6 +321,21 @@ export class Notebook {
       CREATE INDEX IF NOT EXISTS idx_model_history_items_session_id
       ON model_history_items(session_id, id);
 
+      CREATE TABLE IF NOT EXISTS model_usage_entries (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
+        response_id TEXT,
+        input_tokens INTEGER NOT NULL DEFAULT 0,
+        cached_input_tokens INTEGER NOT NULL DEFAULT 0,
+        output_tokens INTEGER NOT NULL DEFAULT 0,
+        reasoning_tokens INTEGER NOT NULL DEFAULT 0,
+        total_tokens INTEGER NOT NULL DEFAULT 0,
+        created_at TEXT NOT NULL
+      );
+
+      CREATE INDEX IF NOT EXISTS idx_model_usage_entries_session_id
+      ON model_usage_entries(session_id, id);
+
       CREATE TABLE IF NOT EXISTS study_debts (
         id TEXT PRIMARY KEY,
         session_id TEXT NOT NULL REFERENCES sessions(id) ON DELETE CASCADE,
@@ -431,6 +460,24 @@ export class Notebook {
 
     if (!pendingUserRequestColumns.some((column) => column.name === 'recommended_option_id')) {
       this.db.exec(`ALTER TABLE pending_user_requests ADD COLUMN recommended_option_id TEXT`);
+    }
+
+    const modelUsageColumns = this.db
+      .prepare(`PRAGMA table_info(model_usage_entries)`)
+      .all() as unknown as TableInfoRow[];
+
+    if (!modelUsageColumns.some((column) => column.name === 'response_id')) {
+      this.db.exec(`ALTER TABLE model_usage_entries ADD COLUMN response_id TEXT`);
+    }
+    if (!modelUsageColumns.some((column) => column.name === 'cached_input_tokens')) {
+      this.db.exec(
+        `ALTER TABLE model_usage_entries ADD COLUMN cached_input_tokens INTEGER NOT NULL DEFAULT 0`
+      );
+    }
+    if (!modelUsageColumns.some((column) => column.name === 'reasoning_tokens')) {
+      this.db.exec(
+        `ALTER TABLE model_usage_entries ADD COLUMN reasoning_tokens INTEGER NOT NULL DEFAULT 0`
+      );
     }
   }
 
@@ -1078,6 +1125,135 @@ export class Notebook {
       );
 
     this.touchSession(sessionId);
+  }
+
+  appendModelUsage(input: {
+    sessionId: string;
+    responseId?: string | null;
+    inputTokens?: number;
+    cachedInputTokens?: number;
+    outputTokens?: number;
+    reasoningTokens?: number;
+    totalTokens?: number;
+  }): ModelUsageRecord {
+    const createdAt = nowIso();
+    this.db
+      .prepare(
+        `
+          INSERT INTO model_usage_entries (
+            session_id,
+            response_id,
+            input_tokens,
+            cached_input_tokens,
+            output_tokens,
+            reasoning_tokens,
+            total_tokens,
+            created_at
+          )
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+        `
+      )
+      .run(
+        input.sessionId,
+        input.responseId ?? null,
+        input.inputTokens ?? 0,
+        input.cachedInputTokens ?? 0,
+        input.outputTokens ?? 0,
+        input.reasoningTokens ?? 0,
+        input.totalTokens ?? 0,
+        createdAt
+      );
+
+    const row = this.db
+      .prepare(
+        `
+          SELECT
+            id,
+            session_id,
+            response_id,
+            input_tokens,
+            cached_input_tokens,
+            output_tokens,
+            reasoning_tokens,
+            total_tokens,
+            created_at
+          FROM model_usage_entries
+          WHERE id = last_insert_rowid()
+        `
+      )
+      .get() as unknown as ModelUsageRow;
+
+    this.touchSession(input.sessionId);
+    return mapModelUsage(row);
+  }
+
+  listModelUsage(sessionId: string): ModelUsageRecord[] {
+    const rows = this.db
+      .prepare(
+        `
+          SELECT
+            id,
+            session_id,
+            response_id,
+            input_tokens,
+            cached_input_tokens,
+            output_tokens,
+            reasoning_tokens,
+            total_tokens,
+            created_at
+          FROM model_usage_entries
+          WHERE session_id = ?
+          ORDER BY id ASC
+        `
+      )
+      .all(sessionId) as unknown as ModelUsageRow[];
+
+    return rows.map(mapModelUsage);
+  }
+
+  getModelUsageSummary(sessionId: string): ModelUsageSummary {
+    const row = this.db
+      .prepare(
+        `
+          SELECT
+            COUNT(*) AS response_count,
+            COALESCE(SUM(input_tokens), 0) AS input_tokens,
+            COALESCE(SUM(cached_input_tokens), 0) AS cached_input_tokens,
+            COALESCE(SUM(output_tokens), 0) AS output_tokens,
+            COALESCE(SUM(reasoning_tokens), 0) AS reasoning_tokens,
+            COALESCE(SUM(total_tokens), 0) AS total_tokens,
+            COALESCE(MAX(input_tokens), 0) AS max_input_tokens,
+            COALESCE(MAX(output_tokens), 0) AS max_output_tokens,
+            COALESCE(MAX(total_tokens), 0) AS max_total_tokens
+          FROM model_usage_entries
+          WHERE session_id = ?
+        `
+      )
+      .get(sessionId) as
+      | {
+          response_count: number;
+          input_tokens: number;
+          cached_input_tokens: number;
+          output_tokens: number;
+          reasoning_tokens: number;
+          total_tokens: number;
+          max_input_tokens: number;
+          max_output_tokens: number;
+          max_total_tokens: number;
+        }
+      | undefined;
+
+    return {
+      responseCount: row?.response_count ?? 0,
+      inputTokens: row?.input_tokens ?? 0,
+      cachedInputTokens: row?.cached_input_tokens ?? 0,
+      outputTokens: row?.output_tokens ?? 0,
+      reasoningTokens: row?.reasoning_tokens ?? 0,
+      totalTokens: row?.total_tokens ?? 0,
+      maxInputTokens: row?.max_input_tokens ?? 0,
+      maxOutputTokens: row?.max_output_tokens ?? 0,
+      maxTotalTokens: row?.max_total_tokens ?? 0
+    };
   }
 
   getLatestModelHistoryId(sessionId: string): number | null {
@@ -1842,6 +2018,20 @@ function mapModelHistoryItem(row: ModelHistoryRow): ModelHistoryItem {
     type: 'function_call_output',
     call_id: row.call_id ?? '',
     output: row.content_text ?? ''
+  };
+}
+
+function mapModelUsage(row: ModelUsageRow): ModelUsageRecord {
+  return {
+    id: row.id,
+    sessionId: row.session_id,
+    responseId: row.response_id,
+    inputTokens: row.input_tokens,
+    cachedInputTokens: row.cached_input_tokens,
+    outputTokens: row.output_tokens,
+    reasoningTokens: row.reasoning_tokens,
+    totalTokens: row.total_tokens,
+    createdAt: row.created_at
   };
 }
 
