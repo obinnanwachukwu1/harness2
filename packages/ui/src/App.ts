@@ -1,11 +1,10 @@
 import {
   BoxRenderable,
   CliRenderEvents,
-  type Selection,
   createCliRenderer,
-  InputRenderable,
-  InputRenderableEvents,
   ScrollBoxRenderable,
+  type Selection,
+  TextareaRenderable,
   TextAttributes,
   TextRenderable,
   type CliRenderer
@@ -46,8 +45,10 @@ export class App {
   private readonly transcriptScroll: ScrollBoxRenderable;
   private readonly transcriptContent: BoxRenderable;
   private readonly experimentRail: BoxRenderable;
+  private readonly footer: BoxRenderable;
+  private readonly promptShell: BoxRenderable;
   private readonly statusRow: BoxRenderable;
-  private readonly input: InputRenderable;
+  private readonly input: TextareaRenderable;
   private readonly blockViews = new Map<string, BlockView>();
   private currentBlocks: RenderBlock[] = [];
   private readonly experimentChildIds = new Set<string>();
@@ -76,8 +77,10 @@ export class App {
     this.transcriptScroll = this.root.findDescendantById('transcript-scroll') as ScrollBoxRenderable;
     this.transcriptContent = this.root.findDescendantById('transcript-content') as BoxRenderable;
     this.experimentRail = this.root.findDescendantById('experiment-rail') as BoxRenderable;
+    this.footer = this.root.findDescendantById('footer') as BoxRenderable;
+    this.promptShell = this.root.findDescendantById('prompt-shell') as BoxRenderable;
     this.statusRow = this.root.findDescendantById('status-row') as BoxRenderable;
-    this.input = this.root.findDescendantById('composer-input') as InputRenderable;
+    this.input = this.root.findDescendantById('composer-input') as TextareaRenderable;
 
     this.renderer.root.add(this.root);
     this.bindBridge();
@@ -88,6 +91,7 @@ export class App {
     process.on('SIGUSR2', this.handleSigUsr2);
     process.on('SIGTERM', this.handleSigTerm);
     this.input.focus();
+    this.updateComposerLayout();
   }
 
   async run(): Promise<void> {
@@ -166,12 +170,15 @@ export class App {
     );
 
     const footer = new BoxRenderable(this.renderer, {
+      id: 'footer',
       width: '100%',
       height: 5,
       flexDirection: 'column'
     });
     const promptShell = new BoxRenderable(this.renderer, {
+      id: 'prompt-shell',
       width: '100%',
+      height: 3,
       marginLeft: 1,
       marginRight: 1,
       backgroundColor: '#27272a',
@@ -181,14 +188,22 @@ export class App {
       paddingRight: 1
     });
     promptShell.add(
-      new InputRenderable(this.renderer, {
+      new TextareaRenderable(this.renderer, {
         id: 'composer-input',
         placeholder: 'Send a prompt…',
+        minHeight: 1,
+        maxHeight: 3,
         textColor: '#ffffff',
         placeholderColor: '#71717a',
         backgroundColor: '#27272a',
         focusedTextColor: '#ffffff',
-        focusedBackgroundColor: '#27272a'
+        focusedBackgroundColor: '#27272a',
+        keyBindings: [
+          { name: 'return', action: 'submit' },
+          { name: 'linefeed', action: 'newline' },
+          { name: 'return', shift: true, action: 'newline' },
+          { name: 'linefeed', shift: true, action: 'newline' }
+        ]
       })
     );
     footer.add(promptShell);
@@ -284,8 +299,11 @@ export class App {
   }
 
   private bindInput(): void {
-    this.input.on(InputRenderableEvents.ENTER, (value: string) => {
-      const text = value.trim();
+    this.input.onContentChange = () => {
+      this.updateComposerLayout();
+    };
+    this.input.onSubmit = () => {
+      const text = this.input.plainText.trim();
       if (!text) {
         return;
       }
@@ -294,9 +312,21 @@ export class App {
         type: 'submit',
         text
       });
-      this.input.value = '';
+      this.input.setText('');
+      this.updateComposerLayout();
       this.renderer.requestRender();
-    });
+    };
+  }
+
+  private updateComposerLayout(): void {
+    const logicalLineCount = this.input.plainText.length === 0 ? 1 : this.input.plainText.split('\n').length;
+    const lineCount = Math.max(1, Math.min(3, Math.max(logicalLineCount, this.input.virtualLineCount)));
+    this.input.height = lineCount;
+    this.input.minHeight = lineCount;
+    this.input.maxHeight = lineCount;
+    this.promptShell.height = lineCount + 2;
+    this.footer.height = lineCount + 4;
+    this.renderer.requestRender();
   }
 
   private bindTranscriptMouseFocus(): void {
