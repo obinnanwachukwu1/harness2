@@ -81,6 +81,11 @@ export function formatToolHeader(name: string, rawArguments: string, output?: st
           ? `experiment spawn(${questionId}: ${compactTextForHeader(readStringArg(args, 'hypothesis'), 52)})`
           : `experiment spawn(${compactTextForHeader(readStringArg(args, 'hypothesis'), 64)})`;
       }
+      case 'narrow_question':
+        return `narrow question(${compactTextForHeader(
+          readOptionalStringArg(args, 'questionId') ?? readStringArg(args, 'summary'),
+          56
+        )})`;
       case 'read_experiment':
         return `experiment read(${readStringArg(args, 'experimentId')})`;
       case 'wait_experiment':
@@ -194,6 +199,22 @@ export function formatLiveToolBody(name: string, rawArguments: string): string[]
         const query = readOptionalStringArg(args, 'query');
         if (query) {
           body.push(`query: ${query}`);
+        }
+        return body;
+      }
+      case 'narrow_question': {
+        const body = [
+          `questionId: ${readStringArg(args, 'questionId')}`,
+          `summary: ${readStringArg(args, 'summary')}`,
+          `whyItMatters: ${readStringArg(args, 'whyItMatters')}`
+        ];
+        const affectedPaths = readOptionalArrayArg(args, 'affectedPaths');
+        if (Array.isArray(affectedPaths)) {
+          body.push(`affectedPaths: ${affectedPaths.length}`);
+        }
+        const evidencePaths = readOptionalArrayArg(args, 'evidencePaths');
+        if (Array.isArray(evidencePaths)) {
+          body.push(`evidencePaths: ${evidencePaths.length}`);
         }
         return body;
       }
@@ -435,19 +456,18 @@ export const MAIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     type: 'function',
     name: 'spawn_experiment',
     description:
-      'Run a bounded experiment in an isolated worktree to answer one residual uncertainty. Use this only after a focused local evidence pass when the unresolved claim still matters and a disposable study is the cheapest reliable way to decide it. Tie the experiment to questionId when it is answering an open question. hypothesis should be falsifiable. localEvidenceSummary should state what the local pass already established. residualUncertainty should name the single remaining unknown this experiment must decide. Do not use this for vague exploration, repeated repo inspection, or to restate the full implementation plan. Prefer one experiment per question; parallel experiments only for orthogonal risks. Once this is the chosen evidence path for a question, prefer wait_experiment or read_experiment over duplicate inline probing. This is a good fit for live external or secret-backed probes when independent safe work can continue in parallel. If you do not have a strong reason to choose smaller, use a 50000 token budget.',
+      'Run a bounded experiment in an isolated worktree to answer one residual uncertainty for an open question. Use this after a focused local evidence pass when the unresolved claim still matters and a disposable study is the cheapest reliable way to decide it. questionId is required. hypothesis should be falsifiable. residualUncertainty should name the single remaining unknown this experiment must decide. The harness will derive the local evidence summary from the current question and recent evidence, so do not restate it unless extra context is materially necessary. Do not use this for vague exploration, repeated repo inspection, or to restate the full implementation plan. Prefer one experiment per question; parallel experiments only for orthogonal risks. Once this is the chosen evidence path for a question, prefer wait_experiment or read_experiment over duplicate inline probing. This is a good fit for live external or secret-backed probes when independent safe work can continue in parallel. If you do not have a strong reason to choose smaller, use a 50000 token budget.',
     parameters: {
       type: 'object',
       properties: {
         questionId: { type: 'string' },
         hypothesis: { type: 'string' },
-        localEvidenceSummary: { type: 'string' },
         residualUncertainty: { type: 'string' },
         context: { type: 'string' },
         budgetTokens: { type: 'number' },
         preserve: { type: 'boolean' }
       },
-      required: ['hypothesis', 'localEvidenceSummary', 'residualUncertainty'],
+      required: ['questionId', 'hypothesis', 'residualUncertainty'],
       additionalProperties: false
     }
   },
@@ -506,6 +526,36 @@ export const MAIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
         query: { type: 'string' }
       },
       required: ['questionId'],
+      additionalProperties: false
+    }
+  },
+  {
+    type: 'function',
+    name: 'narrow_question',
+    description:
+      'Close an open question as scope_narrowed and immediately open its narrower successor in one step. Use this when the original claim was too broad or an experiment invalidated the current path and you need a different successor claim before dependent edits can proceed. summary and whyItMatters should describe the successor claim, not the old one. affectedPaths is required and should scope only the edits that depend on the successor claim. evidencePaths is optional and only for same-question probe ownership on the successor claim. note should state why the original question is no longer the right blocker and what changed.',
+    parameters: {
+      type: 'object',
+      properties: {
+        questionId: { type: 'string' },
+        summary: { type: 'string' },
+        whyItMatters: { type: 'string' },
+        kind: {
+          type: 'string',
+          enum: ['runtime', 'scope', 'architecture']
+        },
+        affectedPaths: {
+          type: 'array',
+          items: { type: 'string' }
+        },
+        evidencePaths: {
+          type: 'array',
+          items: { type: 'string' }
+        },
+        recommendedStudy: { type: 'string' },
+        note: { type: 'string' }
+      },
+      required: ['questionId', 'summary', 'whyItMatters', 'affectedPaths', 'note'],
       additionalProperties: false
     }
   },
@@ -579,7 +629,7 @@ export const MAIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     type: 'function',
     name: 'create_plan',
     description:
-      'Create or update a reviewable plan.md for this session during the plan-mode planning phase. Capture the concrete implementation path, assumptions, files, steps, validation, and risks. Use ask_user if you need clarification or a yes/no approval before execution.',
+      'Create or update a concise reviewable plan artifact for this session during the plan-mode planning phase. Capture the concrete implementation path, assumptions, files, steps, validation, and risks. Use ask_user only if the user must choose between materially different options.',
     parameters: {
       type: 'object',
       properties: {
@@ -622,7 +672,7 @@ export const MAIN_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
     type: 'function',
     name: 'ask_user',
     description:
-      'Pause for user input in plan mode. Use this for a real clarification question before implementation, or to request a yes/no approval on the current plan. For single_choice requests, present 2 to 4 options and set exactly one recommendedOptionId. For yes_no or single_choice requests, include a reason so the harness or user can evaluate the recommendation directly.',
+      'Pause for user input in plan mode. Use this for a real clarification question or a material user choice the model cannot safely decide alone. For single_choice requests, present 2 to 4 options and set exactly one recommendedOptionId. For yes_no or single_choice requests, include a reason so the harness or user can evaluate the recommendation directly.',
     parameters: {
       type: 'object',
       properties: {
@@ -766,10 +816,20 @@ export const PLAN_EXECUTION_TOOL_DEFINITIONS = filterToolDefinitions([
   'edit',
   'glob',
   'rg',
+  'ask_user',
   'update_todos'
 ]);
 
-export const DIRECT_TOOL_DEFINITIONS = PLAN_EXECUTION_TOOL_DEFINITIONS;
+export const DIRECT_TOOL_DEFINITIONS = filterToolDefinitions([
+  'exec_command',
+  'write_stdin',
+  'read',
+  'ls',
+  'edit',
+  'glob',
+  'rg',
+  'update_todos'
+]);
 
 export const EXPERIMENT_TOOL_DEFINITIONS: readonly ToolDefinition[] = [
   MAIN_TOOL_DEFINITIONS.find((definition) => definition.name === 'exec_command')!,
@@ -993,7 +1053,7 @@ async function executeToolCall(call: ToolCall, tools: AgentTools): Promise<strin
         studyDebtId:
           readOptionalStringArg(args, 'questionId') ?? readOptionalStringArg(args, 'studyDebtId'),
         hypothesis: readStringArg(args, 'hypothesis'),
-        localEvidenceSummary: readStringArg(args, 'localEvidenceSummary'),
+        localEvidenceSummary: readOptionalStringArg(args, 'localEvidenceSummary'),
         residualUncertainty: readStringArg(args, 'residualUncertainty'),
         context: readOptionalStringArg(args, 'context'),
         budgetTokens:
@@ -1002,6 +1062,24 @@ async function executeToolCall(call: ToolCall, tools: AgentTools): Promise<strin
       });
       return JSON.stringify(serializeExperimentForModel(experiment), null, 2);
     }
+    case 'narrow_question':
+      if (!tools.narrowStudyDebt) {
+        throw new Error('narrow_question is not available in this session.');
+      }
+      return JSON.stringify(
+        await tools.narrowStudyDebt({
+          questionId: readStringArg(args, 'questionId'),
+          summary: readStringArg(args, 'summary'),
+          whyItMatters: readStringArg(args, 'whyItMatters'),
+          kind: readOptionalStringArg(args, 'kind') as StudyDebtKind | undefined,
+          affectedPaths: readStringArrayArg(args, 'affectedPaths'),
+          evidencePaths: readOptionalStringArrayArg(args, 'evidencePaths'),
+          recommendedStudy: readOptionalStringArg(args, 'recommendedStudy'),
+          note: readStringArg(args, 'note')
+        }),
+        null,
+        2
+      );
     case 'extend_experiment_budget':
       if (!tools.extendExperimentBudget) {
         throw new Error('extend_experiment_budget is not available in this session.');

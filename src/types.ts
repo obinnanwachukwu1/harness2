@@ -224,6 +224,30 @@ export type ModelHistoryItem =
       output: string;
     };
 
+export interface ModelUsageRecord {
+  id: number;
+  sessionId: string;
+  responseId: string | null;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+  createdAt: string;
+}
+
+export interface ModelUsageSummary {
+  responseCount: number;
+  inputTokens: number;
+  cachedInputTokens: number;
+  outputTokens: number;
+  reasoningTokens: number;
+  totalTokens: number;
+  maxInputTokens: number;
+  maxOutputTokens: number;
+  maxTotalTokens: number;
+}
+
 export interface ExperimentRecord {
   id: string;
   sessionId: string;
@@ -502,7 +526,7 @@ export interface SpawnExperimentInput {
   sessionId: string;
   studyDebtId?: string;
   hypothesis: string;
-  localEvidenceSummary: string;
+  localEvidenceSummary?: string;
   residualUncertainty: string;
   context?: string;
   budgetTokens: number;
@@ -592,6 +616,22 @@ export interface AgentTools {
     resolution: StudyDebtResolution;
     note: string;
   }): Promise<{ questionId: string; status: 'closed' }>;
+  narrowStudyDebt?(input: {
+    questionId: string;
+    summary: string;
+    whyItMatters: string;
+    kind?: StudyDebtKind;
+    affectedPaths: string[];
+    evidencePaths?: string[];
+    recommendedStudy?: string;
+    note: string;
+  }): Promise<{
+    previousQuestionId: string;
+    status: 'narrowed';
+    questionId: string;
+    summary: string;
+    kind: StudyDebtKind;
+  }>;
   exportSession?(sessionId?: string): Promise<SessionExportResult>;
   clearExperimentJournal?(
     force?: boolean

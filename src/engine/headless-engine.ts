@@ -221,6 +221,7 @@ export class HeadlessEngine {
       searchExperiments: (questionId, query) => this.searchExperiments(questionId, query),
       openStudyDebt: (input) => this.openStudyDebt(input),
       resolveStudyDebt: (input) => this.resolveStudyDebt(input),
+      narrowStudyDebt: (input) => this.narrowStudyDebt(input),
       exportSession: (sessionId) => this.exportSession(sessionId),
       clearExperimentJournal: (force) => this.clearExperimentJournal(force),
       adoptExperiment: (experimentId, adoptionOptions) =>
@@ -1403,8 +1404,19 @@ export class HeadlessEngine {
       }
     }
 
+    const localEvidenceSummary =
+      input.localEvidenceSummary?.trim() ||
+      this.deriveExperimentLocalEvidenceSummary(questionId ?? null);
+
+    if (!localEvidenceSummary) {
+      throw new Error(
+        'spawn_experiment needs local evidence context. Tie it to questionId or provide localEvidenceSummary explicitly.'
+      );
+    }
+
     return this.experimentManager.spawn({
       ...input,
+      localEvidenceSummary,
       studyDebtId: questionId,
       sessionId: this.options.sessionId
     });
@@ -1521,6 +1533,86 @@ export class HeadlessEngine {
     };
   }
 
+  async narrowStudyDebt(input: {
+    questionId: string;
+    summary: string;
+    whyItMatters: string;
+    kind?: StudyDebtKind;
+    affectedPaths: string[];
+    evidencePaths?: string[];
+    recommendedStudy?: string;
+    note: string;
+  }): Promise<{
+    previousQuestionId: string;
+    status: 'narrowed';
+    questionId: string;
+    summary: string;
+    kind: StudyDebtKind;
+  }> {
+    const existing = this.options.notebook.getStudyDebt(input.questionId);
+    if (!existing || existing.sessionId !== this.options.sessionId) {
+      throw new Error(`Unknown question: ${input.questionId}`);
+    }
+    if (existing.status !== 'open') {
+      throw new Error(`Question ${input.questionId} is already closed.`);
+    }
+
+    await this.resolveStudyDebt({
+      questionId: input.questionId,
+      resolution: 'scope_narrowed',
+      note: input.note
+    });
+    const next = await this.openStudyDebt({
+      summary: input.summary,
+      whyItMatters: input.whyItMatters,
+      kind: input.kind ?? existing.kind,
+      affectedPaths: input.affectedPaths,
+      evidencePaths: input.evidencePaths,
+      recommendedStudy: input.recommendedStudy
+    });
+    return {
+      previousQuestionId: input.questionId,
+      status: 'narrowed',
+      questionId: next.questionId,
+      summary: next.summary,
+      kind: next.kind
+    };
+  }
+
+  private deriveExperimentLocalEvidenceSummary(questionId: string | null): string {
+    if (!questionId) {
+      return '';
+    }
+
+    const debt = this.options.notebook.getStudyDebt(questionId);
+    if (!debt) {
+      return '';
+    }
+
+    const transcript = this.options.notebook
+      .listTranscript(this.options.sessionId, 40)
+      .filter((entry) => entry.createdAt >= debt.openedAt)
+      .filter((entry) => entry.role === 'tool' || entry.role === 'assistant')
+      .map((entry) => entry.text.split('\n')[0]?.trim())
+      .filter((line): line is string => Boolean(line) && !line.startsWith('@@thinking\t'))
+      .slice(-4);
+
+    const facts = [
+      `Open question: ${debt.summary}.`,
+      `Why it matters: ${debt.whyItMatters}.`,
+      debt.affectedPaths && debt.affectedPaths.length > 0
+        ? `Affected paths: ${debt.affectedPaths.join(', ')}.`
+        : null,
+      debt.evidencePaths && debt.evidencePaths.length > 0
+        ? `Evidence paths: ${debt.evidencePaths.join(', ')}.`
+        : null,
+      debt.recommendedStudy ? `Suggested study focus: ${debt.recommendedStudy}.` : null,
+      transcript.length > 0 ? `Recent evidence: ${transcript.join(' | ')}` : null
+    ].filter((line): line is string => Boolean(line));
+
+    return facts.join(' ');
+  }
+
   async createPlan(input: CreatePlanInput): Promise<CreatePlanResult> {
     const settings = this.getSessionSettings();
     if (settings.agentMode !== 'plan') {
@@ -1531,7 +1623,9 @@ export class HeadlessEngine {
     }
 
     validateCreatePlanInput(input);
-    const planPath = path.join(this.options.cwd, 'plan.md');
+    const planDir = path.join(this.options.cwd, '.h2', 'plans');
+    await mkdir(planDir, { recursive: true });
+    const planPath = path.join(planDir, `${this.options.sessionId}.md`);
     await writeFile(planPath, input.planMarkdown, 'utf8');
     this.options.notebook.saveSessionPlan({
       sessionId: this.options.sessionId,
@@ -1543,6 +1637,7 @@ export class HeadlessEngine {
       risks: input.risks,
       planPath
     });
+    this.options.notebook.setPlanModePhase(this.options.sessionId, 'execution');
     this.emitChange();
     return {
       sessionId: this.options.sessionId,
@@ -2177,12 +2272,16 @@ export class HeadlessEngine {
       (debt) => this.options.notebook.getStudyDebtProbeEpisodeCount(debt.id) >= 1
     );
     if (exhausted.length > 0) {
+      const runtimeHint = exhausted.some((debt) => debt.kind === 'runtime')
+        ? 'For a runtime question, the next move is usually spawn_experiment, narrow_question, or explicit override.'
+        : null;
       throw new Error(
         [
           `The inline probe budget for ${toolName} is already exhausted on this question.`,
           ...exhausted.map((debt) => `${debt.id}: ${debt.summary}`),
-          'After one bounded inline probe episode on the same question, either resolve_question, spawn_experiment, or explicitly narrow/override the claim before more inline probing.'
-        ].join('\n')
+          'After one bounded inline probe episode on the same question, either resolve_question, spawn_experiment, or explicitly narrow/override the claim before more inline probing.',
+          runtimeHint
+        ].filter(Boolean).join('\n')
       );
     }
 

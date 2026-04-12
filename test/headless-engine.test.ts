@@ -81,7 +81,7 @@ test('HeadlessEngine plan mode pauses on ask_user approval and resumes after yes
     engine.modelClient.runTurn = originalRunTurn;
   });
 
-  await engine.createPlan({
+  const planResult = await engine.createPlan({
     goal: 'Add a tiny implementation',
     assumptions: ['No extra API design is needed'],
     files: ['README.md'],
@@ -91,7 +91,8 @@ test('HeadlessEngine plan mode pauses on ask_user approval and resumes after yes
     planMarkdown: '# Plan\n\n- Update README.md\n'
   });
 
-  assert.equal(engine.getSessionSettings().planModePhase, 'planning');
+  assert.match(planResult.planPath, /\/\.h2\/plans\/session-/);
+  assert.equal(engine.getSessionSettings().planModePhase, 'execution');
 
   const request = await engine.askUser({
     kind: 'approval',
@@ -1393,6 +1394,83 @@ test('HeadlessEngine rejects spawn_experiment pinned to an unknown or closed que
   );
 });
 
+test('HeadlessEngine derives experiment local evidence summary from the linked question', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const notebook = engine.notebook;
+  const experimentManager = engine.experiments;
+  let capturedInput: any = null;
+  const originalSpawn = experimentManager.spawn.bind(experimentManager);
+  experimentManager.spawn = async (input: any) => {
+    capturedInput = input;
+    return {
+      id: 'exp-derived-evidence',
+      sessionId: input.sessionId,
+      studyDebtId: input.studyDebtId ?? null,
+      hypothesis: input.hypothesis,
+      command: 'subagent',
+      context: input.context ?? '',
+      baseCommitSha: 'abc123',
+      branchName: 'h2-exp-derived-evidence',
+      worktreePath: path.join(repoDir, '.h2', 'worktrees', 'exp-derived-evidence'),
+      status: 'running',
+      budget: input.budgetTokens,
+      tokensUsed: 0,
+      contextTokensUsed: 0,
+      toolOutputTokensUsed: 0,
+      observationTokensUsed: 0,
+      preserve: input.preserve,
+      createdAt: nowIso(),
+      updatedAt: nowIso(),
+      resolvedAt: null,
+      finalVerdict: null,
+      finalSummary: null,
+      discovered: [],
+      artifacts: [],
+      constraints: [],
+      confidenceNote: null,
+      lowSignalWarningEmitted: false,
+      promote: false
+    };
+  };
+  t.after(() => {
+    experimentManager.spawn = originalSpawn;
+  });
+
+  const debt = await engine.openStudyDebt({
+    summary: 'runtime continuity is unproven',
+    whyItMatters: 'Being wrong would materially change the recovery behavior.',
+    kind: 'runtime',
+    affectedPaths: ['src/runtime.ts'],
+    evidencePaths: ['src/runtime.ts'],
+    recommendedStudy: 'Validate whether the interrupted stream can resume without duplicating output.'
+  });
+  notebook.appendTranscript(engine.snapshot.session.id, 'assistant', 'Inspected the route and client hook.');
+  notebook.appendTranscript(
+    engine.snapshot.session.id,
+    'tool',
+    '@@tool\tread\tRead(src/runtime.ts)\nsrc/runtime.ts'
+  );
+
+  await engine.spawnExperiment({
+    questionId: debt.questionId,
+    hypothesis: 'the interrupted stream can resume without duplicate output',
+    residualUncertainty: 'whether resume is actually safe after a transport drop',
+    budgetTokens: 1200,
+    preserve: false
+  });
+
+  assert.ok(capturedInput);
+  assert.match(capturedInput.localEvidenceSummary, /Open question: runtime continuity is unproven\./);
+  assert.match(capturedInput.localEvidenceSummary, /Why it matters: Being wrong would materially change the recovery behavior\./);
+  assert.match(capturedInput.localEvidenceSummary, /Suggested study focus: Validate whether the interrupted stream can resume without duplicating output\./);
+  assert.match(capturedInput.localEvidenceSummary, /Recent evidence:/);
+});
+
 test('HeadlessEngine rejects spawning a second active experiment on the same question', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));
@@ -1507,6 +1585,43 @@ test('HeadlessEngine rejects spawning a second active experiment on the same que
       preserve: false
     })
   );
+});
+
+test('HeadlessEngine can narrow a question into a successor claim in one step', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const original = await engine.openStudyDebt({
+    summary: 'stream resume semantics are unclear',
+    whyItMatters: 'Being wrong would change retry and history behavior.',
+    kind: 'runtime',
+    affectedPaths: ['src/chat.ts'],
+    evidencePaths: ['src/chat.ts']
+  });
+
+  const narrowed = await engine.narrowStudyDebt({
+    questionId: original.questionId,
+    summary: 'resume within the same branch is unsafe after transport interruption',
+    whyItMatters: 'Being wrong would change whether retry can stay in place.',
+    kind: 'runtime',
+    affectedPaths: ['src/chat.ts', 'src/retry.ts'],
+    evidencePaths: ['src/retry.ts'],
+    note: 'The original question was too broad; only retry semantics still block implementation.'
+  });
+
+  const closed = engine.notebook.getStudyDebt(original.questionId);
+  const successor = engine.notebook.getStudyDebt(narrowed.questionId);
+
+  assert.equal(closed?.status, 'closed');
+  assert.equal(closed?.resolution, 'scope_narrowed');
+  assert.equal(closed?.resolutionNote, 'The original question was too broad; only retry semantics still block implementation.');
+  assert.equal(successor?.status, 'open');
+  assert.equal(successor?.summary, 'resume within the same branch is unsafe after transport interruption');
+  assert.deepEqual(successor?.affectedPaths, ['src/chat.ts', 'src/retry.ts']);
+  assert.deepEqual(successor?.evidencePaths, ['src/retry.ts']);
 });
 
 test('HeadlessEngine searchExperiments returns a guardrail when no current question is open', async (t) => {
