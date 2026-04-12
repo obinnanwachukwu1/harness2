@@ -83,6 +83,7 @@ export class OpenTuiApp {
     this.bindBridge();
     this.bindKeys();
     this.bindInput();
+    this.bindTranscriptMouseFocus();
     this.bindSelection();
     process.on('SIGUSR2', this.handleSigUsr2);
     process.on('SIGTERM', this.handleSigTerm);
@@ -298,6 +299,25 @@ export class OpenTuiApp {
     });
   }
 
+  private bindTranscriptMouseFocus(): void {
+    const preserveInputFocus = (): void => {
+      process.nextTick(() => {
+        this.input.focus();
+        this.renderer.requestRender();
+      });
+    };
+
+    const handleMouseDown = (event: { preventDefault(): void }): void => {
+      event.preventDefault();
+      preserveInputFocus();
+    };
+
+    this.transcriptScroll.onMouseDown = handleMouseDown;
+    this.transcriptContent.onMouseDown = handleMouseDown;
+    this.transcriptScroll.onMouseDragEnd = preserveInputFocus;
+    this.transcriptContent.onMouseDragEnd = preserveInputFocus;
+  }
+
   private bindSelection(): void {
     this.renderer.on(CliRenderEvents.SELECTION, (selection: Selection) => {
       if (selection.isDragging) {
@@ -318,6 +338,7 @@ export class OpenTuiApp {
     const nativeCopied = await copyToClipboard(text);
 
     this.renderer.clearSelection();
+    this.input.focus();
     this.renderer.requestRender();
     this.setTransientStatus(
       osc52Copied || nativeCopied ? 'copied selection' : 'copy unsupported in this terminal'
