@@ -11,10 +11,40 @@ import { describeStatePaths, getRepoNotebookPath } from './state-paths.js';
 
 class CliUsageError extends Error {}
 
+installCliWarningFilter();
+
 const EVAL_RUN_USAGE =
   'Usage: h2 eval run <manifest> [--case <id>] [--parallel <n>] [--repeat <n>] [--mode <study|plan|direct>]';
 const HARBOR_RUN_USAGE =
   'Usage: h2 harbor-run --output-dir <path> (--instruction "<text>" | --instruction-file <path>) [--session <id>] [--model <name>] [--reasoning-effort <off|low|medium|high>] [--web-search-mode <disabled|cached|live>] [--thinking|--no-thinking] [--json]';
+
+function installCliWarningFilter(): void {
+  const originalEmitWarning = process.emitWarning.bind(process);
+
+  process.emitWarning = ((warning: string | Error, ...args: unknown[]) => {
+    if (shouldSuppressWarning(warning, args[0])) {
+      return;
+    }
+
+    return originalEmitWarning(warning as string | Error, ...(args as []));
+  }) as typeof process.emitWarning;
+}
+
+function shouldSuppressWarning(warning: string | Error, type: unknown): boolean {
+  const name =
+    warning instanceof Error
+      ? warning.name
+      : typeof type === 'string'
+        ? type
+        : null;
+  const message = warning instanceof Error ? warning.message : warning;
+
+  return (
+    name === 'ExperimentalWarning' &&
+    typeof message === 'string' &&
+    /SQLite is an experimental feature/i.test(message)
+  );
+}
 
 async function main(): Promise<void> {
   const [, , ...rawArgs] = process.argv;
