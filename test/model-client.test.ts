@@ -15,6 +15,7 @@ import {
   EXPERIMENT_TOOL_DEFINITIONS,
   STUDY_TOOL_DEFINITIONS
 } from '../src/model/model-client.js';
+import { resetModelsDevCatalogForTests } from '../src/model/models-dev.js';
 import {
   DIRECT_AGENT_PROMPT,
   EXPERIMENT_SUBAGENT_PROMPT,
@@ -1640,6 +1641,7 @@ test('ModelClient rebuilds requests from latest checkpoint plus recent tail', as
 });
 
 test('ModelClient estimates context usage from compacted replay state', async (t) => {
+  resetModelsDevCatalogForTests();
   const tempDir = await createTempDir('h2-model-context-');
   t.after(async () => cleanupDir(tempDir));
 
@@ -1679,9 +1681,152 @@ test('ModelClient estimates context usage from compacted replay state', async (t
   const client = new ModelClient(notebook, auth);
   const usage = client.getContextWindowUsage('session-test');
 
-  assert.equal(usage.totalTokens, 1_050_000);
+  assert.equal(usage.effectiveBudgetTokens, 200_000);
+  assert.equal(usage.fullContextTokens, 1_050_000);
+  assert.equal(usage.inputLimitTokens, null);
+  assert.equal(usage.standardRateTokens, 200_000);
+  assert.equal(usage.allowOverStandardContext, false);
   assert.ok(usage.usedTokens > 0);
   assert.ok(usage.usedTokens < 10_000);
+});
+
+test('ModelClient expands effective context budget when over-standard context is enabled', async (t) => {
+  resetModelsDevCatalogForTests();
+  const tempDir = await createTempDir('h2-model-context-budget-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-test', tempDir);
+  notebook.upsertModelSession({
+    sessionId: 'session-test',
+    provider: 'openai-codex',
+    model: 'gpt-5.4',
+    reasoningEffort: 'medium',
+    allowOverStandardContext: true,
+    previousResponseId: null,
+    updatedAt: new Date().toISOString(),
+    agentMode: 'study',
+    planModePhase: null
+  });
+
+  const auth = new OpenAICodexAuth(notebook);
+  const client = new ModelClient(notebook, auth);
+  const usage = client.getContextWindowUsage('session-test');
+
+  assert.equal(usage.effectiveBudgetTokens, 1_050_000);
+  assert.equal(usage.fullContextTokens, 1_050_000);
+  assert.equal(usage.inputLimitTokens, null);
+  assert.equal(usage.standardRateTokens, 200_000);
+  assert.equal(usage.allowOverStandardContext, true);
+});
+
+test('ModelClient allows over-standard context when ALLOW_OVER_STANDARD_CONTEXT=1', async (t) => {
+  resetModelsDevCatalogForTests();
+  const previous = process.env.ALLOW_OVER_STANDARD_CONTEXT;
+  process.env.ALLOW_OVER_STANDARD_CONTEXT = '1';
+  t.after(() => {
+    if (previous === undefined) {
+      delete process.env.ALLOW_OVER_STANDARD_CONTEXT;
+    } else {
+      process.env.ALLOW_OVER_STANDARD_CONTEXT = previous;
+    }
+  });
+
+  const tempDir = await createTempDir('h2-model-context-budget-env-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-test', tempDir);
+
+  const auth = new OpenAICodexAuth(notebook);
+  const client = new ModelClient(notebook, auth);
+  const usage = client.getContextWindowUsage('session-test');
+
+  assert.equal(usage.effectiveBudgetTokens, 1_050_000);
+  assert.equal(usage.allowOverStandardContext, true);
+});
+
+test('ModelClient prefers models.dev metadata for effective context policy when available', async (t) => {
+  resetModelsDevCatalogForTests();
+  const previousForceFetch = process.env.H2_MODELS_DEV_FORCE_FETCH;
+  process.env.H2_MODELS_DEV_FORCE_FETCH = '1';
+  t.after(() => {
+    if (previousForceFetch === undefined) {
+      delete process.env.H2_MODELS_DEV_FORCE_FETCH;
+    } else {
+      process.env.H2_MODELS_DEV_FORCE_FETCH = previousForceFetch;
+    }
+  });
+  const tempDir = await createTempDir('h2-model-models-dev-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-test', tempDir);
+
+  const auth = new OpenAICodexAuth(notebook);
+  const modelsDevPayload = {
+    opencode: {
+      models: [
+        {
+          id: 'openai/gpt-5.4',
+          limit: {
+            context: 1_050_000,
+            input: 922_000,
+            output: 128_000
+          },
+          cost: {
+            input: 2.5,
+            output: 15,
+            cache_read: 0.25,
+            context_over_200k: {
+              input: 5,
+              output: 22.5,
+              cache_read: 0.5
+            }
+          }
+        }
+      ]
+    }
+  };
+
+  const client = new ModelClient(notebook, auth, {
+    fetchImpl: async (input) => {
+      if (String(input) === 'https://models.dev/api.json') {
+        return new Response(JSON.stringify(modelsDevPayload), {
+          headers: { 'content-type': 'application/json' }
+        });
+      }
+
+      throw new Error(`Unexpected fetch ${String(input)}`);
+    }
+  });
+
+  await new Promise((resolve) => setTimeout(resolve, 0));
+  const usage = client.getContextWindowUsage('session-test');
+
+  assert.equal(usage.effectiveBudgetTokens, 200_000);
+  assert.equal(usage.fullContextTokens, 1_050_000);
+  assert.equal(usage.inputLimitTokens, 922_000);
+  assert.equal(usage.standardRateTokens, 200_000);
+
+  notebook.upsertModelSession({
+    sessionId: 'session-test',
+    provider: 'openai-codex',
+    model: 'gpt-5.4',
+    reasoningEffort: 'medium',
+    allowOverStandardContext: true,
+    previousResponseId: null,
+    updatedAt: new Date().toISOString(),
+    agentMode: 'study',
+    planModePhase: null
+  });
+
+  const expandedUsage = client.getContextWindowUsage('session-test');
+  assert.equal(expandedUsage.effectiveBudgetTokens, 922_000);
+  assert.equal(expandedUsage.inputLimitTokens, 922_000);
 });
 
 test('ModelClient does not inject open question reminder developer messages into model requests', async (t) => {
@@ -2406,6 +2551,7 @@ test('ModelClient formats ranged read tool headers', async (t) => {
 });
 
 test('ModelClient exposes only compact when the reserve buffer is exhausted', async (t) => {
+  resetModelsDevCatalogForTests();
   const tempDir = await createTempDir('h2-model-compact-only-');
   t.after(async () => cleanupDir(tempDir));
 

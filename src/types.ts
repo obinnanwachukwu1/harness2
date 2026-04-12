@@ -451,6 +451,7 @@ export interface ModelSessionRecord {
   provider: 'openai-codex';
   model: string;
   reasoningEffort: 'low' | 'medium' | 'high' | null;
+  allowOverStandardContext: boolean;
   previousResponseId: string | null;
   updatedAt: string;
   agentMode: AgentMode;
@@ -490,8 +491,11 @@ export interface EngineSnapshot {
   agentMode: AgentMode;
   planModePhase: PlanModePhase;
   estimatedContextTokens: number;
-  contextWindowTokens: number;
+  effectiveContextBudgetTokens: number;
+  fullContextWindowTokens: number;
+  inputLimitContextTokens: number | null;
   standardRateContextTokens: number | null;
+  allowOverStandardContext: boolean;
   liveTurnEvents: LiveTurnEvent[];
   thinkingEnabled: boolean;
 }

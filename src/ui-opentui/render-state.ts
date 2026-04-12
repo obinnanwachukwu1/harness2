@@ -855,7 +855,7 @@ function formatTokenCount(value: number): string {
 }
 
 function formatStatus(snapshot: EngineSnapshot): OpenTuiState['status'] {
-  const ctxLimit = snapshot.contextWindowTokens;
+  const ctxLimit = snapshot.effectiveContextBudgetTokens;
   const usedPercent = ctxLimit > 0 ? Math.max(0, Math.round((snapshot.estimatedContextTokens / ctxLimit) * 100)) : 0;
   const phaseSuffix =
     snapshot.agentMode === 'plan' && snapshot.planModePhase

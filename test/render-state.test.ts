@@ -21,8 +21,11 @@ function createSnapshot(overrides: Partial<EngineSnapshot> = {}): EngineSnapshot
     model: 'gpt-5.4',
     reasoningEffort: 'medium',
     estimatedContextTokens: 0,
-    contextWindowTokens: 0,
+    effectiveContextBudgetTokens: 0,
+    fullContextWindowTokens: 0,
+    inputLimitContextTokens: null,
     standardRateContextTokens: null,
+    allowOverStandardContext: false,
     liveTurnEvents: [],
     thinkingEnabled: true,
     activePlan: null,
@@ -231,8 +234,9 @@ test('buildOpenTuiState uses the actual context window for status text and perce
     createSnapshot({
       model: 'gpt-5.4',
       estimatedContextTokens: 50_000,
-      contextWindowTokens: 75_000,
-      standardRateContextTokens: 272_000
+      effectiveContextBudgetTokens: 75_000,
+      fullContextWindowTokens: 1_050_000,
+      standardRateContextTokens: 200_000
     })
   );
 

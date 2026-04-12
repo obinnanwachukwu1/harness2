@@ -253,8 +253,11 @@ export class HeadlessEngine {
       this.currentTurnStartedAt,
       this.statusText,
       contextWindow.usedTokens,
-      contextWindow.totalTokens,
+      contextWindow.effectiveBudgetTokens,
+      contextWindow.fullContextTokens,
+      contextWindow.inputLimitTokens,
       contextWindow.standardRateTokens,
+      contextWindow.allowOverStandardContext,
       [...this.liveTurnEvents],
       this.thinkingEnabled
     );

@@ -41,6 +41,11 @@ import {
   toResponseInputItem
 } from './model-response.js';
 import {
+  ensureModelsDevCatalog,
+  getModelsDevResolvedMetadata,
+  type ModelsDevResolvedMetadata
+} from './models-dev.js';
+import {
   renderPlanDirectCheckpointBlock,
   runPlanDirectCompactor,
   writePlanDirectCompactionArtifacts
@@ -131,8 +136,11 @@ interface ModelClientOptions {
 
 interface ContextWindowUsage {
   usedTokens: number;
-  totalTokens: number;
+  effectiveBudgetTokens: number;
+  fullContextTokens: number;
+  inputLimitTokens: number | null;
   standardRateTokens: number | null;
+  allowOverStandardContext: boolean;
 }
 
 interface CompactionWindowState extends ContextWindowUsage {
@@ -142,6 +150,15 @@ interface CompactionWindowState extends ContextWindowUsage {
   shouldSuggestCompact: boolean;
   shouldWarnCompact: boolean;
   forceCompactOnly: boolean;
+}
+
+interface ResolvedContextPolicy {
+  fullContextTokens: number;
+  inputLimitTokens: number | null;
+  outputLimitTokens: number | null;
+  standardRateTokens: number | null;
+  effectiveBudgetTokens: number;
+  allowOverStandardContext: boolean;
 }
 
 export class ModelClient {
@@ -159,6 +176,7 @@ export class ModelClient {
     this.endpoint = options.endpoint ?? DEFAULT_ENDPOINT;
     this.defaultModel = options.model ?? DEFAULT_MODEL;
     this.aiProviderBaseUrl = 'https://api.openai.com/v1';
+    void ensureModelsDevCatalog(this.fetchImpl).catch(() => undefined);
   }
 
   async runTurn(
@@ -514,12 +532,26 @@ export class ModelClient {
   getContextWindowUsage(sessionId: string): ContextWindowUsage {
     const settings = this.getSessionSettings(sessionId);
     const modeConfig = resolveSessionPromptAndTools(settings);
-    const { usedTokens, totalTokens, standardRateTokens } = this.getCompactionWindowState(
+    const {
+      usedTokens,
+      effectiveBudgetTokens,
+      fullContextTokens,
+      inputLimitTokens,
+      standardRateTokens,
+      allowOverStandardContext
+    } = this.getCompactionWindowState(
       sessionId,
       modeConfig.instructions,
       modeConfig.toolDefinitions
     );
-    return { usedTokens, totalTokens, standardRateTokens };
+    return {
+      usedTokens,
+      effectiveBudgetTokens,
+      fullContextTokens,
+      inputLimitTokens,
+      standardRateTokens,
+      allowOverStandardContext
+    };
   }
 
   private async createResponse(input: {
@@ -548,6 +580,7 @@ export class ModelClient {
     toolDefinitions: readonly ToolDefinition[];
     instructions: string;
   }): Promise<ModelStepResponse> {
+    void ensureModelsDevCatalog(this.fetchImpl).catch(() => undefined);
     return createModelStepResponse({
       fetchImpl: this.fetchImpl,
       endpoint: this.endpoint,
@@ -585,7 +618,7 @@ export class ModelClient {
       1,
       Math.min(
         PLAN_DIRECT_RAW_TAIL_TOKEN_CAP,
-        Math.floor(compactionState.totalTokens * PLAN_DIRECT_RAW_TAIL_WINDOW_RATIO)
+        Math.floor(compactionState.effectiveBudgetTokens * PLAN_DIRECT_RAW_TAIL_WINDOW_RATIO)
       )
     );
     const nextTailStartHistoryId = this.notebook.getTailStartHistoryIdByTokenBudget(
@@ -780,8 +813,9 @@ export class ModelClient {
       estimateTokens(instructions) +
       estimateTokens(JSON.stringify(toolDefinitions)) +
       historyItems.reduce((total, item) => total + estimateHistoryItemTokens(item), 0);
-    const totalTokens = getModelContextWindow(settings.model);
-    const standardRateTokens = getModelStandardRateThreshold(settings.model);
+    const contextPolicy = resolveContextPolicy(settings);
+    const totalTokens = contextPolicy.effectiveBudgetTokens;
+    const standardRateTokens = contextPolicy.standardRateTokens;
     const reservedTokens = Math.max(
       1,
       Math.min(
@@ -797,8 +831,11 @@ export class ModelClient {
 
     return {
       usedTokens,
-      totalTokens,
+      effectiveBudgetTokens: totalTokens,
+      fullContextTokens: contextPolicy.fullContextTokens,
+      inputLimitTokens: contextPolicy.inputLimitTokens,
       standardRateTokens,
+      allowOverStandardContext: contextPolicy.allowOverStandardContext,
       remainingTokens,
       reservedTokens,
       usageRatio,
@@ -848,7 +885,8 @@ export class ModelClient {
     if (existing) {
       return {
         ...existing,
-        reasoningEffort: existing.reasoningEffort ?? DEFAULT_REASONING_EFFORT
+        reasoningEffort: existing.reasoningEffort ?? DEFAULT_REASONING_EFFORT,
+        allowOverStandardContext: existing.allowOverStandardContext ?? false
       };
     }
 
@@ -857,6 +895,7 @@ export class ModelClient {
       provider: OPENAI_CODEX_PROVIDER,
       model: this.defaultModel,
       reasoningEffort: DEFAULT_REASONING_EFFORT,
+      allowOverStandardContext: false,
       previousResponseId: null,
       updatedAt: nowIso(),
       agentMode: 'study',
@@ -1075,11 +1114,35 @@ function buildForcedCompactionGuardrail(state: CompactionWindowState): string {
 }
 
 function formatCompactionUsage(state: CompactionWindowState): string {
-  return `${state.usedTokens}/${state.totalTokens} estimated tokens`;
+  return `${state.usedTokens}/${state.effectiveBudgetTokens} estimated tokens`;
 }
 
 function sanitizeFileComponent(value: string): string {
   return value.replace(/[^a-zA-Z0-9._-]+/g, '-');
+}
+
+function resolveContextPolicy(settings: ModelSessionRecord): ResolvedContextPolicy {
+  const allowOverStandardContext =
+    settings.allowOverStandardContext || isEnvEnabled(process.env.ALLOW_OVER_STANDARD_CONTEXT);
+  const metadata = getModelsDevResolvedMetadata(settings.model);
+  const fullContextTokens = metadata?.contextTokens ?? getModelContextWindow(settings.model);
+  const inputLimitTokens = metadata?.inputTokens ?? getModelInputLimit(settings.model);
+  const outputLimitTokens = metadata?.outputTokens ?? null;
+  const standardRateTokens = getModelStandardRateThreshold(settings.model, metadata);
+  const hardBudget = inputLimitTokens !== null ? Math.min(inputLimitTokens, fullContextTokens) : fullContextTokens;
+  const effectiveBudgetTokens =
+    !allowOverStandardContext && standardRateTokens !== null
+      ? Math.min(hardBudget, standardRateTokens)
+      : hardBudget;
+
+  return {
+    fullContextTokens,
+    inputLimitTokens,
+    outputLimitTokens,
+    standardRateTokens,
+    effectiveBudgetTokens,
+    allowOverStandardContext
+  };
 }
 
 function getModelContextWindow(model: string): number {
@@ -1104,11 +1167,28 @@ function getModelContextWindow(model: string): number {
   return 272_000;
 }
 
-function getModelStandardRateThreshold(model: string): number | null {
+function getModelInputLimit(model: string): number | null {
+  const normalized = model.trim().toLowerCase();
+
+  if (normalized === 'gpt-5.4-mini') {
+    return 400_000;
+  }
+
+  return null;
+}
+
+function getModelStandardRateThreshold(
+  model: string,
+  metadata: ModelsDevResolvedMetadata | null = null
+): number | null {
+  if (metadata?.hasOver200kPricing) {
+    return 200_000;
+  }
+
   const normalized = model.trim().toLowerCase();
 
   if (normalized === 'gpt-5.4' || normalized === 'gpt-5.4-pro') {
-    return 272_000;
+    return 200_000;
   }
 
   return null;
@@ -1124,6 +1204,15 @@ function normalizeReasoningEffort(value: string | undefined): 'low' | 'medium' |
   }
 
   return null;
+}
+
+function isEnvEnabled(value: string | undefined): boolean {
+  if (!value) {
+    return false;
+  }
+
+  const normalized = value.trim().toLowerCase();
+  return normalized === '1' || normalized === 'true' || normalized === 'yes' || normalized === 'on';
 }
 
 async function debugResponseShape(

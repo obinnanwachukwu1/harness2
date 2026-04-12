@@ -85,6 +85,7 @@ interface ModelSessionRow {
   provider: 'openai-codex';
   model: string;
   reasoning_effort: 'low' | 'medium' | 'high' | null;
+  allow_over_standard_context: number;
   previous_response_id: string | null;
   updated_at: string;
   agent_mode: AgentMode;
@@ -257,6 +258,7 @@ export class Notebook {
         provider TEXT NOT NULL,
         model TEXT NOT NULL,
         reasoning_effort TEXT,
+        allow_over_standard_context INTEGER NOT NULL DEFAULT 0,
         previous_response_id TEXT,
         updated_at TEXT NOT NULL,
         agent_mode TEXT NOT NULL DEFAULT 'study',
@@ -399,6 +401,12 @@ export class Notebook {
 
     if (!modelSessionColumns.some((column) => column.name === 'reasoning_effort')) {
       this.db.exec(`ALTER TABLE model_sessions ADD COLUMN reasoning_effort TEXT`);
+    }
+
+    if (!modelSessionColumns.some((column) => column.name === 'allow_over_standard_context')) {
+      this.db.exec(
+        `ALTER TABLE model_sessions ADD COLUMN allow_over_standard_context INTEGER NOT NULL DEFAULT 0`
+      );
     }
 
     if (!modelSessionColumns.some((column) => column.name === 'agent_mode')) {
@@ -755,16 +763,18 @@ export class Notebook {
             provider,
             model,
             reasoning_effort,
+            allow_over_standard_context,
             previous_response_id,
             updated_at,
             agent_mode,
             plan_mode_phase
           )
-          VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+          VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
           ON CONFLICT(session_id) DO UPDATE SET
             provider = excluded.provider,
             model = excluded.model,
             reasoning_effort = excluded.reasoning_effort,
+            allow_over_standard_context = excluded.allow_over_standard_context,
             previous_response_id = excluded.previous_response_id,
             updated_at = excluded.updated_at,
             agent_mode = excluded.agent_mode,
@@ -776,6 +786,7 @@ export class Notebook {
         record.provider,
         record.model,
         record.reasoningEffort,
+        record.allowOverStandardContext ? 1 : 0,
         record.previousResponseId,
         record.updatedAt,
         record.agentMode ?? 'study',
@@ -792,6 +803,7 @@ export class Notebook {
             provider,
             model,
             reasoning_effort,
+            allow_over_standard_context,
             previous_response_id,
             updated_at,
             agent_mode,
@@ -819,6 +831,7 @@ export class Notebook {
       provider: 'openai-codex',
       model: 'gpt-5.4',
       reasoningEffort: 'medium',
+      allowOverStandardContext: false,
       previousResponseId: null,
       updatedAt: nowIso(),
       agentMode: defaults.agentMode ?? 'study',
@@ -1825,8 +1838,11 @@ export class Notebook {
     currentTurnStartedAt: string | null,
     statusText: string,
     estimatedContextTokens = 0,
-    contextWindowTokens = 0,
+    effectiveContextBudgetTokens = 0,
+    fullContextWindowTokens = 0,
+    inputLimitContextTokens: number | null = null,
     standardRateContextTokens: number | null = null,
+    allowOverStandardContext = false,
     liveTurnEvents: LiveTurnEvent[] = [],
     thinkingEnabled = true
   ): EngineSnapshot {
@@ -1851,8 +1867,11 @@ export class Notebook {
       agentMode: this.getModelSession(sessionId)?.agentMode ?? 'study',
       planModePhase: this.getModelSession(sessionId)?.planModePhase ?? null,
       estimatedContextTokens,
-      contextWindowTokens,
+      effectiveContextBudgetTokens,
+      fullContextWindowTokens,
+      inputLimitContextTokens,
       standardRateContextTokens,
+      allowOverStandardContext,
       liveTurnEvents,
       thinkingEnabled
     };
@@ -1949,6 +1968,7 @@ function mapModelSession(row: ModelSessionRow): ModelSessionRecord {
     provider: 'openai-codex',
     model: row.model,
     reasoningEffort: row.reasoning_effort,
+    allowOverStandardContext: Boolean(row.allow_over_standard_context),
     previousResponseId: row.previous_response_id,
     updatedAt: row.updated_at,
     agentMode: row.agent_mode ?? 'study',
