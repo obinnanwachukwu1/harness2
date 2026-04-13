@@ -62,12 +62,23 @@ export class BridgeClient extends EventEmitter<BridgeClientEvents> {
         return;
       }
 
+      let event: BridgeEvent;
       try {
-        this.emit('event', JSON.parse(trimmed) as BridgeEvent);
+        event = JSON.parse(trimmed) as BridgeEvent;
       } catch {
         this.emit('event', {
           type: 'error',
           message: `Invalid bridge event: ${trimmed}`
+        });
+        return;
+      }
+
+      try {
+        this.emit('event', event);
+      } catch (error) {
+        this.emit('event', {
+          type: 'error',
+          message: `Bridge event handler failed: ${error instanceof Error ? error.message : String(error)}`
         });
       }
     });
@@ -123,6 +134,7 @@ export class BridgeClient extends EventEmitter<BridgeClientEvents> {
       }, 200);
     });
   }
+
 }
 
 function shouldIgnoreBridgeStderr(message: string): boolean {

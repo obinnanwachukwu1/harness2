@@ -38,7 +38,7 @@ function createSnapshot(overrides: Partial<EngineSnapshot> = {}): EngineSnapshot
   };
 }
 
-test('buildState keeps a current-turn completed tool visible in the live tail until it becomes historical', () => {
+test('buildState always shows current-turn durable transcript entries while processing', () => {
   const startedAt = '2026-04-07T00:00:02.000Z';
   const state = buildState(
     createSnapshot({
@@ -85,12 +85,14 @@ test('buildState keeps a current-turn completed tool visible in the live tail un
 
   assert.deepEqual(
     state.blocks.map((block) => `${block.kind}:${block.id}`),
-    ['assistant:assistant-1', 'thinking:live-thinking-1', 'tool:live-tool-1']
+    ['assistant:assistant-1', 'tool:tool-2', 'thinking:live-thinking-1']
   );
 });
 
-test('buildState suppresses a live completed tool event once the same tool transcript is visible historically', () => {
+test('buildState ignores non-live live-turn events', () => {
   const transcriptText = '@@tool\texec_command\tExec(pwd)\ncommand: pwd';
+  const assistantText = 'Done.';
+  const thinkingText = 'Need to check final path.';
   const state = buildState(
     createSnapshot({
       processingTurn: false,
@@ -102,6 +104,20 @@ test('buildState suppresses a live completed tool event once the same tool trans
           role: 'tool',
           text: transcriptText,
           createdAt: '2026-04-07T00:00:03.000Z'
+        },
+        {
+          id: 2,
+          sessionId: 'session-test',
+          role: 'assistant',
+          text: assistantText,
+          createdAt: '2026-04-07T00:00:04.000Z'
+        },
+        {
+          id: 3,
+          sessionId: 'session-test',
+          role: 'system',
+          text: `@@thinking\t${thinkingText}`,
+          createdAt: '2026-04-07T00:00:05.000Z'
         }
       ],
       liveTurnEvents: [
@@ -116,14 +132,26 @@ test('buildState suppresses a live completed tool event once the same tool trans
           detail: null,
           body: [],
           providerExecuted: false
+        },
+        {
+          id: 'live-assistant-1',
+          kind: 'assistant',
+          text: assistantText,
+          live: false
+        },
+        {
+          id: 'live-thinking-1',
+          kind: 'thinking',
+          text: thinkingText,
+          live: false
         }
       ]
     })
   );
 
   assert.deepEqual(
-    state.blocks.filter((block) => block.kind === 'tool').map((block) => block.id),
-    ['tool-1']
+    state.blocks.map((block) => block.id),
+    ['tool-1', 'assistant-2', 'thinking-3']
   );
 });
 
@@ -203,21 +231,13 @@ test('buildState shows question ids in headers and summaries in the body', () =>
 test('buildState renders experiment notices as experiment tool rows', () => {
   const state = buildState(
     createSnapshot({
-      processingTurn: true,
-      currentTurnStartedAt: '2026-04-07T00:00:03.000Z',
-      liveTurnEvents: [
+      transcript: [
         {
-          id: 'live-tool-1',
-          kind: 'tool',
-          transcriptText:
-            '@@tool\texperiment_notice\tExperiment resolved\n{\n  "experimentId": "exp-123",\n  "status": "validated",\n  "summary": "Provider streams SSE content deltas.",\n  "hypothesis": "backend supports OpenAI-style streaming",\n  "next": "removed"\n}',
-          live: false,
-          callId: null,
-          toolName: null,
-          label: null,
-          detail: null,
-          body: [],
-          providerExecuted: false
+          id: 1,
+          sessionId: 'session-test',
+          role: 'tool',
+          text: '@@tool\texperiment_notice\tExperiment resolved\n{\n  "experimentId": "exp-123",\n  "status": "validated",\n  "summary": "Provider streams SSE content deltas.",\n  "hypothesis": "backend supports OpenAI-style streaming",\n  "next": "removed"\n}',
+          createdAt: '2026-04-07T00:00:03.000Z'
         }
       ]
     })

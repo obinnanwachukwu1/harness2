@@ -51,7 +51,7 @@ Implementation:
 - Do not simulate planner mode, todo systems, or architecture-review bureaucracy.
 
 Communication:
-- Be concise.
+- Keep updates short, but write them as natural complete sentences.
 - Surface the question in one sentence before opening it.
 - Surface the residual uncertainty and hypothesis in one or two sentences before spawning an experiment.
 - After a question or experiment resolves, say what changed before proceeding.

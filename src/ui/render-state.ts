@@ -85,24 +85,15 @@ export function diffState(
 }
 
 function buildBlocks(snapshot: EngineSnapshot): RenderBlock[] {
-  const currentTurnStartedAt =
-    snapshot.currentTurnStartedAt && snapshot.processingTurn
-      ? snapshot.currentTurnStartedAt
-      : null;
-  const historicalEntries = currentTurnStartedAt
-    ? snapshot.transcript.filter(
-        (entry) => !(entry.role !== 'user' && entry.createdAt >= currentTurnStartedAt)
-      )
-    : snapshot.transcript;
-
-  const blocks = historicalEntries.flatMap((entry) =>
+  const blocks = snapshot.transcript.flatMap((entry) =>
     transcriptEntryToBlocks(entry, snapshot.thinkingEnabled)
-  );
-  const visibleHistoricalToolTranscripts = new Set(
-    historicalEntries.filter((entry) => entry.role === 'tool').map((entry) => entry.text)
   );
 
   for (const event of snapshot.liveTurnEvents) {
+    if (!event.live) {
+      continue;
+    }
+
     if (event.kind === 'assistant' || event.kind === 'thinking') {
       if (event.kind === 'thinking' && !snapshot.thinkingEnabled) {
         continue;
@@ -117,25 +108,6 @@ function buildBlocks(snapshot: EngineSnapshot): RenderBlock[] {
     }
 
     if (event.transcriptText) {
-      if (visibleHistoricalToolTranscripts.has(event.transcriptText)) {
-        continue;
-      }
-      const renderedBlocks = toolTranscriptToBlocks(
-        {
-          id: -1,
-          sessionId: snapshot.session.id,
-          role: 'tool',
-          text: event.transcriptText,
-          createdAt: currentTurnStartedAt ?? snapshot.session.lastActiveAt
-        },
-        event.id
-      );
-      for (const block of renderedBlocks) {
-        if ('live' in block) {
-          block.live = event.live;
-        }
-        blocks.push(block);
-      }
       continue;
     }
 

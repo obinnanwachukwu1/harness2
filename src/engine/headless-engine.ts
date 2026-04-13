@@ -586,7 +586,9 @@ export class HeadlessEngine {
           this.statusText = 'error';
         }
       } finally {
+        this.clearLiveTurnState();
         this.processingTurn = false;
+        this.currentTurnStartedAt = null;
         this.activeTurnAbortController = null;
         this.emitChange();
       }
@@ -769,9 +771,6 @@ export class HeadlessEngine {
   private finishLiveToolCall(toolCallId: string, transcriptText?: string): void {
     const eventId = this.liveToolEventIds.get(toolCallId);
     if (!eventId) {
-      if (transcriptText) {
-        this.appendCompletedToolEvent(transcriptText);
-      }
       return;
     }
 
@@ -779,18 +778,9 @@ export class HeadlessEngine {
       (candidate) => candidate.id === eventId && candidate.kind === 'tool'
     ) as Extract<LiveTurnEvent, { kind: 'tool' }> | undefined;
     if (event) {
-      if (transcriptText) {
-        const index = this.liveTurnEvents.findIndex((candidate) => candidate.id === eventId);
-        if (index >= 0) {
-          this.liveTurnEvents.splice(index, 1);
-        }
-      } else {
-        event.live = false;
-        event.transcriptText = event.transcriptText;
-        event.detail = null;
-        event.body = [];
-        event.label = null;
-        event.toolName = null;
+      const index = this.liveTurnEvents.findIndex((candidate) => candidate.id === eventId);
+      if (index >= 0) {
+        this.liveTurnEvents.splice(index, 1);
       }
       this.emitChange();
     }
@@ -807,22 +797,17 @@ export class HeadlessEngine {
     }
 
     if (role === 'system' && text.startsWith('@@thinking\t')) {
-      this.finalizeLiveTextEvent('thinking', text.slice('@@thinking\t'.length));
+      this.clearLiveTextEvents('thinking');
       return;
     }
 
     if (role === 'assistant') {
-      this.finalizeLiveTextEvent('assistant', text);
+      this.clearLiveTextEvents('assistant');
       return;
     }
 
     if (role === 'tool') {
-      const hasActiveTrackedTool = this.liveTurnEvents.some(
-        (event) => event.kind === 'tool' && event.live
-      );
-      if (!hasActiveTrackedTool) {
-        this.appendCompletedToolEvent(text);
-      }
+      this.clearNextLiveToolEvent();
     }
   }
 
@@ -908,46 +893,40 @@ export class HeadlessEngine {
     this.emitChange();
   }
 
-  private finalizeLiveTextEvent(kind: 'assistant' | 'thinking', finalText: string): void {
-    const liveEvents = this.liveTurnEvents.filter(
-      (event): event is Extract<LiveTurnEvent, { kind: 'assistant' | 'thinking' }> =>
-        event.kind === kind && event.live
-    );
-
-    if (liveEvents.length > 0) {
-      for (const event of liveEvents) {
-        event.live = false;
+  private clearLiveTextEvents(kind: 'assistant' | 'thinking'): void {
+    let changed = false;
+    for (let index = this.liveTurnEvents.length - 1; index >= 0; index -= 1) {
+      const event = this.liveTurnEvents[index];
+      if (event && event.kind === kind) {
+        this.liveTurnEvents.splice(index, 1);
+        changed = true;
       }
-    } else if (finalText.trim()) {
-      this.liveTurnEvents.push({
-        id: this.createLiveEventId(kind),
-        kind,
-        text: finalText,
-        live: false
-      });
     }
-
     if (kind === 'assistant') {
       this.lastLiveAssistantText = '';
     } else {
       this.lastLiveThinkingText = '';
     }
-    this.emitChange();
+    if (changed) {
+      this.emitChange();
+    }
   }
 
-  private appendCompletedToolEvent(transcriptText: string): void {
-    this.liveTurnEvents.push({
-      id: this.createLiveEventId('tool'),
-      kind: 'tool',
-      transcriptText,
-      live: false,
-      callId: null,
-      toolName: null,
-      label: null,
-      detail: null,
-      body: [],
-      providerExecuted: false
-    });
+  private clearNextLiveToolEvent(): void {
+    const event = this.liveTurnEvents.find(
+      (candidate): candidate is Extract<LiveTurnEvent, { kind: 'tool' }> =>
+        candidate.kind === 'tool' && candidate.live
+    );
+    if (!event) {
+      return;
+    }
+    const index = this.liveTurnEvents.findIndex((candidate) => candidate.id === event.id);
+    if (index >= 0) {
+      this.liveTurnEvents.splice(index, 1);
+    }
+    if (event.callId) {
+      this.liveToolEventIds.delete(event.callId);
+    }
     this.emitChange();
   }
 
@@ -2153,9 +2132,6 @@ export class HeadlessEngine {
   }
 
   private appendExperimentLifecycleToolNotice(transcriptText: string): void {
-    if (this.processingTurn) {
-      this.appendCompletedToolEvent(transcriptText);
-    }
     this.appendTranscript('tool', transcriptText);
     this.appendModelHistory({
       type: 'message',

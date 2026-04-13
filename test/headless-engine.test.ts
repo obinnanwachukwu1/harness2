@@ -1038,6 +1038,11 @@ test('HeadlessEngine does not duplicate a live tool block when the same toolCall
   const engine = await HeadlessEngine.open({ cwd: repoDir });
   t.after(async () => engine.dispose());
 
+  let releaseTurn: (() => void) | null = null;
+  const turnGate = new Promise<void>((resolve) => {
+    releaseTurn = resolve;
+  });
+
   const originalRunTurn = engine.modelClient.runTurn;
   engine.modelClient.runTurn = async (
     _sessionId: string,
@@ -1076,16 +1081,26 @@ test('HeadlessEngine does not duplicate a live tool block when the same toolCall
       body: ['command: pwd'],
       providerExecuted: false
     });
+    await turnGate;
   };
   t.after(() => {
     engine.modelClient.runTurn = originalRunTurn;
   });
 
-  await engine.submit('run once');
+  const submitPromise = engine.submit('run once');
+
+  await waitFor(
+    () => engine.snapshot.liveTurnEvents.filter((event) => event.kind === 'tool'),
+    (liveToolEvents) => liveToolEvents.length > 0
+  );
 
   const liveToolEvents = engine.snapshot.liveTurnEvents.filter((event) => event.kind === 'tool');
   assert.equal(liveToolEvents.length, 1);
   assert.equal(liveToolEvents[0]?.callId, 'call_exec_1');
+
+  releaseTurn?.();
+  await submitPromise;
+  assert.equal(engine.snapshot.liveTurnEvents.length, 0);
 });
 
 test('HeadlessEngine interrupt persists partial assistant text and appends a follow-up', async (t) => {

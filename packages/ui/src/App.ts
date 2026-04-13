@@ -1,5 +1,3 @@
-import { appendFile, mkdir } from 'node:fs/promises';
-import path from 'node:path';
 import {
   BoxRenderable,
   CliRenderEvents,
@@ -47,8 +45,8 @@ export class App {
   private readonly transcriptScroll: ScrollBoxRenderable;
   private readonly transcriptContent: BoxRenderable;
   private readonly experimentRail: BoxRenderable;
-  private readonly queueArea: BoxRenderable;
   private readonly footer: BoxRenderable;
+  private readonly composerContainer: BoxRenderable;
   private readonly queuedMessagesBox: BoxRenderable;
   private readonly promptShell: BoxRenderable;
   private readonly statusRow: BoxRenderable;
@@ -81,8 +79,8 @@ export class App {
     this.transcriptScroll = this.root.findDescendantById('transcript-scroll') as ScrollBoxRenderable;
     this.transcriptContent = this.root.findDescendantById('transcript-content') as BoxRenderable;
     this.experimentRail = this.root.findDescendantById('experiment-rail') as BoxRenderable;
-    this.queueArea = this.root.findDescendantById('queue-area') as BoxRenderable;
     this.footer = this.root.findDescendantById('footer') as BoxRenderable;
+    this.composerContainer = this.root.findDescendantById('composer-container') as BoxRenderable;
     this.queuedMessagesBox = this.root.findDescendantById('queued-messages') as BoxRenderable;
     this.promptShell = this.root.findDescendantById('prompt-shell') as BoxRenderable;
     this.statusRow = this.root.findDescendantById('status-row') as BoxRenderable;
@@ -175,38 +173,47 @@ export class App {
       })
     );
 
-    const queueArea = new BoxRenderable(this.renderer, {
-      id: 'queue-area',
-      width: '100%',
-      flexDirection: 'column',
-      visible: false,
-      height: 0
-    });
-    queueArea.add(
-      new BoxRenderable(this.renderer, {
-        id: 'queued-messages',
-        width: '100%',
-        flexDirection: 'column',
-        marginLeft: 1,
-        marginRight: 1,
-        marginBottom: 1,
-        visible: false,
-        height: 0
-      })
-    );
-
     const footer = new BoxRenderable(this.renderer, {
       id: 'footer',
       width: '100%',
       height: 5,
       flexDirection: 'column'
     });
+    footer.add(
+      new BoxRenderable(this.renderer, {
+        id: 'footer-spacer',
+        width: '100%',
+        flexGrow: 1,
+        height: 0
+      })
+    );
+    const composerContainer = new BoxRenderable(this.renderer, {
+      id: 'composer-container',
+      width: '100%',
+      marginLeft: 1,
+      marginRight: 1,
+      backgroundColor: '#27272a',
+      flexDirection: 'column',
+      height: 3
+    });
+    composerContainer.add(
+      new BoxRenderable(this.renderer, {
+        id: 'queued-messages',
+        width: '100%',
+        flexDirection: 'column',
+        backgroundColor: '#1c1c1f',
+        paddingTop: 1,
+        paddingBottom: 1,
+        paddingLeft: 1,
+        paddingRight: 1,
+        visible: false,
+        height: 0
+      })
+    );
     const promptShell = new BoxRenderable(this.renderer, {
       id: 'prompt-shell',
       width: '100%',
       height: 3,
-      marginLeft: 1,
-      marginRight: 1,
       backgroundColor: '#27272a',
       paddingTop: 1,
       paddingBottom: 1,
@@ -232,7 +239,8 @@ export class App {
         ]
       })
     );
-    footer.add(promptShell);
+    composerContainer.add(promptShell);
+    footer.add(composerContainer);
     footer.add(
       new BoxRenderable(this.renderer, {
         id: 'status-row',
@@ -246,7 +254,6 @@ export class App {
 
     app.add(header);
     app.add(body);
-    app.add(queueArea);
     app.add(footer);
     return app;
   }
@@ -355,12 +362,31 @@ export class App {
   private updateComposerLayout(): void {
     const logicalLineCount = this.input.plainText.length === 0 ? 1 : this.input.plainText.split('\n').length;
     const lineCount = Math.max(1, Math.min(3, Math.max(logicalLineCount, this.input.virtualLineCount)));
+    const queueHeight = this.queuedMessagesBox.visible ? this.queuedMessagesBox.height : 0;
     this.input.height = lineCount;
     this.input.minHeight = lineCount;
     this.input.maxHeight = lineCount;
     this.promptShell.height = lineCount + 2;
-    this.footer.height = lineCount + 4;
+    this.composerContainer.height = this.promptShell.height + queueHeight;
+    this.footer.height = lineCount + 4 + queueHeight;
     this.renderer.requestRender();
+  }
+
+  private measureQueuedMessagesHeight(): number {
+    let contentHeight = 0;
+    for (const child of this.queuedMessagesBox.getChildren()) {
+      if ('virtualLineCount' in child && typeof child.virtualLineCount === 'number') {
+        contentHeight += Math.max(1, child.virtualLineCount);
+        continue;
+      }
+      if ('lineCount' in child && typeof child.lineCount === 'number') {
+        contentHeight += Math.max(1, child.lineCount);
+        continue;
+      }
+      contentHeight += Math.max(1, child.height);
+    }
+    const verticalPadding = 2;
+    return contentHeight + verticalPadding;
   }
 
   private renderQueuedMessages(messages: string[]): void {
@@ -368,23 +394,19 @@ export class App {
       this.queuedMessagesBox.remove(child.id);
     }
     if (messages.length === 0) {
-      this.queueArea.visible = false;
-      this.queueArea.height = 0;
       this.queuedMessagesBox.visible = false;
       this.queuedMessagesBox.height = 0;
       this.updateComposerLayout();
       return;
     }
 
-    this.queueArea.visible = true;
-    this.queueArea.height = Math.min(messages.length + 1, 6) + 1;
+    const visibleMessageCount = Math.min(messages.length, 5);
     this.queuedMessagesBox.visible = true;
-    this.queuedMessagesBox.height = Math.min(messages.length + 1, 6);
     this.queuedMessagesBox.add(
       new TextRenderable(this.renderer, {
         id: 'queued-messages-label',
         content: 'Queued follow-ups',
-        fg: '#fbbf24',
+        fg: '#d4d4d8',
         attributes: TextAttributes.BOLD,
         wrapMode: 'word'
       })
@@ -399,6 +421,7 @@ export class App {
         })
       );
     }
+    this.queuedMessagesBox.height = this.measureQueuedMessagesHeight();
     this.updateComposerLayout();
   }
 
@@ -537,7 +560,6 @@ export class App {
   }
 
   private syncTranscript(blocks: RenderBlock[]): void {
-    this.logTranscriptDebug('full-sync', blocks);
     const nextIds = new Set(blocks.map((block) => block.id));
 
     for (const [id, view] of this.blockViews) {
@@ -567,7 +589,6 @@ export class App {
     nextBlocks: RenderBlock[],
     patch: StatePatch
   ): void {
-    this.logTranscriptDebug('patch', nextBlocks, patch);
     if (this.state?.processingTurn && patch.blockOrder) {
       this.syncTranscript(nextBlocks);
       return;
@@ -607,76 +628,6 @@ export class App {
     }
 
     this.currentBlocks = nextBlocks;
-  }
-
-  private logTranscriptDebug(mode: 'full-sync' | 'patch', blocks: RenderBlock[], patch?: StatePatch): void {
-    if (!this.state?.processingTurn) {
-      return;
-    }
-
-    const signatures = new Map<string, string[]>();
-    for (const block of blocks) {
-      const signature = this.blockDebugSignature(block);
-      const ids = signatures.get(signature) ?? [];
-      ids.push(block.id);
-      signatures.set(signature, ids);
-    }
-
-    const duplicates = Array.from(signatures.entries())
-      .filter(([, ids]) => ids.length > 1)
-      .map(([signature, ids]) => ({ signature, ids }));
-
-    const payload = {
-      mode,
-      sessionId: this.state.sessionId,
-      processingTurn: this.state.processingTurn,
-      currentBlockCount: this.currentBlocks.length,
-      nextBlockCount: blocks.length,
-      renderedChildIds: this.transcriptContent.getChildren().map((child) => child.id),
-      nextBlocks: blocks.map((block) => ({
-        id: block.id,
-        signature: this.blockDebugSignature(block)
-      })),
-      duplicates,
-      patch: patch
-        ? {
-            upsertBlockIds: patch.upsertBlocks?.map((block) => block.id) ?? [],
-            removeBlockIds: patch.removeBlockIds ?? [],
-            blockOrder: patch.blockOrder ?? []
-          }
-        : null
-    };
-
-    void this.appendTranscriptDebugLog(JSON.stringify(payload));
-  }
-
-  private blockDebugSignature(block: RenderBlock): string {
-    switch (block.kind) {
-      case 'user':
-        return `user:${block.text}`;
-      case 'assistant':
-      case 'thinking':
-        return `${block.kind}:${block.text}:${block.live ? 'live' : 'durable'}`;
-      case 'tool':
-        return `tool:${block.header}:${block.body.join(' | ')}:${block.footer.join(' | ')}:${block.live ? 'live' : 'durable'}`;
-      case 'diff':
-        return `diff:${block.title}:${block.diff}`;
-    }
-  }
-
-  private async appendTranscriptDebugLog(message: string): Promise<void> {
-    try {
-      const cwd = this.state?.cwd ?? process.cwd();
-      const debugDir = path.join(cwd, '.h2', 'debug');
-      await mkdir(debugDir, { recursive: true });
-      await appendFile(
-        path.join(debugDir, 'ui-transcript-debug.log'),
-        `[${new Date().toISOString()}] ${message}\n`,
-        'utf8'
-      );
-    } catch {
-      // Debug logging must not affect UI rendering.
-    }
   }
 
   private syncExperiments(experiments: ExperimentSummary[]): void {
