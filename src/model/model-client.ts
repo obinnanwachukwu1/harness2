@@ -200,8 +200,7 @@ export class ModelClient {
     }) => Promise<void>,
     onToolCallFinish?: (toolCallId: string, transcriptText?: string) => Promise<void>,
     allowHiddenAutoCompaction = false,
-    getHiddenCompactionState?: (() => Promise<HiddenCompactionStateSnapshot>) | undefined,
-    forceStudyCompactionOnce = false
+    getHiddenCompactionState?: (() => Promise<HiddenCompactionStateSnapshot>) | undefined
   ): Promise<void> {
     ({
       webSearchMode,
@@ -263,21 +262,14 @@ export class ModelClient {
         instructions,
         toolDefinitions
       );
-      const forcedStudyCompaction =
-        forceStudyCompactionOnce &&
-        this.shouldForceStudyCompactionOnce(sessionId, settings, toolDefinitions);
       const effectiveToolDefinitions =
-        (forcedStudyCompaction ||
-          compactionState.forceCompactOnly) &&
+        compactionState.forceCompactOnly &&
         toolDefinitions.some((tool) => tool.name === 'compact')
           ? toolDefinitions.filter((tool) => tool.name === 'compact')
           : toolDefinitions;
       const hints = [
         shouldInjectObservationHint(requestItems, effectiveToolDefinitions)
           ? buildObservationHint()
-          : null,
-        forcedStudyCompaction
-          ? buildForcedUnresolvedStudyCompactionHint(sessionId, this.notebook)
           : null,
         buildCompactionHint(compactionState, effectiveToolDefinitions)
       ].filter((value): value is string => Boolean(value));
@@ -771,30 +763,6 @@ export class ModelClient {
     };
   }
 
-  private shouldForceStudyCompactionOnce(
-    sessionId: string,
-    settings: ModelSessionRecord,
-    toolDefinitions: readonly ToolDefinition[]
-  ): boolean {
-    if (settings.agentMode !== 'study') {
-      return false;
-    }
-    if (!toolDefinitions.some((tool) => tool.name === 'compact')) {
-      return false;
-    }
-    if (this.notebook.getLatestSessionCheckpoint(sessionId)) {
-      return false;
-    }
-    const openDebts = this.notebook.listOpenStudyDebts(sessionId);
-    if (openDebts.length === 0) {
-      return false;
-    }
-    const activeExperiments = this.notebook
-      .searchExperimentSummaries(sessionId)
-      .filter((experiment) => experiment.status === 'running' || experiment.status === 'budget_exhausted');
-    return activeExperiments.length > 0;
-  }
-
   private persistSession(record: ModelSessionRecord): void {
     this.notebook.upsertModelSession(record);
   }
@@ -1092,19 +1060,6 @@ function buildCompactionHint(
   }
 
   return null;
-}
-
-function buildForcedUnresolvedStudyCompactionHint(sessionId: string, notebook: Notebook): string {
-  const openDebtCount = notebook.listOpenStudyDebts(sessionId).length;
-  const activeExperimentCount = notebook
-    .searchExperimentSummaries(sessionId)
-    .filter((experiment) => experiment.status === 'running' || experiment.status === 'budget_exhausted')
-    .length;
-  return [
-    'A checkpoint is required now to test unresolved-state continuity.',
-    'Use compact before any other action.',
-    `Preserve the current objective, completed work, next step, ${openDebtCount} open question(s), and ${activeExperimentCount} active experiment(s) faithfully.`
-  ].join(' ');
 }
 
 function buildForcedCompactionGuardrail(state: CompactionWindowState): string {

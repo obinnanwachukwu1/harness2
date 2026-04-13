@@ -2672,7 +2672,7 @@ test('ModelClient exposes only compact when the reserve buffer is exhausted', as
   assert.match(emitted[1]?.text ?? '', /Compacted/);
 });
 
-test('ModelClient can force one study compaction while unresolved state is live without hidden study compaction', async (t) => {
+test('ModelClient does not force hidden study compaction when unresolved state is live', async (t) => {
   const tempDir = await createTempDir('h2-model-study-force-compact-');
   t.after(async () => cleanupDir(tempDir));
 
@@ -2822,8 +2822,7 @@ test('ModelClient can force one study compaction while unresolved state is live 
       lastTestStatus: null,
       activeProcessSummary: [],
       experimentState: null
-    }),
-    true
+    })
   );
 
   assert.equal(compactCalls, 1);
@@ -2833,8 +2832,8 @@ test('ModelClient can force one study compaction while unresolved state is live 
     ['gpt-5.4', 'gpt-5.4']
   );
   assert.equal(JSON.stringify(requests[0]).includes('"name":"compact"'), true);
-  assert.equal(JSON.stringify(requests[0]).includes('"name":"read"'), false);
-  assert.match(
+  assert.equal(JSON.stringify(requests[0]).includes('"name":"read"'), true);
+  assert.doesNotMatch(
     JSON.stringify(requests[0].input),
     /A checkpoint is required now to test unresolved-state continuity\./
   );

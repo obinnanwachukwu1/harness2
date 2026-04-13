@@ -143,7 +143,7 @@ test('HeadlessEngine ask_user supports single-choice clarification with one reco
   assert.equal(pending?.options?.[0]?.id, 'a');
 });
 
-test('HeadlessEngine passes hidden-compaction gating correctly for study sessions without web search mode', async (t) => {
+test('HeadlessEngine disables hidden auto-compaction for study sessions without web search mode', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));
 
@@ -165,7 +165,7 @@ test('HeadlessEngine passes hidden-compaction gating correctly for study session
   assert.equal(capturedCalls[0]?.[7], undefined);
   assert.equal(capturedCalls[0]?.[12], false);
   assert.equal(typeof capturedCalls[0]?.[13], 'function');
-  assert.equal(capturedCalls[0]?.[14], true);
+  assert.equal(capturedCalls[0]?.length, 14);
 });
 
 test('HeadlessEngine submit normalizes single-choice replies into the selected option', async (t) => {

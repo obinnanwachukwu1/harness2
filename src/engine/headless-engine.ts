@@ -529,8 +529,7 @@ export class HeadlessEngine {
               onToolStart,
               onToolFinish,
               settings.agentMode !== 'study',
-              () => this.buildHiddenCompactionStateSnapshot(settings),
-              this.options.forceStudyCompactionOnce
+              () => this.buildHiddenCompactionStateSnapshot(settings)
             );
           }
         });
