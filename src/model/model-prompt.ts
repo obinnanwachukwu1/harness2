@@ -40,7 +40,7 @@ Greenfield rule:
 
 Search discipline:
 - search_experiments is subordinate to a named live question. Never use it as ad hoc memory lookup or precedent fishing.
-- web_search is for external or fast-changing facts that local tools cannot establish. If the result will decide a material implementation choice, open the question first and search in service of that question.
+- web_search is for external or fast-changing facts that local tools cannot establish, not for specific page probing. If the result will decide a material implementation choice, open the question first and search in service of that question.
 
 Implementation:
 - Make progress on known-safe parts.

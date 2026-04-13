@@ -7,7 +7,7 @@ Today it provides one working vertical slice:
 - a headless engine that owns transcript state and local tool execution
 - isolated experiment runs in `git worktree`s
 - SQLite-backed session and experiment state
-- an UI terminal UI
+- an interactive terminal UI
 - a noninteractive print mode for one-shot prompts
 - optional OpenAI Codex OAuth for model-backed interactions
 
@@ -89,33 +89,20 @@ Inside the terminal UI, use slash commands:
 
 ```text
 /help
-/exec git status --short
-/stdin 3
-/stdin 3 --terminate
-/read package.json
-/read package.json 120 180
-/write scratch.txt :: hello
-/edit <patch>
-/glob "src/**/*.ts"
-/grep HeadlessEngine src
 /auth login
 /auth status
 /auth logout
+/model
+/model gpt-5.4
+/reasoning medium
 /thinking on
 /thinking off
+/export
+/clear-journal
 /quit
 ```
 
-`/edit` expects the same patch grammar the model uses:
-
-```text
-*** Begin Patch
-*** Update File: scratch.txt
-@@
--hello
-+hello world
-*** End Patch
-```
+Slash commands are reserved for app/session controls. File reads, edits, shell commands, experiments, and other tool operations are model-internal capabilities rather than direct user commands.
 
 ## Authentication
 

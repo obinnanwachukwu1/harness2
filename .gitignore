@@ -4,3 +4,5 @@ node_modules
 .h2
 .harness2
 pnpm-lock.yaml
+docs/__pycache__/
+jobs/

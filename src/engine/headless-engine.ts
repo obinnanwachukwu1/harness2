@@ -515,42 +515,23 @@ export class HeadlessEngine {
               this.finishLiveToolCall(toolCallId, transcriptText);
             };
 
-            if (this.options.webSearchMode === undefined) {
-              await (this.model.runTurn as (...args: any[]) => Promise<void>)(
-                this.options.sessionId,
-                input,
-                this.tools,
-                emitTranscript,
-                onAssistant,
-                onThinking,
-                this.thinkingEnabled,
-                modeConfig.toolDefinitions,
-                modeConfig.instructions,
-                onToolStart,
-                onToolFinish,
-                settings.agentMode !== 'study',
-                () => this.buildHiddenCompactionStateSnapshot(settings),
-                this.options.forceStudyCompactionOnce
-              );
-            } else {
-              await this.model.runTurn(
-                this.options.sessionId,
-                input,
-                this.tools,
-                emitTranscript,
-                onAssistant,
-                onThinking,
-                this.thinkingEnabled,
-                this.options.webSearchMode,
-                modeConfig.toolDefinitions,
-                modeConfig.instructions,
-                onToolStart,
-                onToolFinish,
-                settings.agentMode !== 'study',
-                () => this.buildHiddenCompactionStateSnapshot(settings),
-                this.options.forceStudyCompactionOnce
-              );
-            }
+            await this.model.runTurn(
+              this.options.sessionId,
+              input,
+              this.tools,
+              emitTranscript,
+              onAssistant,
+              onThinking,
+              this.thinkingEnabled,
+              this.options.webSearchMode,
+              modeConfig.toolDefinitions,
+              modeConfig.instructions,
+              onToolStart,
+              onToolFinish,
+              settings.agentMode !== 'study',
+              () => this.buildHiddenCompactionStateSnapshot(settings),
+              this.options.forceStudyCompactionOnce
+            );
           }
         });
         this.statusText = 'idle';
