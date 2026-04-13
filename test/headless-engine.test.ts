@@ -1031,6 +1031,63 @@ test('HeadlessEngine removes tracked live tool events once their durable transcr
   );
 });
 
+test('HeadlessEngine does not duplicate a live tool block when the same toolCallId starts twice', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const originalRunTurn = engine.modelClient.runTurn;
+  engine.modelClient.runTurn = async (
+    _sessionId: string,
+    _input: string,
+    _tools: unknown,
+    _emit: (role: string, text: string) => Promise<void>,
+    _onAssistantStream: ((text: string) => Promise<void>) | undefined,
+    _onReasoningSummaryStream: ((text: string) => Promise<void>) | undefined,
+    _thinkingEnabled: boolean,
+    _abortSignal: AbortSignal | undefined,
+    _webSearchMode: unknown,
+    _toolDefinitions: unknown,
+    _instructions: string,
+    onToolCallStart: ((toolCall: {
+      toolCallId: string;
+      toolName: string;
+      label: string;
+      detail?: string | null;
+      body?: string[];
+      providerExecuted?: boolean;
+    }) => Promise<void>) | undefined
+  ) => {
+    await onToolCallStart?.({
+      toolCallId: 'call_exec_1',
+      toolName: 'exec_command',
+      label: 'Exec(pwd)',
+      detail: 'running…',
+      body: ['command: pwd'],
+      providerExecuted: false
+    });
+    await onToolCallStart?.({
+      toolCallId: 'call_exec_1',
+      toolName: 'exec_command',
+      label: 'Exec(pwd)',
+      detail: 'running…',
+      body: ['command: pwd'],
+      providerExecuted: false
+    });
+  };
+  t.after(() => {
+    engine.modelClient.runTurn = originalRunTurn;
+  });
+
+  await engine.submit('run once');
+
+  const liveToolEvents = engine.snapshot.liveTurnEvents.filter((event) => event.kind === 'tool');
+  assert.equal(liveToolEvents.length, 1);
+  assert.equal(liveToolEvents[0]?.callId, 'call_exec_1');
+});
+
 test('HeadlessEngine interrupt persists partial assistant text and appends a follow-up', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));

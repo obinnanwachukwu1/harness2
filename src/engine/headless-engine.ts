@@ -739,6 +739,23 @@ export class HeadlessEngine {
     body?: string[];
     providerExecuted?: boolean;
   }): void {
+    const existingEventId = this.liveToolEventIds.get(input.toolCallId);
+    if (existingEventId) {
+      const existingEvent = this.liveTurnEvents.find(
+        (candidate) => candidate.id === existingEventId && candidate.kind === 'tool'
+      ) as Extract<LiveTurnEvent, { kind: 'tool' }> | undefined;
+      if (existingEvent) {
+        existingEvent.live = true;
+        existingEvent.toolName = input.toolName;
+        existingEvent.label = input.label;
+        existingEvent.detail = input.detail ?? null;
+        existingEvent.body = input.body ?? [];
+        existingEvent.providerExecuted = input.providerExecuted ?? false;
+        this.emitChange();
+        return;
+      }
+    }
+
     const eventId = this.createLiveEventId('tool');
     this.liveTurnEvents.push({
       id: eventId,
