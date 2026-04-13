@@ -78,6 +78,14 @@ const DEFAULT_COMMAND_SHELL =
 const DEFAULT_EXEC_YIELD_MS = 1_000;
 const DEFAULT_EXEC_MAX_OUTPUT_CHARS = 12_000;
 const MAX_EXEC_PENDING_OUTPUT_CHARS = 200_000;
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException
+    ? error.name === 'AbortError'
+    : error instanceof Error && error.name === 'AbortError';
+}
+
+const INTERRUPTION_FOLLOWUP = 'Conversation interrupted. What do you want to do next?';
 const MAX_EXEC_CAPTURED_OUTPUT_CHARS = 64_000;
 
 interface ExecSession {
@@ -162,8 +170,10 @@ export class HeadlessEngine {
   private processingTurn = false;
   private currentTurnStartedAt: string | null = null;
   private statusText = 'idle';
+  private activeTurnAbortController: AbortController | null = null;
   private readonly liveTurnEvents: LiveTurnEvent[] = [];
   private readonly liveToolEventIds = new Map<string, string>();
+  private readonly queuedUserMessages: string[] = [];
   private readonly execSessions = new Map<number, ExecSession>();
   private lastLiveAssistantText = '';
   private lastLiveThinkingText = '';
@@ -259,6 +269,7 @@ export class HeadlessEngine {
       contextWindow.standardRateTokens,
       contextWindow.allowOverStandardContext,
       [...this.liveTurnEvents],
+      [...this.queuedUserMessages],
       this.thinkingEnabled
     );
   }
@@ -273,6 +284,17 @@ export class HeadlessEngine {
   setThinkingEnabled(enabled: boolean): void {
     this.thinkingEnabled = enabled;
     this.emitChange();
+  }
+
+  interruptTurn(): boolean {
+    if (!this.processingTurn || !this.activeTurnAbortController) {
+      return false;
+    }
+
+    this.activeTurnAbortController.abort();
+    this.statusText = 'interrupting…';
+    this.emitChange();
+    return true;
   }
 
   getThinkingEnabled(): boolean {
@@ -378,11 +400,20 @@ export class HeadlessEngine {
       onReasoningSummaryStream?: (text: string) => Promise<void> | void;
     } = {}
   ): Promise<void> {
+    const trimmedInput = input.trim();
+    if (!trimmedInput) {
+      return Promise.resolve();
+    }
+
+    if (this.processingTurn) {
+      this.queuedUserMessages.push(trimmedInput);
+      this.statusText = 'queued follow-up';
+      this.emitChange();
+      return Promise.resolve();
+    }
+
     const work = this.turnQueue.then(async () => {
-      let trimmed = input.trim();
-      if (!trimmed) {
-        return;
-      }
+      let trimmed = trimmedInput;
 
       const pendingUserRequest = this.options.notebook.getPendingUserRequest(this.options.sessionId);
       if (pendingUserRequest) {
@@ -431,6 +462,8 @@ export class HeadlessEngine {
       this.activeTurnId += 1;
       this.clearLiveTurnState();
       this.processingTurn = true;
+      const turnAbortController = new AbortController();
+      this.activeTurnAbortController = turnAbortController;
       this.currentTurnStartedAt = nowIso();
       this.statusText = 'running turn';
       this.appendTranscript('user', trimmed);
@@ -523,30 +556,45 @@ export class HeadlessEngine {
               onAssistant,
               onThinking,
               this.thinkingEnabled,
+              turnAbortController.signal,
               this.options.webSearchMode,
               modeConfig.toolDefinitions,
               modeConfig.instructions,
               onToolStart,
               onToolFinish,
               settings.agentMode !== 'study',
-              () => this.buildHiddenCompactionStateSnapshot(settings)
+              () => this.buildHiddenCompactionStateSnapshot(settings),
+              async () => this.consumeQueuedUserMessages()
             );
           }
         });
         this.statusText = 'idle';
       } catch (error) {
-        const message = formatUnknownError(error);
-        const errorText = `Error: ${message}`;
-        this.appendTranscript('assistant', errorText);
-        this.appendModelHistory({
-          type: 'message',
-          role: 'assistant',
-          content: errorText
-        });
-        await options.onTranscriptEntry?.('assistant', errorText);
-        this.statusText = 'error';
+        if (isAbortError(error)) {
+          await this.persistInterruptedLiveAssistantText(options.onTranscriptEntry);
+          this.appendTranscript('assistant', INTERRUPTION_FOLLOWUP);
+          this.appendModelHistory({
+            type: 'message',
+            role: 'assistant',
+            content: INTERRUPTION_FOLLOWUP
+          });
+          await options.onTranscriptEntry?.('assistant', INTERRUPTION_FOLLOWUP);
+          this.statusText = 'interrupted';
+        } else {
+          const message = formatUnknownError(error);
+          const errorText = `Error: ${message}`;
+          this.appendTranscript('assistant', errorText);
+          this.appendModelHistory({
+            type: 'message',
+            role: 'assistant',
+            content: errorText
+          });
+          await options.onTranscriptEntry?.('assistant', errorText);
+          this.statusText = 'error';
+        }
       } finally {
         this.processingTurn = false;
+        this.activeTurnAbortController = null;
         this.emitChange();
       }
     });
@@ -565,6 +613,28 @@ export class HeadlessEngine {
     await this.experimentManager.dispose();
     this.options.notebook.close();
     this.options.authNotebook.close();
+  }
+
+  consumeQueuedUserMessages(): string[] {
+    if (this.queuedUserMessages.length === 0) {
+      return [];
+    }
+
+    const queued = [...this.queuedUserMessages];
+    this.queuedUserMessages.length = 0;
+    this.emitChange();
+    return queued;
+  }
+
+  applyQueuedUserMessages(messages: string[]): void {
+    for (const message of messages) {
+      this.appendTranscript('user', message);
+      this.appendModelHistory({
+        type: 'message',
+        role: 'user',
+        content: message
+      });
+    }
   }
 
   private static registerActiveEngine(engine: HeadlessEngine): void {
@@ -770,6 +840,28 @@ export class HeadlessEngine {
     this.liveToolEventIds.clear();
     this.lastLiveAssistantText = '';
     this.lastLiveThinkingText = '';
+  }
+
+  private persistInterruptedLiveAssistantText(
+    onTranscriptEntry?: ((role: TranscriptRole, text: string) => void | Promise<void>) | undefined
+  ): Promise<void> {
+    const partialAssistantText = this.liveTurnEvents
+      .filter((event): event is Extract<LiveTurnEvent, { kind: 'assistant' }> => event.kind === 'assistant')
+      .map((event) => event.text)
+      .join('');
+    this.clearLiveTurnState();
+
+    if (!partialAssistantText.trim()) {
+      return Promise.resolve();
+    }
+
+    this.appendTranscript('assistant', partialAssistantText);
+    this.appendModelHistory({
+      type: 'message',
+      role: 'assistant',
+      content: partialAssistantText
+    });
+    return Promise.resolve(onTranscriptEntry?.('assistant', partialAssistantText));
   }
 
   private appendLiveTextEvent(kind: 'assistant' | 'thinking', fullText: string): void {
@@ -1977,12 +2069,14 @@ export class HeadlessEngine {
       undefined,
       false,
       undefined,
+      undefined,
       EXPERIMENT_TOOL_DEFINITIONS,
       EXPERIMENT_SUBAGENT_PROMPT,
       undefined,
       undefined,
       true,
-      () => this.buildExperimentCompactionStateSnapshot(experiment)
+      () => this.buildExperimentCompactionStateSnapshot(experiment),
+      undefined
     );
   }
 

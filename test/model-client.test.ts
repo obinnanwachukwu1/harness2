@@ -489,6 +489,7 @@ test('ModelClient auto-compacts direct mode with a hidden checkpoint before the 
     undefined,
     false,
     undefined,
+    undefined,
     DIRECT_TOOL_DEFINITIONS,
     DIRECT_AGENT_PROMPT,
     undefined,
@@ -662,6 +663,7 @@ test('ModelClient auto-compacts experiment subagents against the model context w
     undefined,
     undefined,
     false,
+    undefined,
     undefined,
     EXPERIMENT_TOOL_DEFINITIONS,
     EXPERIMENT_SUBAGENT_PROMPT,
@@ -1320,6 +1322,7 @@ test('ModelClient injects an observation hint for experiment subagents after sev
     undefined,
     undefined,
     false,
+    undefined,
     EXPERIMENT_TOOL_DEFINITIONS
   );
 
@@ -2808,6 +2811,7 @@ test('ModelClient does not force hidden study compaction when unresolved state i
     undefined,
     undefined,
     false,
+    undefined,
     undefined,
     STUDY_TOOL_DEFINITIONS,
     STUDY_AGENT_PROMPT,

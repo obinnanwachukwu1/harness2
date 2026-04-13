@@ -162,10 +162,11 @@ test('HeadlessEngine disables hidden auto-compaction for study sessions without 
   await engine.submit('Check the current state.');
 
   assert.equal(capturedCalls.length, 1);
-  assert.equal(capturedCalls[0]?.[7], undefined);
-  assert.equal(capturedCalls[0]?.[12], false);
-  assert.equal(typeof capturedCalls[0]?.[13], 'function');
-  assert.equal(capturedCalls[0]?.length, 14);
+  assert.ok(capturedCalls[0]?.[7] instanceof AbortSignal);
+  assert.equal(capturedCalls[0]?.[8], undefined);
+  assert.equal(capturedCalls[0]?.[13], false);
+  assert.equal(typeof capturedCalls[0]?.[14], 'function');
+  assert.equal(capturedCalls[0]?.length, 16);
 });
 
 test('HeadlessEngine submit normalizes single-choice replies into the selected option', async (t) => {
@@ -959,6 +960,7 @@ test('HeadlessEngine preserves completed tool events until the next turn starts'
     _onAssistantStream: ((text: string) => Promise<void>) | undefined,
     _onReasoningSummaryStream: ((text: string) => Promise<void>) | undefined,
     _thinkingEnabled: boolean,
+    _abortSignal: AbortSignal | undefined,
     _webSearchMode: unknown,
     _toolDefinitions: unknown,
     _instructions: string,
@@ -1039,6 +1041,157 @@ test('HeadlessEngine preserves completed tool events until the next turn starts'
       (event) => event.kind === 'tool' && event.callId === 'call_exec_1'
     ),
     false
+  );
+});
+
+test('HeadlessEngine interrupt persists partial assistant text and appends a follow-up', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  const originalRunTurn = engine.modelClient.runTurn;
+  engine.modelClient.runTurn = async (
+    _sessionId: string,
+    _input: string,
+    _tools: unknown,
+    _emit: (role: string, text: string) => Promise<void>,
+    onAssistantStream: ((text: string) => Promise<void>) | undefined,
+    _onReasoningSummaryStream: ((text: string) => Promise<void>) | undefined,
+    _thinkingEnabled: boolean,
+    abortSignal: AbortSignal | undefined
+  ) => {
+    await onAssistantStream?.('Here is a partial answer');
+    await new Promise<void>((_resolve, reject) => {
+      if (!abortSignal) {
+        reject(new Error('expected abort signal'));
+        return;
+      }
+      abortSignal.addEventListener(
+        'abort',
+        () => reject(new DOMException('This operation was aborted', 'AbortError')),
+        { once: true }
+      );
+    });
+  };
+  t.after(() => {
+    engine.modelClient.runTurn = originalRunTurn;
+  });
+
+  const submitPromise = engine.submit('start');
+
+  await waitFor(
+    () => engine.snapshot.liveTurnEvents.find((event) => event.kind === 'assistant' && event.live),
+    (assistantEvent) => Boolean(assistantEvent)
+  );
+
+  assert.equal(engine.interruptTurn(), true);
+  await submitPromise;
+
+  const transcriptTexts = engine.snapshot.transcript.map((entry) => entry.text);
+  assert.deepEqual(transcriptTexts.slice(-2), [
+    'Here is a partial answer',
+    'Conversation interrupted. What do you want to do next?'
+  ]);
+  assert.equal(engine.snapshot.liveTurnEvents.length, 0);
+  assert.equal(engine.snapshot.statusText, 'interrupted');
+});
+
+test('HeadlessEngine queues follow-up messages during a running turn and applies them at the next safe boundary', async (t) => {
+  const repoDir = await createGitRepo();
+  t.after(async () => cleanupDir(repoDir));
+
+  const engine = await HeadlessEngine.open({ cwd: repoDir });
+  t.after(async () => engine.dispose());
+
+  let releaseToolFinish: (() => void) | null = null;
+  const toolFinished = new Promise<void>((resolve) => {
+    releaseToolFinish = resolve;
+  });
+
+  const originalRunTurn = engine.modelClient.runTurn;
+  let turnCount = 0;
+  engine.modelClient.runTurn = async (
+    _sessionId: string,
+    input: string,
+    _tools: unknown,
+    emit: (role: string, text: string) => Promise<void>,
+    _onAssistantStream: ((text: string) => Promise<void>) | undefined,
+    _onReasoningSummaryStream: ((text: string) => Promise<void>) | undefined,
+    _thinkingEnabled: boolean,
+    _abortSignal: AbortSignal | undefined,
+    _webSearchMode: unknown,
+    _toolDefinitions: unknown,
+    _instructions: string,
+    onToolCallStart: ((toolCall: {
+      toolCallId: string;
+      toolName: string;
+      label: string;
+      detail?: string | null;
+      body?: string[];
+      providerExecuted?: boolean;
+    }) => Promise<void>) | undefined,
+    onToolCallFinish: ((toolCallId: string, transcriptText?: string) => Promise<void>) | undefined,
+    _allowHiddenAutoCompaction: boolean,
+    _getHiddenCompactionState: (() => Promise<unknown>) | undefined,
+    consumeQueuedUserMessages: (() => Promise<string[]>) | undefined
+  ) => {
+    turnCount += 1;
+    if (turnCount === 1) {
+      assert.equal(input, 'start');
+      await onToolCallStart?.({
+        toolCallId: 'call_exec_1',
+        toolName: 'exec_command',
+        label: 'Exec(pwd)',
+        detail: 'running…',
+        body: ['command: pwd'],
+        providerExecuted: false
+      });
+      await toolFinished;
+      const transcriptText =
+        '@@tool\texec_command\tExec(pwd)\n{\n  "processId": null,\n  "exitCode": 0,\n  "stdout": "/tmp/repo\\n",\n  "stderr": "",\n  "running": false,\n  "command": "pwd",\n  "cwd": "."\n}';
+      await emit('tool', transcriptText);
+      await onToolCallFinish?.('call_exec_1', transcriptText);
+      const queued = await consumeQueuedUserMessages?.();
+      assert.deepEqual(queued, ['steer this']);
+      if (queued?.length) {
+        for (const message of queued) {
+          await emit('user', message);
+        }
+      }
+      await emit('assistant', 'Adjusted course.');
+      return;
+    }
+
+    assert.fail('expected a single model turn with in-loop queue injection');
+  };
+  t.after(() => {
+    engine.modelClient.runTurn = originalRunTurn;
+  });
+
+  const submitPromise = engine.submit('start');
+  await waitFor(
+    () => engine.snapshot.liveTurnEvents.find((event) => event.kind === 'tool' && event.live),
+    (toolEvent) => Boolean(toolEvent)
+  );
+
+  await engine.submit('steer this');
+  assert.deepEqual(engine.snapshot.queuedUserMessages, ['steer this']);
+  assert.equal(engine.snapshot.transcript.at(-1)?.text, 'start');
+
+  releaseToolFinish?.();
+  await submitPromise;
+
+  assert.deepEqual(engine.snapshot.queuedUserMessages, []);
+  assert.deepEqual(
+    engine.snapshot.transcript.slice(-4).map((entry) => entry.text),
+    [
+      'start',
+      '@@tool\texec_command\tExec(pwd)\n{\n  "processId": null,\n  "exitCode": 0,\n  "stdout": "/tmp/repo\\n",\n  "stderr": "",\n  "running": false,\n  "command": "pwd",\n  "cwd": "."\n}',
+      'steer this',
+      'Adjusted course.'
+    ]
   );
 });
 

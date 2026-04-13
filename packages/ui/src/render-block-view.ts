@@ -20,6 +20,13 @@ const assistantMarkdownSyntaxStyle = createMarkdownSyntaxStyle({
   code: '#c4b5fd'
 });
 
+const interruptionMarkdownSyntaxStyle = createMarkdownSyntaxStyle({
+  text: '#f87171',
+  accent: '#fca5a5',
+  quote: '#fecaca',
+  code: '#fda4af'
+});
+
 const thinkingMarkdownSyntaxStyle = createMarkdownSyntaxStyle({
   text: RGBA.fromValues(0.24, 0.68, 0.78, 0.72),
   accent: RGBA.fromValues(0.22, 0.62, 0.72, 0.72),
@@ -110,10 +117,14 @@ export function updateBlockView(
       return;
     }
     case 'assistant': {
+      const isInterruption = block.tone === 'interruption';
+      const syntaxStyle = isInterruption ? interruptionMarkdownSyntaxStyle : assistantMarkdownSyntaxStyle;
+      const foreground = isInterruption ? '#f87171' : '#ffffff';
       if (view.kind === 'assistant' && view.markdown) {
         view.markdown.content = block.text;
         view.markdown.streaming = block.live ?? false;
-        view.markdown.fg = '#ffffff';
+        view.markdown.syntaxStyle = syntaxStyle;
+        view.markdown.fg = foreground;
         view.markdown.bg = '#111111';
         return;
       }
@@ -122,8 +133,8 @@ export function updateBlockView(
       const markdown = new MarkdownRenderable(renderer, {
         id: `${baseId}-assistant`,
         content: block.text,
-        syntaxStyle: assistantMarkdownSyntaxStyle,
-        fg: '#ffffff',
+        syntaxStyle,
+        fg: foreground,
         bg: '#111111',
         conceal: true,
         streaming: block.live ?? false

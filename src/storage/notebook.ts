@@ -1844,6 +1844,7 @@ export class Notebook {
     standardRateContextTokens: number | null = null,
     allowOverStandardContext = false,
     liveTurnEvents: LiveTurnEvent[] = [],
+    queuedUserMessages: string[] = [],
     thinkingEnabled = true
   ): EngineSnapshot {
     const session = this.getSession(sessionId);
@@ -1873,6 +1874,7 @@ export class Notebook {
       standardRateContextTokens,
       allowOverStandardContext,
       liveTurnEvents,
+      queuedUserMessages,
       thinkingEnabled
     };
   }

@@ -88,6 +88,12 @@ const SPILLABLE_TOOL_OUTPUT_NAMES = new Set([
   'search_experiments'
 ]);
 
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException
+    ? error.name === 'AbortError'
+    : error instanceof Error && error.name === 'AbortError';
+}
+
 export {
   DIRECT_TOOL_DEFINITIONS,
   EXPERIMENT_TOOL_DEFINITIONS,
@@ -187,6 +193,7 @@ export class ModelClient {
     onAssistantStream?: (text: string) => Promise<void>,
     onReasoningSummaryStream?: (text: string) => Promise<void>,
     thinkingEnabled = false,
+    abortSignal?: AbortSignal,
     webSearchMode: 'disabled' | 'cached' | 'live' | undefined = undefined,
     toolDefinitions: readonly ToolDefinition[] = STUDY_TOOL_DEFINITIONS,
     instructions = STUDY_AGENT_PROMPT,
@@ -200,7 +207,8 @@ export class ModelClient {
     }) => Promise<void>,
     onToolCallFinish?: (toolCallId: string, transcriptText?: string) => Promise<void>,
     allowHiddenAutoCompaction = false,
-    getHiddenCompactionState?: (() => Promise<HiddenCompactionStateSnapshot>) | undefined
+    getHiddenCompactionState?: (() => Promise<HiddenCompactionStateSnapshot>) | undefined,
+    consumeQueuedUserMessages?: (() => Promise<string[]>) | undefined
   ): Promise<void> {
     ({
       webSearchMode,
@@ -290,6 +298,7 @@ export class ModelClient {
           onAssistantStream,
           onReasoningSummaryStream,
           thinkingEnabled,
+          abortSignal,
           webSearchMode,
           toolDefinitions: effectiveToolDefinitions,
           instructions,
@@ -305,6 +314,10 @@ export class ModelClient {
           }
         });
       } catch (error) {
+        if (isAbortError(error)) {
+          throw error;
+        }
+
         const failure = classifyModelProviderFailure(error);
         const marker = `@@provider_error\tkind=${failure.kind}${
           failure.status ? `\tstatus=${failure.status}` : ''
@@ -381,6 +394,20 @@ export class ModelClient {
           content: assistantText
         });
         await emit('assistant', assistantText);
+      }
+
+      const queuedAfterResponse = await consumeQueuedUserMessages?.();
+      if (queuedAfterResponse && queuedAfterResponse.length > 0) {
+        for (const message of queuedAfterResponse) {
+          this.persistHistoryItem(sessionId, {
+            type: 'message',
+            role: 'user',
+            content: message
+          });
+          await emit('user', message);
+        }
+        requestItems = this.notebook.buildModelRequestHistory(sessionId);
+        continue turnLoop;
       }
 
       if (toolCalls.length === 0) {
@@ -481,6 +508,20 @@ export class ModelClient {
           return;
         }
 
+        const queuedAfterToolBatch = await consumeQueuedUserMessages?.();
+        if (queuedAfterToolBatch && queuedAfterToolBatch.length > 0) {
+          for (const message of queuedAfterToolBatch) {
+            this.persistHistoryItem(sessionId, {
+              type: 'message',
+              role: 'user',
+              content: message
+            });
+            await emit('user', message);
+          }
+          requestItems = this.notebook.buildModelRequestHistory(sessionId);
+          continue turnLoop;
+        }
+
         index = nextIndex;
       }
 
@@ -569,6 +610,7 @@ export class ModelClient {
     }) => Promise<void>;
     onProviderToolEvent?: (event: ProviderToolEvent) => Promise<void>;
     thinkingEnabled: boolean;
+    abortSignal?: AbortSignal;
     webSearchMode?: 'disabled' | 'cached' | 'live';
     toolDefinitions: readonly ToolDefinition[];
     instructions: string;

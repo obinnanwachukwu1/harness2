@@ -497,6 +497,7 @@ export interface EngineSnapshot {
   standardRateContextTokens: number | null;
   allowOverStandardContext: boolean;
   liveTurnEvents: LiveTurnEvent[];
+  queuedUserMessages: string[];
   thinkingEnabled: boolean;
 }
 

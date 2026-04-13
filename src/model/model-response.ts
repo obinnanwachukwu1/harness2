@@ -81,6 +81,7 @@ export async function createModelStepResponse(input: {
   }) => Promise<void>;
   onProviderToolEvent?: (event: ProviderToolEvent) => Promise<void>;
   thinkingEnabled: boolean;
+  abortSignal?: AbortSignal;
   webSearchMode?: 'disabled' | 'cached' | 'live';
   toolDefinitions: readonly ToolDefinition[];
   instructions: string;
@@ -138,6 +139,7 @@ export async function createModelStepResponse(input: {
   const result = streamText({
     model,
     messages,
+    abortSignal: input.abortSignal,
     tools,
     toolChoice: 'auto',
     stopWhen: stepCountIs(1),
@@ -467,6 +469,9 @@ async function fetchWithRetries(
       continue;
     } catch (error) {
       lastError = error;
+      if (isAbortError(error)) {
+        throw error;
+      }
       if (!isRetryableTransportError(error) || attempt === maxRetries) {
         throw error;
       }
@@ -544,6 +549,13 @@ function isRetryableTransportError(error: unknown): boolean {
     message.includes('temporarily unavailable') ||
     message.includes('enotfound')
   );
+}
+
+function isAbortError(error: unknown): boolean {
+  if (error instanceof Error) {
+    return error.name === 'AbortError';
+  }
+  return false;
 }
 
 export function classifyModelProviderFailure(error: unknown): ModelProviderFailure {

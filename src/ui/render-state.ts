@@ -11,11 +11,14 @@ type ToolTone = Extract<RenderBlock, { kind: 'tool' }>['tone'];
 
 const INPUT_PLACEHOLDER = 'Send a prompt…';
 const PENDING_INPUT_PLACEHOLDER = 'Reply to the pending question…';
+const INTERRUPTION_FOLLOWUP = 'Conversation interrupted. What do you want to do next?';
 
 export function buildState(snapshot: EngineSnapshot): State {
   return {
     sessionId: snapshot.session.id,
     cwd: snapshot.session.cwd,
+    processingTurn: snapshot.processingTurn,
+    queuedUserMessages: [...snapshot.queuedUserMessages],
     status: formatStatus(snapshot),
     thinkingEnabled: snapshot.thinkingEnabled,
     inputPlaceholder: snapshot.pendingUserRequest ? PENDING_INPUT_PLACEHOLDER : INPUT_PLACEHOLDER,
@@ -36,6 +39,16 @@ export function diffState(
 
   if (!statusEquals(previous.status, next.status)) {
     patch.status = next.status;
+    changed = true;
+  }
+
+  if (previous.processingTurn !== next.processingTurn) {
+    patch.processingTurn = next.processingTurn;
+    changed = true;
+  }
+
+  if (!stringArrayEquals(previous.queuedUserMessages, next.queuedUserMessages)) {
+    patch.queuedUserMessages = next.queuedUserMessages;
     changed = true;
   }
 
@@ -327,7 +340,8 @@ function transcriptEntryToBlocks(
     {
       id: `assistant-${entry.id}`,
       kind: 'assistant',
-      text: entry.text
+      text: entry.text,
+      tone: entry.text === INTERRUPTION_FOLLOWUP ? 'interruption' : 'default'
     }
   ];
 }

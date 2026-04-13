@@ -8,6 +8,7 @@ export type RenderBlock =
       id: string;
       kind: 'assistant';
       text: string;
+      tone?: 'default' | 'interruption';
       live?: boolean;
     }
   | {
@@ -45,6 +46,8 @@ export interface ExperimentSummary {
 export interface State {
   sessionId: string;
   cwd: string;
+  processingTurn: boolean;
+  queuedUserMessages: string[];
   status: {
     label: string;
     modeText: string;
@@ -63,6 +66,8 @@ export interface State {
 export interface StatePatch {
   sessionId: string;
   cwd: string;
+  processingTurn?: boolean;
+  queuedUserMessages?: string[];
   status?: State['status'];
   thinkingEnabled?: boolean;
   inputPlaceholder?: string;

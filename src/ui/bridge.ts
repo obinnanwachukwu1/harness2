@@ -211,6 +211,9 @@ async function main(): Promise<void> {
             });
           });
           break;
+        case 'interrupt':
+          engine.interruptTurn();
+          break;
         case 'setThinking':
           engine.setThinkingEnabled(command.enabled);
           break;

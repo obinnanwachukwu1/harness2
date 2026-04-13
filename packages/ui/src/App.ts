@@ -46,6 +46,7 @@ export class App {
   private readonly transcriptContent: BoxRenderable;
   private readonly experimentRail: BoxRenderable;
   private readonly footer: BoxRenderable;
+  private readonly queuedMessagesBox: BoxRenderable;
   private readonly promptShell: BoxRenderable;
   private readonly statusRow: BoxRenderable;
   private readonly input: TextareaRenderable;
@@ -78,6 +79,7 @@ export class App {
     this.transcriptContent = this.root.findDescendantById('transcript-content') as BoxRenderable;
     this.experimentRail = this.root.findDescendantById('experiment-rail') as BoxRenderable;
     this.footer = this.root.findDescendantById('footer') as BoxRenderable;
+    this.queuedMessagesBox = this.root.findDescendantById('queued-messages') as BoxRenderable;
     this.promptShell = this.root.findDescendantById('prompt-shell') as BoxRenderable;
     this.statusRow = this.root.findDescendantById('status-row') as BoxRenderable;
     this.input = this.root.findDescendantById('composer-input') as TextareaRenderable;
@@ -175,6 +177,18 @@ export class App {
       height: 5,
       flexDirection: 'column'
     });
+    footer.add(
+      new BoxRenderable(this.renderer, {
+        id: 'queued-messages',
+        width: '100%',
+        flexDirection: 'column',
+        marginLeft: 1,
+        marginRight: 1,
+        marginBottom: 1,
+        visible: false,
+        height: 0
+      })
+    );
     const promptShell = new BoxRenderable(this.renderer, {
       id: 'prompt-shell',
       width: '100%',
@@ -254,6 +268,13 @@ export class App {
         return;
       }
 
+      if (key.name === 'escape' && this.state?.processingTurn) {
+        this.bridge.send({
+          type: 'interrupt'
+        });
+        return;
+      }
+
       if (key.ctrl && key.name === 'c') {
         void this.destroy();
         return;
@@ -321,12 +342,48 @@ export class App {
   private updateComposerLayout(): void {
     const logicalLineCount = this.input.plainText.length === 0 ? 1 : this.input.plainText.split('\n').length;
     const lineCount = Math.max(1, Math.min(3, Math.max(logicalLineCount, this.input.virtualLineCount)));
+    const queueHeight = this.queuedMessagesBox.visible ? this.queuedMessagesBox.height : 0;
     this.input.height = lineCount;
     this.input.minHeight = lineCount;
     this.input.maxHeight = lineCount;
     this.promptShell.height = lineCount + 2;
-    this.footer.height = lineCount + 4;
+    this.footer.height = lineCount + 4 + queueHeight;
     this.renderer.requestRender();
+  }
+
+  private renderQueuedMessages(messages: string[]): void {
+    for (const child of this.queuedMessagesBox.getChildren()) {
+      this.queuedMessagesBox.remove(child.id);
+    }
+    if (messages.length === 0) {
+      this.queuedMessagesBox.visible = false;
+      this.queuedMessagesBox.height = 0;
+      this.updateComposerLayout();
+      return;
+    }
+
+    this.queuedMessagesBox.visible = true;
+    this.queuedMessagesBox.height = Math.min(messages.length + 1, 6);
+    this.queuedMessagesBox.add(
+      new TextRenderable(this.renderer, {
+        id: 'queued-messages-label',
+        content: 'Queued follow-ups',
+        fg: '#fbbf24',
+        attributes: TextAttributes.BOLD,
+        wrapMode: 'word'
+      })
+    );
+    for (const [index, message] of messages.slice(0, 5).entries()) {
+      this.queuedMessagesBox.add(
+        new TextRenderable(this.renderer, {
+          id: `queued-message-${index}`,
+          content: `• ${message}`,
+          fg: '#d4d4d8',
+          wrapMode: 'word'
+        })
+      );
+    }
+    this.updateComposerLayout();
   }
 
   private bindTranscriptMouseFocus(): void {
@@ -418,6 +475,7 @@ export class App {
       this.input.placeholder = state.inputPlaceholder;
       this.lastInputPlaceholder = state.inputPlaceholder;
     }
+    this.renderQueuedMessages(state.queuedUserMessages);
     this.syncTranscript(state.blocks);
     this.syncExperiments(state.experiments);
     if (!statusLineEquals(this.lastRenderedStatus, state.status)) {
@@ -441,6 +499,10 @@ export class App {
     ) {
       this.input.placeholder = nextState.inputPlaceholder;
       this.lastInputPlaceholder = nextState.inputPlaceholder;
+    }
+
+    if (Object.prototype.hasOwnProperty.call(patch, 'queuedUserMessages')) {
+      this.renderQueuedMessages(nextState.queuedUserMessages);
     }
 
     if (patch.upsertBlocks || patch.removeBlockIds || patch.blockOrder) {
@@ -914,6 +976,11 @@ function mergeStatePatch(state: State, patch: StatePatch): State {
   return {
     sessionId: patch.sessionId,
     cwd: patch.cwd,
+    processingTurn:
+      Object.prototype.hasOwnProperty.call(patch, 'processingTurn')
+        ? patch.processingTurn!
+        : state.processingTurn,
+    queuedUserMessages: patch.queuedUserMessages ?? state.queuedUserMessages,
     status: patch.status ?? state.status,
     thinkingEnabled:
       Object.prototype.hasOwnProperty.call(patch, 'thinkingEnabled')

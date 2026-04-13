@@ -6,6 +6,9 @@ export type BridgeCommand =
       text: string;
     }
   | {
+      type: 'interrupt';
+    }
+  | {
       type: 'setThinking';
       enabled: boolean;
     }
