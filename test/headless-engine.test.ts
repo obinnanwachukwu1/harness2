@@ -938,7 +938,7 @@ test('HeadlessEngine persists a thinking summary once and clears the live overla
   );
 });
 
-test('HeadlessEngine preserves completed tool events until the next turn starts', async (t) => {
+test('HeadlessEngine removes tracked live tool events once their durable transcript is appended', async (t) => {
   const repoDir = await createGitRepo();
   t.after(async () => cleanupDir(repoDir));
 
@@ -1019,21 +1019,8 @@ test('HeadlessEngine preserves completed tool events until the next turn starts'
 
   releaseToolFinish?.();
   await submitPromise;
-  assert.deepEqual(engine.snapshot.liveTurnEvents, [
-    {
-      id: 'live-tool-1',
-      kind: 'tool',
-      transcriptText:
-        '@@tool\texec_command\tExec(pwd)\n{\n  "processId": null,\n  "exitCode": 0,\n  "stdout": "/tmp/repo\\n",\n  "stderr": "",\n  "running": false,\n  "command": "pwd",\n  "cwd": "."\n}',
-      live: false,
-      callId: 'call_exec_1',
-      toolName: null,
-      label: null,
-      detail: null,
-      body: [],
-      providerExecuted: false
-    }
-  ]);
+  assert.deepEqual(engine.snapshot.liveTurnEvents, []);
+  assert.equal(engine.snapshot.transcript.at(-1)?.text, '@@tool\texec_command\tExec(pwd)\n{\n  "processId": null,\n  "exitCode": 0,\n  "stdout": "/tmp/repo\\n",\n  "stderr": "",\n  "running": false,\n  "command": "pwd",\n  "cwd": "."\n}');
 
   await engine.submit('thanks');
   assert.equal(

@@ -769,12 +769,19 @@ export class HeadlessEngine {
       (candidate) => candidate.id === eventId && candidate.kind === 'tool'
     ) as Extract<LiveTurnEvent, { kind: 'tool' }> | undefined;
     if (event) {
-      event.live = false;
-      event.transcriptText = transcriptText ?? event.transcriptText;
-      event.detail = null;
-      event.body = [];
-      event.label = null;
-      event.toolName = null;
+      if (transcriptText) {
+        const index = this.liveTurnEvents.findIndex((candidate) => candidate.id === eventId);
+        if (index >= 0) {
+          this.liveTurnEvents.splice(index, 1);
+        }
+      } else {
+        event.live = false;
+        event.transcriptText = event.transcriptText;
+        event.detail = null;
+        event.body = [];
+        event.label = null;
+        event.toolName = null;
+      }
       this.emitChange();
     }
     this.liveToolEventIds.delete(toolCallId);
