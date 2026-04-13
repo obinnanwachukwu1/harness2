@@ -250,6 +250,7 @@ export class ModelClient {
     }
 
     turnLoop: for (;;) {
+      const emittedProviderToolEventIds = new Set<string>();
       if (allowHiddenAutoCompaction) {
         const compacted = await this.maybeAutoCompactHiddenSession({
           accessToken,
@@ -304,6 +305,7 @@ export class ModelClient {
           instructions,
           onToolCallStart,
           onProviderToolEvent: async (event) => {
+            emittedProviderToolEventIds.add(event.toolCallId);
             this.persistHistoryItem(sessionId, {
               type: 'message',
               role: 'developer',
@@ -378,6 +380,9 @@ export class ModelClient {
       }
 
       for (const event of providerToolEvents) {
+        if (emittedProviderToolEventIds.has(event.toolCallId)) {
+          continue;
+        }
         this.persistHistoryItem(sessionId, {
           type: 'message',
           role: 'developer',

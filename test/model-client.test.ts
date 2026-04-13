@@ -935,6 +935,7 @@ test('ModelClient does not route provider-executed web search through the local 
       toolCallId: 'ws_1'
     }
   ]);
+  assert.equal(emitted.filter((entry) => entry.role === 'tool').length, 1);
   assert.equal(emitted[0]?.role, 'tool');
   assert.match(emitted[0]?.text ?? '', /^@@tool\tweb_search\tWebSearch\(weather seattle\)/);
   assert.equal(emitted[1]?.role, 'assistant');
