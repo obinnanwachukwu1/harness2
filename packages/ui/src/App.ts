@@ -722,7 +722,7 @@ export class App {
         new TextRenderable(this.renderer, {
           id: leftIds.pending,
           content: status.pendingText,
-          fg: '#fbbf24'
+          fg: status.label === 'interrupted' ? '#f87171' : '#fbbf24'
         })
       );
     }

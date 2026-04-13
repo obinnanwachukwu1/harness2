@@ -572,13 +572,6 @@ export class HeadlessEngine {
       } catch (error) {
         if (isAbortError(error)) {
           await this.persistInterruptedLiveAssistantText(options.onTranscriptEntry);
-          this.appendTranscript('assistant', INTERRUPTION_FOLLOWUP);
-          this.appendModelHistory({
-            type: 'message',
-            role: 'assistant',
-            content: INTERRUPTION_FOLLOWUP
-          });
-          await options.onTranscriptEntry?.('assistant', INTERRUPTION_FOLLOWUP);
           this.statusText = 'interrupted';
         } else {
           const message = formatUnknownError(error);

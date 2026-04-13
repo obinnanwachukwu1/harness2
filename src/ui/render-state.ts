@@ -86,7 +86,7 @@ export function diffState(
 
 function buildBlocks(snapshot: EngineSnapshot): RenderBlock[] {
   const currentTurnStartedAt =
-    snapshot.currentTurnStartedAt && snapshot.liveTurnEvents.length > 0
+    snapshot.currentTurnStartedAt && snapshot.processingTurn
       ? snapshot.currentTurnStartedAt
       : null;
   const historicalEntries = currentTurnStartedAt
@@ -899,6 +899,10 @@ function formatStatus(snapshot: EngineSnapshot): State['status'] {
 }
 
 function formatPendingText(snapshot: EngineSnapshot): string | null {
+  if (snapshot.statusText === 'interrupted') {
+    return INTERRUPTION_FOLLOWUP;
+  }
+
   const request = snapshot.pendingUserRequest;
   if (!request) {
     return null;
