@@ -21,7 +21,6 @@ export async function runHarborTask(input: HarborRunOptions): Promise<HarborRunR
   });
   const sessionId = engine.snapshot.session.id;
   const startedAt = nowIso();
-  let interruptionSignal: 'SIGINT' | 'SIGTERM' | null = null;
   let exportedPartial = false;
 
   const exportPartialArtifacts = async (signal: 'SIGINT' | 'SIGTERM'): Promise<void> => {
@@ -29,7 +28,6 @@ export async function runHarborTask(input: HarborRunOptions): Promise<HarborRunR
       return;
     }
     exportedPartial = true;
-    interruptionSignal = signal;
 
     const settings = engine.getSessionSettings();
     const runtime: HarborRunRuntime = {

@@ -9,7 +9,6 @@ import type {
   EvalCaseEnvOverride,
   EvalClarificationPolicy,
   EvalFixtureDefinition,
-  EvalFollowupTurn,
   EvalRuntimeConfig,
   EvalSuiteManifest,
   EvalSuiteMeta

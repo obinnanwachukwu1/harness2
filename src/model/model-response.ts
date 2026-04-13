@@ -211,7 +211,7 @@ export async function createModelStepResponse(input: {
   const toolCalls = await result.toolCalls;
   const toolResults = await result.toolResults;
   const sources = await result.sources;
-  const providerToolEvents = buildProviderToolEvents(toolCalls, toolResults, sources).filter(
+  const providerToolEvents = buildProviderToolEvents(toolResults, sources).filter(
     (event) => !emittedProviderToolResults.has(event.toolCallId)
   );
   const localToolCalls = toolCalls.filter((call) => !call.providerExecuted);
@@ -366,7 +366,6 @@ function getWebSearchMode(
 }
 
 function buildProviderToolEvents(
-  toolCalls: Array<{ toolCallId: string; toolName: string; providerExecuted?: boolean }>,
   toolResults: Array<{
     toolCallId: string;
     toolName: string;

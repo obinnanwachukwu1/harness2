@@ -7,9 +7,7 @@ import type {
   AskUserKind,
   AskUserRecommendedResponse,
   AskUserResponseKind,
-  ApprovePlanResult,
   CompactionArtifactPointer,
-  CreatePlanInput,
   EngineSnapshot,
   ExperimentDetails,
   ExperimentObservation,
@@ -209,7 +207,7 @@ interface TableInfoRow {
 export class Notebook {
   private readonly db: DatabaseSync;
 
-  constructor(private readonly dbPath: string) {
+  constructor(dbPath: string) {
     mkdirSync(dirname(dbPath), { recursive: true });
     this.db = new DatabaseSync(dbPath);
     this.init();

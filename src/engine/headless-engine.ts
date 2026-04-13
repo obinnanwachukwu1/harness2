@@ -32,7 +32,6 @@ import type {
   ExperimentAdoptionResult,
   ExperimentBudgetNotification,
   ExperimentDetails,
-  ExperimentObservationTag,
   ExperimentQualityNotification,
   ExecCommandInput,
   ExecCommandResult,
@@ -85,7 +84,6 @@ function isAbortError(error: unknown): boolean {
     : error instanceof Error && error.name === 'AbortError';
 }
 
-const INTERRUPTION_FOLLOWUP = 'Conversation interrupted. What do you want to do next?';
 const MAX_EXEC_CAPTURED_OUTPUT_CHARS = 64_000;
 
 interface ExecSession {
@@ -544,8 +542,8 @@ export class HeadlessEngine {
             }) => {
               this.startLiveToolCall(toolCall);
             };
-            const onToolFinish = async (toolCallId: string, transcriptText?: string) => {
-              this.finishLiveToolCall(toolCallId, transcriptText);
+            const onToolFinish = async (toolCallId: string) => {
+              this.finishLiveToolCall(toolCallId);
             };
 
             await this.model.runTurn({
@@ -768,7 +766,7 @@ export class HeadlessEngine {
     this.emitChange();
   }
 
-  private finishLiveToolCall(toolCallId: string, transcriptText?: string): void {
+  private finishLiveToolCall(toolCallId: string): void {
     const eventId = this.liveToolEventIds.get(toolCallId);
     if (!eventId) {
       return;
@@ -2323,7 +2321,7 @@ export class HeadlessEngine {
       return [];
     }
 
-    const matchingDebts = this.findOpenStudyDebtsForEvidencePath(root, resolvedTargets, {
+    const matchingDebts = this.findOpenStudyDebtsForEvidencePath(resolvedTargets, {
       requireActiveExperiment: false,
       toolName
     });
@@ -2378,7 +2376,6 @@ export class HeadlessEngine {
   }
 
   private findOpenStudyDebtsForEvidencePath(
-    root: string,
     resolvedTargets: string[],
     options: { requireActiveExperiment: boolean; toolName: 'exec_command' | 'write_stdin' }
   ) {

@@ -11,7 +11,6 @@ import {
 import { clampText, estimateTokens, nowIso } from '../lib/utils.js';
 import {
   DIRECT_AGENT_PROMPT,
-  EXPERIMENT_SUBAGENT_PROMPT,
   PLAN_AGENT_PROMPT,
   STUDY_AGENT_PROMPT
 } from './model-prompt.js';
@@ -27,7 +26,6 @@ import {
   formatToolHeader,
   formatToolOutput,
   isParallelReadOnlyToolCall,
-  MAIN_TOOL_DEFINITIONS,
   PLAN_EXECUTION_TOOL_DEFINITIONS,
   PLAN_PLANNING_TOOL_DEFINITIONS,
   STUDY_TOOL_DEFINITIONS,
@@ -925,22 +923,6 @@ export class ModelClient {
       planModePhase: null
     };
   }
-}
-
-function formatReadHeader(path: string, startLine?: number, endLine?: number): string {
-  if (typeof startLine === 'number' && typeof endLine === 'number') {
-    return `Read(${path}:${Math.floor(startLine)}-${Math.floor(endLine)})`;
-  }
-
-  if (typeof startLine === 'number') {
-    return `Read(${path}:${Math.floor(startLine)}-)`;
-  }
-
-  if (typeof endLine === 'number') {
-    return `Read(${path}:1-${Math.floor(endLine)})`;
-  }
-
-  return `Read(${path})`;
 }
 
 function estimateHistoryItemTokens(item: ModelHistoryItem): number {

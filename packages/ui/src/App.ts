@@ -45,8 +45,6 @@ export class App {
   private readonly transcriptScroll: ScrollBoxRenderable;
   private readonly transcriptContent: BoxRenderable;
   private readonly experimentRail: BoxRenderable;
-  private readonly footer: BoxRenderable;
-  private readonly composerContainer: BoxRenderable;
   private readonly queuedMessagesBox: BoxRenderable;
   private readonly promptShell: BoxRenderable;
   private readonly statusRow: BoxRenderable;
@@ -79,8 +77,6 @@ export class App {
     this.transcriptScroll = this.root.findDescendantById('transcript-scroll') as ScrollBoxRenderable;
     this.transcriptContent = this.root.findDescendantById('transcript-content') as BoxRenderable;
     this.experimentRail = this.root.findDescendantById('experiment-rail') as BoxRenderable;
-    this.footer = this.root.findDescendantById('footer') as BoxRenderable;
-    this.composerContainer = this.root.findDescendantById('composer-container') as BoxRenderable;
     this.queuedMessagesBox = this.root.findDescendantById('queued-messages') as BoxRenderable;
     this.promptShell = this.root.findDescendantById('prompt-shell') as BoxRenderable;
     this.statusRow = this.root.findDescendantById('status-row') as BoxRenderable;
@@ -130,13 +126,14 @@ export class App {
     const body = new BoxRenderable(this.renderer, {
       width: '100%',
       flexGrow: 1,
+      flexShrink: 1,
       flexDirection: 'row'
     });
 
     const transcriptScroll = new ScrollBoxRenderable(this.renderer, {
       id: 'transcript-scroll',
       flexGrow: 1,
-      height: '100%',
+      flexShrink: 1,
       scrollY: true,
       scrollX: false,
       stickyScroll: true,
@@ -164,7 +161,7 @@ export class App {
       new BoxRenderable(this.renderer, {
         id: 'experiment-rail',
         width: 34,
-        height: '100%',
+        flexShrink: 1,
         flexDirection: 'column',
         marginBottom: 1,
         border: ['left'],
@@ -176,17 +173,9 @@ export class App {
     const footer = new BoxRenderable(this.renderer, {
       id: 'footer',
       width: '100%',
-      height: 5,
-      flexDirection: 'column'
+      flexDirection: 'column',
+      flexShrink: 0
     });
-    footer.add(
-      new BoxRenderable(this.renderer, {
-        id: 'footer-spacer',
-        width: '100%',
-        flexGrow: 1,
-        height: 0
-      })
-    );
     const composerContainer = new BoxRenderable(this.renderer, {
       id: 'composer-container',
       width: '100%',
@@ -194,7 +183,7 @@ export class App {
       marginRight: 1,
       backgroundColor: '#27272a',
       flexDirection: 'column',
-      height: 3
+      flexShrink: 0
     });
     composerContainer.add(
       new BoxRenderable(this.renderer, {
@@ -207,7 +196,8 @@ export class App {
         paddingLeft: 1,
         paddingRight: 1,
         visible: false,
-        height: 0
+        height: 0,
+        flexShrink: 0
       })
     );
     const promptShell = new BoxRenderable(this.renderer, {
@@ -218,7 +208,8 @@ export class App {
       paddingTop: 1,
       paddingBottom: 1,
       paddingLeft: 1,
-      paddingRight: 1
+      paddingRight: 1,
+      flexShrink: 0
     });
     promptShell.add(
       new TextareaRenderable(this.renderer, {
@@ -245,10 +236,12 @@ export class App {
       new BoxRenderable(this.renderer, {
         id: 'status-row',
         width: '100%',
+        height: 1,
         flexDirection: 'row',
         marginTop: 1,
         marginLeft: 2,
-        marginRight: 2
+        marginRight: 2,
+        flexShrink: 0
       })
     );
 
@@ -362,31 +355,22 @@ export class App {
   private updateComposerLayout(): void {
     const logicalLineCount = this.input.plainText.length === 0 ? 1 : this.input.plainText.split('\n').length;
     const lineCount = Math.max(1, Math.min(3, Math.max(logicalLineCount, this.input.virtualLineCount)));
-    const queueHeight = this.queuedMessagesBox.visible ? this.queuedMessagesBox.height : 0;
     this.input.height = lineCount;
     this.input.minHeight = lineCount;
     this.input.maxHeight = lineCount;
     this.promptShell.height = lineCount + 2;
-    this.composerContainer.height = this.promptShell.height + queueHeight;
-    this.footer.height = lineCount + 4 + queueHeight;
     this.renderer.requestRender();
   }
 
-  private measureQueuedMessagesHeight(): number {
-    let contentHeight = 0;
-    for (const child of this.queuedMessagesBox.getChildren()) {
-      if ('virtualLineCount' in child && typeof child.virtualLineCount === 'number') {
-        contentHeight += Math.max(1, child.virtualLineCount);
-        continue;
-      }
-      if ('lineCount' in child && typeof child.lineCount === 'number') {
-        contentHeight += Math.max(1, child.lineCount);
-        continue;
-      }
-      contentHeight += Math.max(1, child.height);
+  private syncQueuedMessagesLayout(): void {
+    if (!this.queuedMessagesBox.visible) {
+      this.queuedMessagesBox.height = 0;
+      this.updateComposerLayout();
+      return;
     }
-    const verticalPadding = 2;
-    return contentHeight + verticalPadding;
+    const childCount = this.queuedMessagesBox.getChildren().length;
+    this.queuedMessagesBox.height = childCount + 2;
+    this.updateComposerLayout();
   }
 
   private renderQueuedMessages(messages: string[]): void {
@@ -400,7 +384,6 @@ export class App {
       return;
     }
 
-    const visibleMessageCount = Math.min(messages.length, 5);
     this.queuedMessagesBox.visible = true;
     this.queuedMessagesBox.add(
       new TextRenderable(this.renderer, {
@@ -408,7 +391,8 @@ export class App {
         content: 'Queued follow-ups',
         fg: '#d4d4d8',
         attributes: TextAttributes.BOLD,
-        wrapMode: 'word'
+        wrapMode: 'none',
+        truncate: true
       })
     );
     for (const [index, message] of messages.slice(0, 5).entries()) {
@@ -417,12 +401,12 @@ export class App {
           id: `queued-message-${index}`,
           content: `• ${message}`,
           fg: '#d4d4d8',
-          wrapMode: 'word'
+          wrapMode: 'none',
+          truncate: true
         })
       );
     }
-    this.queuedMessagesBox.height = this.measureQueuedMessagesHeight();
-    this.updateComposerLayout();
+    this.syncQueuedMessagesLayout();
   }
 
   private bindTranscriptMouseFocus(): void {

@@ -136,6 +136,8 @@ export function updateBlockView(
         syntaxStyle,
         fg: foreground,
         bg: '#111111',
+        marginLeft: 1,
+        marginRight: 1,
         conceal: true,
         streaming: block.live ?? false
       });
@@ -163,6 +165,8 @@ export function updateBlockView(
         syntaxStyle: thinkingMarkdownSyntaxStyle,
         fg: RGBA.fromValues(0.24, 0.68, 0.78, 0.72),
         bg: '#111111',
+        marginLeft: 1,
+        marginRight: 1,
         conceal: true,
         streaming: block.live ?? false
       });
@@ -238,7 +242,9 @@ export function updateBlockView(
       const headerRow = new BoxRenderable(renderer, {
         id: `${baseId}-tool-header-row`,
         width: '100%',
-        flexDirection: 'row'
+        flexDirection: 'row',
+        marginLeft: 1,
+        marginRight: 1
       });
       headerRow.add(
         new TextRenderable(renderer, {
@@ -269,7 +275,9 @@ export function updateBlockView(
         const bodyRow = new BoxRenderable(renderer, {
           id: `${baseId}-tool-body-row`,
           width: '100%',
-          flexDirection: 'row'
+          flexDirection: 'row',
+          marginLeft: 1,
+          marginRight: 1
         });
         bodyRow.add(
           new TextRenderable(renderer, {
@@ -295,7 +303,9 @@ export function updateBlockView(
         const footerRow = new BoxRenderable(renderer, {
           id: `${baseId}-tool-footer-row`,
           width: '100%',
-          flexDirection: 'row'
+          flexDirection: 'row',
+          marginLeft: 1,
+          marginRight: 1
         });
         footerRow.add(
           new TextRenderable(renderer, {

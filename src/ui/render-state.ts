@@ -1,5 +1,5 @@
 import path from 'node:path';
-import type { EngineSnapshot, ExperimentRecord, StudyDebtRecord, TranscriptEntry } from '../types.js';
+import type { EngineSnapshot, ExperimentRecord, TranscriptEntry } from '../types.js';
 import type {
   ExperimentSummary,
   RenderBlock,
@@ -461,7 +461,7 @@ function summarizeToolTranscript(
     case 'resolve_study_debt':
       return summarizeStudyDebtTool(toolName, body, explicitLabel);
     default:
-      return summarizeGenericTool(toolName, body, explicitLabel, false);
+      return summarizeGenericTool(toolName, body, explicitLabel);
   }
 }
 
@@ -535,7 +535,7 @@ function inferDiffTitle(diffText: string): string | undefined {
 function summarizeGlobTool(body: string, explicitLabel: string | null) {
   const parsed = safeJsonParse(body);
   if (!Array.isArray(parsed)) {
-    return summarizeGenericTool('glob', body, explicitLabel, false);
+    return summarizeGenericTool('glob', body, explicitLabel);
   }
 
   const matches = parsed.filter((item): item is string => typeof item === 'string');
@@ -564,7 +564,7 @@ function summarizeReadTool(body: string, explicitLabel: string | null) {
 function summarizeExecTool(toolName: string, body: string, explicitLabel: string | null) {
   const parsed = safeJsonParse(body);
   if (!parsed || typeof parsed !== 'object') {
-    return summarizeGenericTool(toolName, body, explicitLabel, false);
+    return summarizeGenericTool(toolName, body, explicitLabel);
   }
 
   const maybeObject = parsed as Record<string, unknown>;
@@ -637,7 +637,7 @@ function summarizeExperimentTool(
     toolName;
 
   if (!parsed || typeof parsed !== 'object') {
-    return summarizeGenericTool(label, body, explicitLabel, true);
+    return summarizeGenericTool(label, body, explicitLabel);
   }
 
   const previewLines: string[] = [];
@@ -691,7 +691,7 @@ function summarizeStudyDebtTool(
     toolName;
 
   if (!parsed || typeof parsed !== 'object') {
-    return summarizeGenericTool(label, body, explicitLabel, false);
+    return summarizeGenericTool(label, body, explicitLabel);
   }
 
   const previewLines: string[] = [];
@@ -732,8 +732,7 @@ function summarizeStudyDebtTool(
 function summarizeGenericTool(
   toolName: string,
   body: string,
-  explicitLabel: string | null,
-  experimentTone: boolean
+  explicitLabel: string | null
 ) {
   const rows = body.split(/\r?\n/).filter((line) => line.trim().length > 0);
   return {
