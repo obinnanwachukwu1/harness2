@@ -548,24 +548,24 @@ export class HeadlessEngine {
               this.finishLiveToolCall(toolCallId, transcriptText);
             };
 
-            await this.model.runTurn(
-              this.options.sessionId,
-              input,
-              this.tools,
-              emitTranscript,
-              onAssistant,
-              onThinking,
-              this.thinkingEnabled,
-              turnAbortController.signal,
-              this.options.webSearchMode,
-              modeConfig.toolDefinitions,
-              modeConfig.instructions,
-              onToolStart,
-              onToolFinish,
-              settings.agentMode !== 'study',
-              () => this.buildHiddenCompactionStateSnapshot(settings),
-              async () => this.consumeQueuedUserMessages()
-            );
+            await this.model.runTurn({
+              sessionId: this.options.sessionId,
+              inputText: input,
+              tools: this.tools,
+              emit: emitTranscript,
+              onAssistantStream: onAssistant,
+              onReasoningSummaryStream: onThinking,
+              thinkingEnabled: this.thinkingEnabled,
+              abortSignal: turnAbortController.signal,
+              webSearchMode: this.options.webSearchMode,
+              toolDefinitions: modeConfig.toolDefinitions,
+              instructions: modeConfig.instructions,
+              onToolCallStart: onToolStart,
+              onToolCallFinish: onToolFinish,
+              allowHiddenAutoCompaction: settings.agentMode !== 'study',
+              getHiddenCompactionState: () => this.buildHiddenCompactionStateSnapshot(settings),
+              consumeQueuedUserMessages: async () => this.consumeQueuedUserMessages()
+            });
           }
         });
         this.statusText = 'idle';
@@ -2056,24 +2056,17 @@ export class HeadlessEngine {
       }
     };
 
-    await this.model.runTurn(
-      experimentSessionId,
-      prompt,
+    await this.model.runTurn({
+      sessionId: experimentSessionId,
+      inputText: prompt,
       tools,
-      async () => undefined,
-      undefined,
-      undefined,
-      false,
-      undefined,
-      undefined,
-      EXPERIMENT_TOOL_DEFINITIONS,
-      EXPERIMENT_SUBAGENT_PROMPT,
-      undefined,
-      undefined,
-      true,
-      () => this.buildExperimentCompactionStateSnapshot(experiment),
-      undefined
-    );
+      emit: async () => undefined,
+      thinkingEnabled: false,
+      toolDefinitions: EXPERIMENT_TOOL_DEFINITIONS,
+      instructions: EXPERIMENT_SUBAGENT_PROMPT,
+      allowHiddenAutoCompaction: true,
+      getHiddenCompactionState: () => this.buildExperimentCompactionStateSnapshot(experiment)
+    });
   }
 
   private handleExperimentResolved(resolution: ExperimentResolution): void {

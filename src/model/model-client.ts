@@ -167,6 +167,32 @@ interface ResolvedContextPolicy {
   allowOverStandardContext: boolean;
 }
 
+interface RunTurnInput {
+  sessionId: string;
+  inputText: string;
+  tools: AgentTools;
+  emit: (role: TranscriptRole, text: string) => Promise<void>;
+  onAssistantStream?: (text: string) => Promise<void>;
+  onReasoningSummaryStream?: (text: string) => Promise<void>;
+  thinkingEnabled?: boolean;
+  abortSignal?: AbortSignal;
+  webSearchMode?: 'disabled' | 'cached' | 'live';
+  toolDefinitions?: readonly ToolDefinition[];
+  instructions?: string;
+  onToolCallStart?: (toolCall: {
+    toolCallId: string;
+    toolName: string;
+    label: string;
+    detail?: string | null;
+    body?: string[];
+    providerExecuted?: boolean;
+  }) => Promise<void>;
+  onToolCallFinish?: (toolCallId: string, transcriptText?: string) => Promise<void>;
+  allowHiddenAutoCompaction?: boolean;
+  getHiddenCompactionState?: (() => Promise<HiddenCompactionStateSnapshot>) | undefined;
+  consumeQueuedUserMessages?: (() => Promise<string[]>) | undefined;
+}
+
 export class ModelClient {
   private readonly fetchImpl: typeof fetch;
   private readonly endpoint: string;
@@ -185,44 +211,25 @@ export class ModelClient {
     void ensureModelsDevCatalog(this.fetchImpl).catch(() => undefined);
   }
 
-  async runTurn(
-    sessionId: string,
-    inputText: string,
-    tools: AgentTools,
-    emit: (role: TranscriptRole, text: string) => Promise<void>,
-    onAssistantStream?: (text: string) => Promise<void>,
-    onReasoningSummaryStream?: (text: string) => Promise<void>,
-    thinkingEnabled = false,
-    abortSignal?: AbortSignal,
-    webSearchMode: 'disabled' | 'cached' | 'live' | undefined = undefined,
-    toolDefinitions: readonly ToolDefinition[] = STUDY_TOOL_DEFINITIONS,
-    instructions = STUDY_AGENT_PROMPT,
-    onToolCallStart?: (toolCall: {
-      toolCallId: string;
-      toolName: string;
-      label: string;
-      detail?: string | null;
-      body?: string[];
-      providerExecuted?: boolean;
-    }) => Promise<void>,
-    onToolCallFinish?: (toolCallId: string, transcriptText?: string) => Promise<void>,
-    allowHiddenAutoCompaction = false,
-    getHiddenCompactionState?: (() => Promise<HiddenCompactionStateSnapshot>) | undefined,
-    consumeQueuedUserMessages?: (() => Promise<string[]>) | undefined
-  ): Promise<void> {
-    ({
-      webSearchMode,
-      toolDefinitions,
-      instructions,
+  async runTurn(input: RunTurnInput): Promise<void> {
+    const {
+      sessionId,
+      inputText,
+      tools,
+      emit,
+      onAssistantStream,
+      onReasoningSummaryStream,
+      thinkingEnabled = false,
+      abortSignal,
+      webSearchMode = undefined,
+      toolDefinitions = STUDY_TOOL_DEFINITIONS,
+      instructions = STUDY_AGENT_PROMPT,
       onToolCallStart,
-      onToolCallFinish
-    } = normalizeRunTurnArgs({
-      webSearchMode,
-      toolDefinitions,
-      instructions,
-      onToolCallStart,
-      onToolCallFinish
-    }));
+      onToolCallFinish,
+      allowHiddenAutoCompaction = false,
+      getHiddenCompactionState,
+      consumeQueuedUserMessages
+    } = input;
 
     const accessToken = await this.auth.access();
     const authRecord = this.auth.getStored();
@@ -918,138 +925,6 @@ export class ModelClient {
       planModePhase: null
     };
   }
-}
-
-function normalizeRunTurnArgs(input: {
-  webSearchMode: 'disabled' | 'cached' | 'live' | readonly ToolDefinition[] | undefined;
-  toolDefinitions:
-    | readonly ToolDefinition[]
-    | string
-    | ((
-        toolCall: {
-          toolCallId: string;
-          toolName: string;
-          label: string;
-          detail?: string | null;
-          body?: string[];
-          providerExecuted?: boolean;
-        }
-      ) => Promise<void>)
-    | undefined;
-  instructions:
-    | string
-    | ((toolCall: {
-        toolCallId: string;
-        toolName: string;
-        label: string;
-        detail?: string | null;
-        body?: string[];
-        providerExecuted?: boolean;
-      }) => Promise<void>)
-    | undefined;
-  onToolCallStart?:
-    | ((
-        toolCall: {
-          toolCallId: string;
-          toolName: string;
-          label: string;
-          detail?: string | null;
-          body?: string[];
-          providerExecuted?: boolean;
-        }
-      ) => Promise<void>)
-    | ((toolCallId: string, transcriptText?: string) => Promise<void>);
-  onToolCallFinish?: (toolCallId: string, transcriptText?: string) => Promise<void>;
-}): {
-  webSearchMode: 'disabled' | 'cached' | 'live' | undefined;
-  toolDefinitions: readonly ToolDefinition[];
-  instructions: string;
-  onToolCallStart?: (toolCall: {
-    toolCallId: string;
-    toolName: string;
-    label: string;
-    detail?: string | null;
-    body?: string[];
-    providerExecuted?: boolean;
-  }) => Promise<void>;
-  onToolCallFinish?: (toolCallId: string, transcriptText?: string) => Promise<void>;
-} {
-  const defaultToolDefinitions = STUDY_TOOL_DEFINITIONS;
-  const defaultInstructions = STUDY_AGENT_PROMPT;
-
-  let resolvedWebSearchMode: 'disabled' | 'cached' | 'live' | undefined =
-    typeof input.webSearchMode === 'string' ? input.webSearchMode : undefined;
-  let resolvedToolDefinitions = defaultToolDefinitions;
-  let resolvedInstructions = defaultInstructions;
-  let resolvedOnToolCallStart:
-    | ((
-        toolCall: {
-          toolCallId: string;
-          toolName: string;
-          label: string;
-          detail?: string | null;
-          body?: string[];
-          providerExecuted?: boolean;
-        }
-      ) => Promise<void>)
-    | undefined;
-  let resolvedOnToolCallFinish:
-    | ((toolCallId: string, transcriptText?: string) => Promise<void>)
-    | undefined = input.onToolCallFinish;
-
-  if (Array.isArray(input.webSearchMode)) {
-    resolvedToolDefinitions = input.webSearchMode;
-  } else if (typeof input.toolDefinitions === 'function') {
-    resolvedOnToolCallStart = input.toolDefinitions;
-    resolvedOnToolCallFinish =
-      typeof input.instructions === 'function'
-        ? (input.instructions as unknown as (
-            toolCallId: string,
-            transcriptText?: string
-          ) => Promise<void>)
-        : (input.onToolCallStart as
-            | ((toolCallId: string, transcriptText?: string) => Promise<void>)
-            | undefined);
-    return {
-      webSearchMode: resolvedWebSearchMode,
-      toolDefinitions: resolvedToolDefinitions,
-      instructions: resolvedInstructions,
-      onToolCallStart: resolvedOnToolCallStart,
-      onToolCallFinish: resolvedOnToolCallFinish
-    };
-  } else if (Array.isArray(input.toolDefinitions)) {
-    resolvedToolDefinitions = input.toolDefinitions;
-  }
-
-  if (typeof input.instructions === 'string') {
-    resolvedInstructions = input.instructions;
-  } else if (typeof input.instructions === 'function') {
-    resolvedOnToolCallStart = input.instructions;
-    resolvedOnToolCallFinish = input.onToolCallStart as
-      | ((toolCallId: string, transcriptText?: string) => Promise<void>)
-      | undefined;
-  } else {
-    resolvedOnToolCallStart = input.onToolCallStart as
-      | ((
-          toolCall: {
-            toolCallId: string;
-            toolName: string;
-            label: string;
-            detail?: string | null;
-            body?: string[];
-            providerExecuted?: boolean;
-          }
-        ) => Promise<void>)
-      | undefined;
-  }
-
-  return {
-    webSearchMode: resolvedWebSearchMode,
-    toolDefinitions: resolvedToolDefinitions,
-    instructions: resolvedInstructions,
-    onToolCallStart: resolvedOnToolCallStart,
-    onToolCallFinish: resolvedOnToolCallFinish
-  };
 }
 
 function formatReadHeader(path: string, startLine?: number, endLine?: number): string {

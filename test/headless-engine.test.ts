@@ -151,9 +151,9 @@ test('HeadlessEngine disables hidden auto-compaction for study sessions without 
   t.after(async () => engine.dispose());
 
   const originalRunTurn = engine.modelClient.runTurn;
-  const capturedCalls: any[][] = [];
-  engine.modelClient.runTurn = async (...args: any[]) => {
-    capturedCalls.push(args);
+  const capturedCalls: any[] = [];
+  engine.modelClient.runTurn = async (input: any) => {
+    capturedCalls.push(input);
   };
   t.after(() => {
     engine.modelClient.runTurn = originalRunTurn;
@@ -162,11 +162,10 @@ test('HeadlessEngine disables hidden auto-compaction for study sessions without 
   await engine.submit('Check the current state.');
 
   assert.equal(capturedCalls.length, 1);
-  assert.ok(capturedCalls[0]?.[7] instanceof AbortSignal);
-  assert.equal(capturedCalls[0]?.[8], undefined);
-  assert.equal(capturedCalls[0]?.[13], false);
-  assert.equal(typeof capturedCalls[0]?.[14], 'function');
-  assert.equal(capturedCalls[0]?.length, 16);
+  assert.ok(capturedCalls[0]?.abortSignal instanceof AbortSignal);
+  assert.equal(capturedCalls[0]?.webSearchMode, undefined);
+  assert.equal(capturedCalls[0]?.allowHiddenAutoCompaction, false);
+  assert.equal(typeof capturedCalls[0]?.getHiddenCompactionState, 'function');
 });
 
 test('HeadlessEngine submit normalizes single-choice replies into the selected option', async (t) => {
@@ -898,17 +897,10 @@ test('HeadlessEngine persists a thinking summary once and clears the live overla
   engine.setThinkingEnabled(true);
 
   const originalRunTurn = engine.modelClient.runTurn;
-  engine.modelClient.runTurn = async (
-    _sessionId: string,
-    _input: string,
-    _tools: unknown,
-    emit: (role: string, text: string) => Promise<void>,
-    _onAssistantStream: (text: string) => Promise<void>,
-    onReasoningSummaryStream: (text: string) => Promise<void>
-  ) => {
-    await onReasoningSummaryStream('Need to inspect the adoption path first.');
-    await emit('system', '@@thinking\tNeed to inspect the adoption path first.');
-    await emit('tool', '@@tool\tread\tRead(src/engine/headless-engine.ts)\nsrc/engine/headless-engine.ts');
+  engine.modelClient.runTurn = async (input: any) => {
+    await input.onReasoningSummaryStream?.('Need to inspect the adoption path first.');
+    await input.emit('system', '@@thinking\tNeed to inspect the adoption path first.');
+    await input.emit('tool', '@@tool\tread\tRead(src/engine/headless-engine.ts)\nsrc/engine/headless-engine.ts');
   };
   t.after(() => {
     engine.modelClient.runTurn = originalRunTurn;
@@ -952,34 +944,13 @@ test('HeadlessEngine removes tracked live tool events once their durable transcr
 
   const originalRunTurn = engine.modelClient.runTurn;
   let emittedToolTurn = false;
-  engine.modelClient.runTurn = async (
-    _sessionId: string,
-    _input: string,
-    _tools: unknown,
-    emit: (role: string, text: string) => Promise<void>,
-    _onAssistantStream: ((text: string) => Promise<void>) | undefined,
-    _onReasoningSummaryStream: ((text: string) => Promise<void>) | undefined,
-    _thinkingEnabled: boolean,
-    _abortSignal: AbortSignal | undefined,
-    _webSearchMode: unknown,
-    _toolDefinitions: unknown,
-    _instructions: string,
-    onToolCallStart: ((toolCall: {
-      toolCallId: string;
-      toolName: string;
-      label: string;
-      detail?: string | null;
-      body?: string[];
-      providerExecuted?: boolean;
-    }) => Promise<void>) | undefined,
-    onToolCallFinish: ((toolCallId: string, transcriptText?: string) => Promise<void>) | undefined
-  ) => {
+  engine.modelClient.runTurn = async (input: any) => {
     if (emittedToolTurn) {
-      await emit('assistant', 'done');
+      await input.emit('assistant', 'done');
       return;
     }
     emittedToolTurn = true;
-    await onToolCallStart?.({
+    await input.onToolCallStart?.({
       toolCallId: 'call_exec_1',
       toolName: 'exec_command',
       label: 'Exec(pwd)',
@@ -990,8 +961,8 @@ test('HeadlessEngine removes tracked live tool events once their durable transcr
     await toolFinished;
     const transcriptText =
       '@@tool\texec_command\tExec(pwd)\n{\n  "processId": null,\n  "exitCode": 0,\n  "stdout": "/tmp/repo\\n",\n  "stderr": "",\n  "running": false,\n  "command": "pwd",\n  "cwd": "."\n}';
-    await emit('tool', transcriptText);
-    await onToolCallFinish?.('call_exec_1', transcriptText);
+    await input.emit('tool', transcriptText);
+    await input.onToolCallFinish?.('call_exec_1', transcriptText);
   };
   t.after(() => {
     engine.modelClient.runTurn = originalRunTurn;
@@ -1044,28 +1015,8 @@ test('HeadlessEngine does not duplicate a live tool block when the same toolCall
   });
 
   const originalRunTurn = engine.modelClient.runTurn;
-  engine.modelClient.runTurn = async (
-    _sessionId: string,
-    _input: string,
-    _tools: unknown,
-    _emit: (role: string, text: string) => Promise<void>,
-    _onAssistantStream: ((text: string) => Promise<void>) | undefined,
-    _onReasoningSummaryStream: ((text: string) => Promise<void>) | undefined,
-    _thinkingEnabled: boolean,
-    _abortSignal: AbortSignal | undefined,
-    _webSearchMode: unknown,
-    _toolDefinitions: unknown,
-    _instructions: string,
-    onToolCallStart: ((toolCall: {
-      toolCallId: string;
-      toolName: string;
-      label: string;
-      detail?: string | null;
-      body?: string[];
-      providerExecuted?: boolean;
-    }) => Promise<void>) | undefined
-  ) => {
-    await onToolCallStart?.({
+  engine.modelClient.runTurn = async (input: any) => {
+    await input.onToolCallStart?.({
       toolCallId: 'call_exec_1',
       toolName: 'exec_command',
       label: 'Exec(pwd)',
@@ -1073,7 +1024,7 @@ test('HeadlessEngine does not duplicate a live tool block when the same toolCall
       body: ['command: pwd'],
       providerExecuted: false
     });
-    await onToolCallStart?.({
+    await input.onToolCallStart?.({
       toolCallId: 'call_exec_1',
       toolName: 'exec_command',
       label: 'Exec(pwd)',
@@ -1111,23 +1062,14 @@ test('HeadlessEngine interrupt persists partial assistant text and appends a fol
   t.after(async () => engine.dispose());
 
   const originalRunTurn = engine.modelClient.runTurn;
-  engine.modelClient.runTurn = async (
-    _sessionId: string,
-    _input: string,
-    _tools: unknown,
-    _emit: (role: string, text: string) => Promise<void>,
-    onAssistantStream: ((text: string) => Promise<void>) | undefined,
-    _onReasoningSummaryStream: ((text: string) => Promise<void>) | undefined,
-    _thinkingEnabled: boolean,
-    abortSignal: AbortSignal | undefined
-  ) => {
-    await onAssistantStream?.('Here is a partial answer');
+  engine.modelClient.runTurn = async (input: any) => {
+    await input.onAssistantStream?.('Here is a partial answer');
     await new Promise<void>((_resolve, reject) => {
-      if (!abortSignal) {
+      if (!input.abortSignal) {
         reject(new Error('expected abort signal'));
         return;
       }
-      abortSignal.addEventListener(
+      input.abortSignal.addEventListener(
         'abort',
         () => reject(new DOMException('This operation was aborted', 'AbortError')),
         { once: true }
@@ -1168,35 +1110,11 @@ test('HeadlessEngine queues follow-up messages during a running turn and applies
 
   const originalRunTurn = engine.modelClient.runTurn;
   let turnCount = 0;
-  engine.modelClient.runTurn = async (
-    _sessionId: string,
-    input: string,
-    _tools: unknown,
-    emit: (role: string, text: string) => Promise<void>,
-    _onAssistantStream: ((text: string) => Promise<void>) | undefined,
-    _onReasoningSummaryStream: ((text: string) => Promise<void>) | undefined,
-    _thinkingEnabled: boolean,
-    _abortSignal: AbortSignal | undefined,
-    _webSearchMode: unknown,
-    _toolDefinitions: unknown,
-    _instructions: string,
-    onToolCallStart: ((toolCall: {
-      toolCallId: string;
-      toolName: string;
-      label: string;
-      detail?: string | null;
-      body?: string[];
-      providerExecuted?: boolean;
-    }) => Promise<void>) | undefined,
-    onToolCallFinish: ((toolCallId: string, transcriptText?: string) => Promise<void>) | undefined,
-    _allowHiddenAutoCompaction: boolean,
-    _getHiddenCompactionState: (() => Promise<unknown>) | undefined,
-    consumeQueuedUserMessages: (() => Promise<string[]>) | undefined
-  ) => {
+  engine.modelClient.runTurn = async (input: any) => {
     turnCount += 1;
     if (turnCount === 1) {
-      assert.equal(input, 'start');
-      await onToolCallStart?.({
+      assert.equal(input.inputText, 'start');
+      await input.onToolCallStart?.({
         toolCallId: 'call_exec_1',
         toolName: 'exec_command',
         label: 'Exec(pwd)',
@@ -1207,16 +1125,16 @@ test('HeadlessEngine queues follow-up messages during a running turn and applies
       await toolFinished;
       const transcriptText =
         '@@tool\texec_command\tExec(pwd)\n{\n  "processId": null,\n  "exitCode": 0,\n  "stdout": "/tmp/repo\\n",\n  "stderr": "",\n  "running": false,\n  "command": "pwd",\n  "cwd": "."\n}';
-      await emit('tool', transcriptText);
-      await onToolCallFinish?.('call_exec_1', transcriptText);
-      const queued = await consumeQueuedUserMessages?.();
+      await input.emit('tool', transcriptText);
+      await input.onToolCallFinish?.('call_exec_1', transcriptText);
+      const queued = await input.consumeQueuedUserMessages?.();
       assert.deepEqual(queued, ['steer this']);
       if (queued?.length) {
         for (const message of queued) {
-          await emit('user', message);
+          await input.emit('user', message);
         }
       }
-      await emit('assistant', 'Adjusted course.');
+      await input.emit('assistant', 'Adjusted course.');
       return;
     }
 
@@ -1458,18 +1376,8 @@ test('HeadlessEngine defaults experiment subagents to gpt-5.4-mini with high rea
 
   const originalRunTurn = engine.modelClient.runTurn;
   let recordedModel: string | null = null;
-  engine.modelClient.runTurn = async (
-    sessionId: string,
-    _input: string,
-    _tools: unknown,
-    _emit: unknown,
-    _onAssistantStream: unknown,
-    _onReasoningSummaryStream: unknown,
-    _thinkingEnabled: boolean,
-    _toolDefinitions: unknown,
-    _instructions: string
-  ) => {
-    recordedModel = engine.modelClient.getSettings(sessionId).model;
+  engine.modelClient.runTurn = async (input: any) => {
+    recordedModel = engine.modelClient.getSettings(input.sessionId).model;
   };
   t.after(() => {
     engine.modelClient.runTurn = originalRunTurn;

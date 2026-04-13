@@ -134,6 +134,73 @@ function webSearchCallAdded(id: string, outputIndex = 0) {
   };
 }
 
+async function runTurn(
+  client: ModelClient,
+  sessionId: string,
+  inputText: string,
+  tools: AgentTools,
+  emit: (role: TranscriptRole, text: string) => Promise<void>,
+  ...legacyOptionalArgs: any[]
+) {
+  const [
+    onAssistantStream,
+    onReasoningSummaryStream,
+    thinkingEnabled,
+    abortSignal,
+    webSearchMode,
+    toolDefinitions,
+    instructions,
+    onToolCallStart,
+    onToolCallFinish,
+    allowHiddenAutoCompaction,
+    getHiddenCompactionState,
+    consumeQueuedUserMessages
+  ] = legacyOptionalArgs;
+
+  const resolvedWebSearchMode =
+    typeof webSearchMode === 'string' ? webSearchMode : undefined;
+  let resolvedToolDefinitions =
+    Array.isArray(webSearchMode)
+      ? webSearchMode
+      : Array.isArray(toolDefinitions)
+        ? toolDefinitions
+        : undefined;
+  let resolvedInstructions = typeof instructions === 'string' ? instructions : undefined;
+  let resolvedOnToolCallStart = onToolCallStart;
+  let resolvedOnToolCallFinish = onToolCallFinish;
+
+  if (typeof toolDefinitions === 'function') {
+    resolvedOnToolCallStart = toolDefinitions;
+    resolvedOnToolCallFinish =
+      typeof instructions === 'function' ? instructions : onToolCallStart;
+    resolvedInstructions = undefined;
+    resolvedToolDefinitions = undefined;
+  } else if (typeof instructions === 'function') {
+    resolvedOnToolCallStart = instructions;
+    resolvedOnToolCallFinish = onToolCallStart;
+    resolvedInstructions = undefined;
+  }
+
+  return client.runTurn({
+    sessionId,
+    inputText,
+    tools,
+    emit,
+    onAssistantStream,
+    onReasoningSummaryStream,
+    thinkingEnabled,
+    abortSignal,
+    webSearchMode: resolvedWebSearchMode,
+    toolDefinitions: resolvedToolDefinitions,
+    instructions: resolvedInstructions,
+    onToolCallStart: resolvedOnToolCallStart,
+    onToolCallFinish: resolvedOnToolCallFinish,
+    allowHiddenAutoCompaction,
+    getHiddenCompactionState,
+    consumeQueuedUserMessages
+  });
+}
+
 test('ModelClient performs tool round-trips and persists the latest response id', async (t) => {
   const tempDir = await createTempDir('h2-model-');
   t.after(async () => cleanupDir(tempDir));
@@ -222,7 +289,7 @@ test('ModelClient performs tool round-trips and persists the latest response id'
     setThinkingMode: async () => ''
   };
 
-  await client.runTurn(
+  await runTurn(client, 
     'session-test',
     'Read the readme',
     tools,
@@ -478,7 +545,7 @@ test('ModelClient auto-compacts direct mode with a hidden checkpoint before the 
   };
 
   const emitted: Array<{ role: TranscriptRole; text: string }> = [];
-  await client.runTurn(
+  await runTurn(client, 
     'session-compact',
     'Finish the direct update',
     tools,
@@ -653,7 +720,7 @@ test('ModelClient auto-compacts experiment subagents against the model context w
   };
 
   const emitted: Array<{ role: TranscriptRole; text: string }> = [];
-  await client.runTurn(
+  await runTurn(client, 
     'experiment-session',
     'Continue the bounded experiment',
     tools,
@@ -785,7 +852,7 @@ test('ModelClient sends the built-in web_search tool when enabled', async (t) =>
     setThinkingMode: async () => ''
   };
 
-  await client.runTurn('session-test', 'Find recent news.', tools, async () => {});
+  await runTurn(client, 'session-test', 'Find recent news.', tools, async () => {});
 
   const requestTools = requests[0]?.tools as Array<Record<string, unknown>>;
   const webSearchTool = requestTools.find((tool) => tool.type === 'web_search');
@@ -896,7 +963,7 @@ test('ModelClient does not route provider-executed web search through the local 
     setThinkingMode: async () => ''
   };
 
-  await client.runTurn(
+  await runTurn(client, 
     'session-test',
     'Check the weather.',
     tools,
@@ -1008,7 +1075,7 @@ test('ModelClient does not leak provider web search fallback text when query met
     setThinkingMode: async () => ''
   };
 
-  await client.runTurn(
+  await runTurn(client, 
     'session-test',
     'Search the web.',
     tools,
@@ -1116,7 +1183,7 @@ test('ModelClient executes independent read-only tool calls in parallel while pr
     setThinkingMode: async () => ''
   };
 
-  await client.runTurn(
+  await runTurn(client, 
     'session-test',
     'Read the readme and search src for session references',
     tools,
@@ -1209,7 +1276,7 @@ test('ModelClient surfaces streaming assistant deltas before completion', async 
     setThinkingMode: async () => ''
   };
 
-  await client.runTurn(
+  await runTurn(client, 
     'session-test',
     'hello',
     tools,
@@ -1315,7 +1382,7 @@ test('ModelClient injects an observation hint for experiment subagents after sev
     setThinkingMode: async () => ''
   };
 
-  await client.runTurn(
+  await runTurn(client, 
     'session-test',
     'Run a scoped experiment in the isolated worktree.',
     tools,
@@ -1403,7 +1470,7 @@ test('ModelClient surfaces streaming content-part events before completion', asy
     setThinkingMode: async () => ''
   };
 
-  await client.runTurn(
+  await runTurn(client, 
     'session-test',
     'hello',
     tools,
@@ -1501,7 +1568,7 @@ test('ModelClient does not duplicate live assistant text when final snapshots ov
     setThinkingMode: async () => ''
   };
 
-  await client.runTurn(
+  await runTurn(client, 
     'session-test',
     'hello',
     tools,
@@ -1634,7 +1701,7 @@ test('ModelClient rebuilds requests from latest checkpoint plus recent tail', as
     setThinkingMode: async () => ''
   };
 
-  await client.runTurn('session-test', 'ignored because history exists', tools, async () => undefined);
+  await runTurn(client, 'session-test', 'ignored because history exists', tools, async () => undefined);
 
   assert.equal(requests.length, 1);
   assert.equal(typeof requests[0]?.instructions, 'string');
@@ -1909,7 +1976,7 @@ test('ModelClient does not inject open question reminder developer messages into
     setThinkingMode: async () => ''
   };
 
-  await client.runTurn('session-test', 'ignored because history exists', tools, async () => undefined);
+  await runTurn(client, 'session-test', 'ignored because history exists', tools, async () => undefined);
 
   assert.equal(requests.length, 1);
   assert.deepEqual(requests[0]?.input, [
@@ -2004,7 +2071,7 @@ test('ModelClient turns tool-call failures into tool outputs so the loop can con
     setThinkingMode: async () => ''
   };
 
-  await client.runTurn(
+  await runTurn(client, 
     'session-test',
     'Try spawning an experiment',
     tools,
@@ -2120,7 +2187,7 @@ test('ModelClient retries transient 500 responses before succeeding', async (t) 
     setThinkingMode: async () => ''
   };
 
-  await client.runTurn(
+  await runTurn(client, 
     'session-test',
     'hello',
     tools,
@@ -2209,7 +2276,7 @@ test('ModelClient retries transient transport failures before succeeding', async
     setThinkingMode: async () => ''
   };
 
-  await client.runTurn(
+  await runTurn(client, 
     'session-test',
     'hello',
     tools,
@@ -2284,7 +2351,7 @@ test('ModelClient records transient provider failure after retries are exhausted
     setThinkingMode: async () => ''
   };
 
-  await client.runTurn(
+  await runTurn(client, 
     'session-test',
     'hello',
     tools,
@@ -2363,7 +2430,7 @@ test('ModelClient preserves streamed visible text when completed payload omits o
     setThinkingMode: async () => ''
   };
 
-  await client.runTurn(
+  await runTurn(client, 
     'session-test',
     'say hello',
     tools,
@@ -2453,7 +2520,7 @@ test('ModelClient reconstructs streamed tool calls when completed payload omits 
     setThinkingMode: async () => ''
   };
 
-  await client.runTurn(
+  await runTurn(client, 
     'session-test',
     'Read the readme',
     tools,
@@ -2541,7 +2608,7 @@ test('ModelClient formats ranged read tool headers', async (t) => {
     setThinkingMode: async () => ''
   };
 
-  await client.runTurn(
+  await runTurn(client, 
     'session-test',
     'Read a slice',
     tools,
@@ -2660,7 +2727,7 @@ test('ModelClient exposes only compact when the reserve buffer is exhausted', as
     setThinkingMode: async () => ''
   };
 
-  await client.runTurn('session-test', 'keep going', tools, async (role, text) => {
+  await runTurn(client, 'session-test', 'keep going', tools, async (role, text) => {
     emitted.push({ role, text });
   });
 
@@ -2802,7 +2869,7 @@ test('ModelClient does not force hidden study compaction when unresolved state i
     setThinkingMode: async () => ''
   };
 
-  await client.runTurn(
+  await runTurn(client, 
     'session-test',
     'keep going',
     tools,
@@ -2924,7 +2991,7 @@ test('ModelClient spills oversized tool outputs to disk before replaying them', 
     setThinkingMode: async () => ''
   };
 
-  await client.runTurn('session-test', 'run the command', tools, async (role, text) => {
+  await runTurn(client, 'session-test', 'run the command', tools, async (role, text) => {
     emitted.push({ role, text });
   });
 
