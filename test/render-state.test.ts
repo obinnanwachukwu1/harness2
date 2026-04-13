@@ -38,7 +38,7 @@ function createSnapshot(overrides: Partial<EngineSnapshot> = {}): EngineSnapshot
   };
 }
 
-test('buildState suppresses a live completed tool event when its transcript is already durable', () => {
+test('buildState keeps a current-turn completed tool visible in the live tail until it becomes historical', () => {
   const startedAt = '2026-04-07T00:00:02.000Z';
   const state = buildState(
     createSnapshot({
@@ -85,16 +85,16 @@ test('buildState suppresses a live completed tool event when its transcript is a
 
   assert.deepEqual(
     state.blocks.map((block) => `${block.kind}:${block.id}`),
-    ['assistant:assistant-1', 'thinking:live-thinking-1']
+    ['assistant:assistant-1', 'thinking:live-thinking-1', 'tool:live-tool-1']
   );
 });
 
-test('buildState does not duplicate a tool block when transcript and live event share the same transcript text', () => {
+test('buildState suppresses a live completed tool event once the same tool transcript is visible historically', () => {
   const transcriptText = '@@tool\texec_command\tExec(pwd)\ncommand: pwd';
   const state = buildState(
     createSnapshot({
-      processingTurn: true,
-      currentTurnStartedAt: '2026-04-07T00:00:02.000Z',
+      processingTurn: false,
+      currentTurnStartedAt: null,
       transcript: [
         {
           id: 1,
@@ -123,7 +123,7 @@ test('buildState does not duplicate a tool block when transcript and live event 
 
   assert.deepEqual(
     state.blocks.filter((block) => block.kind === 'tool').map((block) => block.id),
-    []
+    ['tool-1']
   );
 });
 
