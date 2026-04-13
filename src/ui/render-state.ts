@@ -98,6 +98,9 @@ function buildBlocks(snapshot: EngineSnapshot): RenderBlock[] {
   const blocks = historicalEntries.flatMap((entry) =>
     transcriptEntryToBlocks(entry, snapshot.thinkingEnabled)
   );
+  const historicalToolTranscripts = new Set(
+    snapshot.transcript.filter((entry) => entry.role === 'tool').map((entry) => entry.text)
+  );
 
   for (const event of snapshot.liveTurnEvents) {
     if (event.kind === 'assistant' || event.kind === 'thinking') {
@@ -114,6 +117,9 @@ function buildBlocks(snapshot: EngineSnapshot): RenderBlock[] {
     }
 
     if (event.transcriptText) {
+      if (historicalToolTranscripts.has(event.transcriptText)) {
+        continue;
+      }
       const renderedBlocks = toolTranscriptToBlocks(
         {
           id: -1,

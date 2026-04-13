@@ -27,6 +27,7 @@ function createSnapshot(overrides: Partial<EngineSnapshot> = {}): EngineSnapshot
     standardRateContextTokens: null,
     allowOverStandardContext: false,
     liveTurnEvents: [],
+    queuedUserMessages: [],
     thinkingEnabled: true,
     activePlan: null,
     pendingUserRequest: null,
@@ -37,7 +38,7 @@ function createSnapshot(overrides: Partial<EngineSnapshot> = {}): EngineSnapshot
   };
 }
 
-test('buildState keeps current-turn completed tools in the live tail order', () => {
+test('buildState suppresses a live completed tool event when its transcript is already durable', () => {
   const startedAt = '2026-04-07T00:00:02.000Z';
   const state = buildState(
     createSnapshot({
@@ -84,7 +85,45 @@ test('buildState keeps current-turn completed tools in the live tail order', () 
 
   assert.deepEqual(
     state.blocks.map((block) => `${block.kind}:${block.id}`),
-    ['assistant:assistant-1', 'thinking:live-thinking-1', 'tool:live-tool-1']
+    ['assistant:assistant-1', 'thinking:live-thinking-1']
+  );
+});
+
+test('buildState does not duplicate a tool block when transcript and live event share the same transcript text', () => {
+  const transcriptText = '@@tool\texec_command\tExec(pwd)\ncommand: pwd';
+  const state = buildState(
+    createSnapshot({
+      processingTurn: true,
+      currentTurnStartedAt: '2026-04-07T00:00:02.000Z',
+      transcript: [
+        {
+          id: 1,
+          sessionId: 'session-test',
+          role: 'tool',
+          text: transcriptText,
+          createdAt: '2026-04-07T00:00:03.000Z'
+        }
+      ],
+      liveTurnEvents: [
+        {
+          id: 'live-tool-1',
+          kind: 'tool',
+          transcriptText,
+          live: false,
+          callId: 'call-1',
+          toolName: null,
+          label: null,
+          detail: null,
+          body: [],
+          providerExecuted: false
+        }
+      ]
+    })
+  );
+
+  assert.deepEqual(
+    state.blocks.filter((block) => block.kind === 'tool').map((block) => block.id),
+    []
   );
 });
 
