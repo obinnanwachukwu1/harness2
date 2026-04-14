@@ -90,8 +90,17 @@ test('ExperimentManager spawn mirrors repo-local env files into the experiment w
   t.after(() => notebook.close());
   notebook.createSession('session-test', repoDir);
 
-  const manager = createManager(repoDir, notebook, async () => {});
-  t.after(async () => manager.dispose());
+  let releaseSubagent = () => {};
+  const holdSubagent = new Promise<void>((resolve) => {
+    releaseSubagent = resolve;
+  });
+  const manager = createManager(repoDir, notebook, async () => {
+    await holdSubagent;
+  });
+  t.after(async () => {
+    releaseSubagent();
+    await manager.dispose();
+  });
 
   const experiment = await manager.spawn({
     sessionId: 'session-test',
@@ -144,8 +153,17 @@ test('ExperimentManager spawn mirrors the dirty workspace snapshot into the expe
   t.after(() => notebook.close());
   notebook.createSession('session-test', repoDir);
 
-  const manager = createManager(repoDir, notebook, async () => {});
-  t.after(async () => manager.dispose());
+  let releaseSubagent = () => {};
+  const holdSubagent = new Promise<void>((resolve) => {
+    releaseSubagent = resolve;
+  });
+  const manager = createManager(repoDir, notebook, async () => {
+    await holdSubagent;
+  });
+  t.after(async () => {
+    releaseSubagent();
+    await manager.dispose();
+  });
 
   const experiment = await manager.spawn({
     sessionId: 'session-test',

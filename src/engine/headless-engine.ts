@@ -1123,6 +1123,10 @@ export class HeadlessEngine {
         }
       );
 
+      if (result.code === 'ENOENT') {
+        throw new Error('rg unavailable');
+      }
+
       if (result.exitCode === 1 && !result.stderr.trim()) {
         return `No matches for ${patternText}.`;
       }
