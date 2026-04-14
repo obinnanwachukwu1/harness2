@@ -149,6 +149,22 @@ test('OpenAICodexAuth access refreshes tokens nearing expiry', async (t) => {
   assert.equal(notebook.getOpenAICodexAuth()?.refreshToken, 'refresh-new');
 });
 
+test('OpenAICodexAuth uses OPENAI_API_KEY mode when configured', async (t) => {
+  const tempDir = await createTempDir('h2-auth-api-key-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+
+  const auth = new OpenAICodexAuth(notebook, {
+    apiKey: 'sk-test-api-key'
+  });
+
+  const token = await auth.access();
+  assert.equal(token, 'sk-test-api-key');
+  assert.equal(auth.formatStatus(), 'OpenAI API key auth\nsource: OPENAI_API_KEY\ncodex oauth fallback: missing');
+});
+
 test('legacy repo-local auth migrates into the global auth notebook', async (t) => {
   const tempDir = await createTempDir('h2-auth-migrate-');
   t.after(async () => cleanupDir(tempDir));

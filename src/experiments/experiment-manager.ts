@@ -77,7 +77,7 @@ export class ExperimentManager {
 
     const baseCommitSha = await this.readBaseCommit();
     const id = createExperimentId();
-    const worktreeRoot = path.join(this.options.stateDir, 'worktrees');
+    const worktreeRoot = this.options.stateDir;
     const worktreePath = path.join(worktreeRoot, id);
     const branchName = `h2-${id}`;
     const createdAt = nowIso();

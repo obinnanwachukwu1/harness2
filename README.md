@@ -106,7 +106,12 @@ Slash commands are reserved for app/session controls. File reads, edits, shell c
 
 ## Authentication
 
-Model-backed prompt execution requires OpenAI Codex OAuth.
+Model-backed prompt execution supports either:
+
+- `OPENAI_API_KEY` (API mode, preferred for quick setup)
+- OpenAI Codex OAuth (`h2 auth login`)
+
+When both are present, `OPENAI_API_KEY` takes precedence.
 
 - `h2 auth login` starts a browser-based PKCE flow against `https://auth.openai.com`
 - tokens are stored globally in `~/.h2/auth.sqlite`

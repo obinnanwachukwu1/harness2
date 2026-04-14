@@ -67,6 +67,8 @@ export async function createModelStepResponse(input: {
   accessToken: string;
   accountId: string;
   sessionId: string;
+  codexSessionId?: string;
+  codexAccountId?: string;
   settings: ModelSessionRecord;
   input: ResponseInputItem[];
   onAssistantStream?: (text: string) => Promise<void>;
@@ -93,11 +95,13 @@ export async function createModelStepResponse(input: {
     fetch: async (requestInput, init) => {
       const headers = new Headers(init?.headers);
       headers.set('authorization', `Bearer ${input.accessToken}`);
-      headers.set('originator', OPENAI_CODEX_ORIGINATOR);
-      headers.set('session_id', input.sessionId);
+      if (input.codexSessionId) {
+        headers.set('originator', OPENAI_CODEX_ORIGINATOR);
+        headers.set('session_id', input.codexSessionId);
+      }
 
-      if (input.accountId) {
-        headers.set('chatgpt-account-id', input.accountId);
+      if (input.codexAccountId) {
+        headers.set('chatgpt-account-id', input.codexAccountId);
       }
 
       const parsed =

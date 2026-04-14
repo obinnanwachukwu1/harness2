@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto';
 import path from 'node:path';
 import { mkdir, writeFile } from 'node:fs/promises';
 
-import { OPENAI_CODEX_ORIGINATOR } from '../auth/openai-codex.js';
+import { isCodexResponsesEndpoint, OPENAI_CODEX_ORIGINATOR } from '../auth/openai-codex.js';
 import { clampText } from '../lib/utils.js';
 import type {
   CompactionArtifactPointer,
@@ -184,15 +184,20 @@ export interface PlanDirectCompactionArtifacts {
 export async function runPlanDirectCompactor(
   input: PlanDirectCompactorRequest
 ): Promise<PlanDirectCompactionSummary> {
+  const useCodexHeaders = isCodexResponsesEndpoint(input.endpoint);
   const response = await input.fetchImpl(input.endpoint, {
     method: 'POST',
     headers: {
       authorization: `Bearer ${input.accessToken}`,
-      originator: OPENAI_CODEX_ORIGINATOR,
-      session_id: input.sessionId,
       'content-type': 'application/json',
       accept: 'text/event-stream',
-      ...(input.accountId ? { 'chatgpt-account-id': input.accountId } : {})
+      ...(useCodexHeaders
+        ? {
+            originator: OPENAI_CODEX_ORIGINATOR,
+            session_id: input.sessionId,
+            ...(input.accountId ? { 'chatgpt-account-id': input.accountId } : {})
+          }
+        : {})
     },
     body: JSON.stringify({
       stream: true,

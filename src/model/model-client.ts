@@ -4,6 +4,8 @@ import path from 'node:path';
 import { execa } from 'execa';
 
 import {
+  isCodexResponsesEndpoint,
+  OPENAI_API_RESPONSES_ENDPOINT,
   OPENAI_CODEX_PROVIDER,
   OPENAI_CODEX_RESPONSES_ENDPOINT,
   OpenAICodexAuth
@@ -59,7 +61,9 @@ import type {
 
 const DEFAULT_MODEL = process.env.H2_MODEL ?? 'gpt-5.4';
 const DEFAULT_REASONING_EFFORT = normalizeReasoningEffort(process.env.H2_REASONING_EFFORT) ?? 'medium';
-const DEFAULT_ENDPOINT = process.env.H2_MODEL_BASE_URL ?? OPENAI_CODEX_RESPONSES_ENDPOINT;
+const DEFAULT_ENDPOINT =
+  process.env.H2_MODEL_BASE_URL ??
+  (process.env.OPENAI_API_KEY?.trim() ? OPENAI_API_RESPONSES_ENDPOINT : OPENAI_CODEX_RESPONSES_ENDPOINT);
 const MAX_TRANSIENT_MODEL_RETRIES = 2;
 const DEBUG_RESPONSES_ENABLED = process.env.H2_DEBUG_RESPONSES === '1';
 const DEBUG_RESPONSES_FILE =
@@ -232,10 +236,10 @@ export class ModelClient {
     const accessToken = await this.auth.access();
     const authRecord = this.auth.getStored();
 
-    if (!accessToken || !authRecord) {
+    if (!accessToken) {
       await emit(
         'assistant',
-        'Model authentication is not configured. Run `/auth login` or `h2 auth login` first.'
+        'Model authentication is not configured. Set OPENAI_API_KEY or run `/auth login` (`h2 auth login` in CLI).'
       );
       return;
     }
@@ -259,7 +263,7 @@ export class ModelClient {
       if (allowHiddenAutoCompaction) {
         const compacted = await this.maybeAutoCompactHiddenSession({
           accessToken,
-          accountId: authRecord.accountId,
+          accountId: authRecord?.accountId ?? '',
           sessionId,
           settings,
           instructions,
@@ -291,7 +295,7 @@ export class ModelClient {
       try {
         response = await this.createResponse({
           accessToken,
-          accountId: authRecord.accountId,
+          accountId: authRecord?.accountId ?? '',
           sessionId,
           settings,
           input: [
@@ -626,11 +630,14 @@ export class ModelClient {
     instructions: string;
   }): Promise<ModelStepResponse> {
     void ensureModelsDevCatalog(this.fetchImpl).catch(() => undefined);
+    const useCodexHeaders = isCodexResponsesEndpoint(this.endpoint);
     return createModelStepResponse({
       fetchImpl: this.fetchImpl,
       endpoint: this.endpoint,
       aiProviderBaseUrl: this.aiProviderBaseUrl,
       maxRetries: MAX_TRANSIENT_MODEL_RETRIES,
+      codexSessionId: useCodexHeaders ? input.sessionId : undefined,
+      codexAccountId: useCodexHeaders ? input.accountId : undefined,
       ...input,
       debugResponse: (kind, payload) => debugResponseShape(input.sessionId, kind, payload)
     });

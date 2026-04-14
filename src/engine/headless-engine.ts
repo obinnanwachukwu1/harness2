@@ -1099,7 +1099,7 @@ export class HeadlessEngine {
     patternText: string,
     target: string | string[] = '.'
   ): Promise<string> {
-    const targets = await normalizeRgTargets(root, target);
+    const targets = await normalizeRgTargets(target);
     const resolvedTargets = targets
       .filter((entry) => entry !== '.')
       .map((entry) => this.resolveRootedPath(root, entry));
@@ -2905,7 +2905,7 @@ function shellQuote(value: string): string {
   return `'${value.replace(/'/g, `'\"'\"'`)}'`;
 }
 
-async function normalizeRgTargets(root: string, target: string | string[]): Promise<string[]> {
+async function normalizeRgTargets(target: string | string[]): Promise<string[]> {
   if (Array.isArray(target)) {
     const normalized = target
       .map((value) => value.trim())
@@ -2918,26 +2918,16 @@ async function normalizeRgTargets(root: string, target: string | string[]): Prom
     return ['.'];
   }
 
-  if (!(await rootedPathExists(root, trimmed))) {
-    const splitTargets = trimmed
-      .split(/[\s,]+/)
-      .map((value) => value.trim())
-      .filter((value) => value.length > 0);
-    if (splitTargets.length > 1) {
-      return splitTargets;
-    }
+  const splitTargets = trimmed
+    .split(/[\s,]+/)
+    .map((value) => value.trim())
+    .filter((value) => value.length > 0);
+
+  if (splitTargets.length > 1) {
+    return splitTargets;
   }
 
   return [trimmed];
-}
-
-async function rootedPathExists(root: string, relativePath: string): Promise<boolean> {
-  try {
-    await access(path.resolve(root, relativePath));
-    return true;
-  } catch {
-    return false;
-  }
 }
 
 function normalizeReadStartLine(startLine?: number): number {

@@ -271,7 +271,9 @@ async function runAuthCommand(args: string[]): Promise<void> {
     if (action === 'access') {
       const token = await auth.access();
       if (!token) {
-        throw new Error('No active OpenAI Codex OAuth token is available. Run `h2 auth login` first.');
+        throw new Error(
+          'No model credentials are available. Set OPENAI_API_KEY or run `h2 auth login` first.'
+        );
       }
       console.log(token);
       return;

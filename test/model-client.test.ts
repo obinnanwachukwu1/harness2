@@ -4,6 +4,7 @@ import path from 'node:path';
 import test from 'node:test';
 
 import {
+  OPENAI_API_RESPONSES_ENDPOINT,
   OPENAI_CODEX_ORIGINATOR,
   OPENAI_CODEX_PROVIDER,
   OPENAI_CODEX_RESPONSES_ENDPOINT,
@@ -396,6 +397,136 @@ test('ModelClient performs tool round-trips and persists the latest response id'
   assert.match(emitted[0]?.text ?? '', /^@@tool\tread\tRead\(README\.md\)/);
   assert.equal(emitted[1]?.role, 'assistant');
   assert.equal(emitted[1]?.text, 'Done reading the file.');
+});
+
+test('ModelClient uses API key mode against OpenAI API responses endpoint', async (t) => {
+  const tempDir = await createTempDir('h2-model-api-mode-');
+  t.after(async () => cleanupDir(tempDir));
+
+  const notebook = new Notebook(path.join(tempDir, 'notebook.sqlite'));
+  t.after(() => notebook.close());
+  notebook.createSession('session-api', tempDir);
+
+  const requests: Array<{ url: string; headers: Headers }> = [];
+  const auth = new OpenAICodexAuth(notebook, {
+    apiKey: 'sk-test-api-key'
+  });
+  const client = new ModelClient(notebook, auth, {
+    endpoint: OPENAI_API_RESPONSES_ENDPOINT,
+    fetchImpl: async (input, init) => {
+      requests.push({
+        url: String(input),
+        headers: new Headers(init?.headers)
+      });
+
+      return createResponsesStream([
+        responseCreated('resp_api_1'),
+        {
+          type: 'response.output_text.delta',
+          item_id: 'msg_api_1',
+          delta: 'API mode reply.'
+        },
+        responseCompleted('resp_api_1')
+      ]);
+    }
+  });
+
+  const emitted: Array<{ role: TranscriptRole; text: string }> = [];
+  const tools: AgentTools = {
+    execCommand: async () => '',
+    writeStdin: async () => '',
+    read: async () => '',
+    write: async () => '',
+    edit: async () => '',
+    glob: async () => [],
+    grep: async () => '',
+    spawnExperiment: async () => {
+      throw new Error('not used');
+    },
+    readExperiment: async () => {
+      throw new Error('not used');
+    },
+    waitExperiment: async () => {
+      throw new Error('not used');
+    },
+    searchExperiments: async () => {
+      throw new Error('not used');
+    },
+    openStudyDebt: async () => {
+      throw new Error('not used');
+    },
+    resolveStudyDebt: async () => {
+      throw new Error('not used');
+    },
+    narrowStudyDebt: async () => {
+      throw new Error('not used');
+    },
+    resolveExperiment: async () => {
+      throw new Error('not used');
+    },
+    extendExperimentBudget: async () => {
+      throw new Error('not used');
+    },
+    exportSession: async () => {
+      throw new Error('not used');
+    },
+    clearExperimentJournal: async () => ({
+      clearedExperiments: 0,
+      clearedObservations: 0,
+      blockedActive: 0
+    }),
+    adoptExperiment: async () => {
+      throw new Error('not used');
+    },
+    createPlan: async () => {
+      throw new Error('not used');
+    },
+    askUser: async () => {
+      throw new Error('not used');
+    },
+    updateTodos: async () => {
+      throw new Error('not used');
+    },
+    approvePlan: async () => {
+      throw new Error('not used');
+    },
+    getPlanStatus: async () => ({
+      phase: null,
+      plan: null
+    }),
+    compact: async () => {
+      throw new Error('not used');
+    },
+    ls: async () => '',
+    rg: async () => '',
+    authLogin: async () => '',
+    authStatus: async () => '',
+    authLogout: async () => '',
+    getModelSettings: async () => '',
+    setModel: async () => '',
+    setReasoningEffort: async () => '',
+    getThinkingMode: async () => '',
+    setThinkingMode: async () => ''
+  };
+
+  await runTurn(
+    client,
+    'session-api',
+    'Respond in API mode',
+    tools,
+    async (role, text) => {
+      emitted.push({ role, text });
+    }
+  );
+
+  assert.equal(requests.length, 1);
+  assert.equal(requests[0]?.url, OPENAI_API_RESPONSES_ENDPOINT);
+  assert.equal(requests[0]?.headers.get('authorization'), 'Bearer sk-test-api-key');
+  assert.equal(requests[0]?.headers.get('originator'), null);
+  assert.equal(requests[0]?.headers.get('chatgpt-account-id'), null);
+  assert.equal(requests[0]?.headers.get('session_id'), null);
+  assert.equal(emitted[0]?.role, 'assistant');
+  assert.equal(emitted[0]?.text, 'API mode reply.');
 });
 
 test('ModelClient auto-compacts direct mode with a hidden checkpoint before the model turn', async (t) => {

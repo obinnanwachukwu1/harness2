@@ -15,6 +15,7 @@ export const OPENAI_CODEX_TOKEN_ENDPOINT = 'https://auth.openai.com/oauth/token'
 export const OPENAI_CODEX_PROVIDER = 'openai-codex';
 export const OPENAI_CODEX_ORIGINATOR = 'codex_cli_rs';
 export const OPENAI_CODEX_RESPONSES_ENDPOINT = 'https://chatgpt.com/backend-api/codex/responses';
+export const OPENAI_API_RESPONSES_ENDPOINT = 'https://api.openai.com/v1/responses';
 
 interface PKCECodes {
   codeVerifier: string;
@@ -33,6 +34,7 @@ interface OpenAICodexAuthOptions {
   openUrl?: (url: string) => Promise<void>;
   notify?: (message: string) => void;
   now?: () => number;
+  apiKey?: string | null;
 }
 
 interface AuthorizeOptions {
@@ -45,6 +47,7 @@ export class OpenAICodexAuth {
   private readonly openUrl: (url: string) => Promise<void>;
   private readonly notify: (message: string) => void;
   private readonly now: () => number;
+  private readonly apiKey: string | null;
 
   constructor(
     private readonly notebook: Notebook,
@@ -54,6 +57,7 @@ export class OpenAICodexAuth {
     this.openUrl = options.openUrl ?? openBrowserUrl;
     this.notify = options.notify ?? (() => undefined);
     this.now = options.now ?? Date.now;
+    this.apiKey = resolveApiKey(options.apiKey);
   }
 
   async authorize(options: AuthorizeOptions = {}): Promise<OpenAICodexAuthRecord> {
@@ -165,6 +169,10 @@ export class OpenAICodexAuth {
   }
 
   async access(): Promise<string | undefined> {
+    if (this.apiKey) {
+      return this.apiKey;
+    }
+
     const current = this.notebook.getOpenAICodexAuth();
     if (!current) {
       return undefined;
@@ -201,9 +209,18 @@ export class OpenAICodexAuth {
   }
 
   formatStatus(): string {
+    if (this.apiKey) {
+      const oauthRecord = this.notebook.getOpenAICodexAuth();
+      return [
+        'OpenAI API key auth',
+        'source: OPENAI_API_KEY',
+        `codex oauth fallback: ${oauthRecord ? 'present' : 'missing'}`
+      ].join('\n');
+    }
+
     const record = this.notebook.getOpenAICodexAuth();
     if (!record) {
-      return 'OpenAI Codex OAuth is not configured.';
+      return 'Model authentication is not configured. Set OPENAI_API_KEY or run `h2 auth login`.';
     }
 
     const expiry = new Date(record.expiresAt).toISOString();
@@ -217,6 +234,29 @@ export class OpenAICodexAuth {
 
   logout(): boolean {
     return this.notebook.deleteOpenAICodexAuth();
+  }
+}
+
+function resolveApiKey(value: string | null | undefined): string | null {
+  const key = value ?? process.env.OPENAI_API_KEY;
+  if (typeof key !== 'string') {
+    return null;
+  }
+
+  const trimmed = key.trim();
+  return trimmed.length > 0 ? trimmed : null;
+}
+
+export function isCodexResponsesEndpoint(endpoint: string): boolean {
+  try {
+    const parsed = new URL(endpoint);
+    return (
+      parsed.hostname === 'chatgpt.com' ||
+      parsed.hostname.endsWith('.chatgpt.com') ||
+      parsed.pathname.includes('/backend-api/codex/')
+    );
+  } catch {
+    return endpoint.includes('/backend-api/codex/');
   }
 }
 
