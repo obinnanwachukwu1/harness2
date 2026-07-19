@@ -375,7 +375,7 @@ export class App {
 
   private renderQueuedMessages(messages: string[]): void {
     for (const child of this.queuedMessagesBox.getChildren()) {
-      this.queuedMessagesBox.remove(child.id);
+      this.queuedMessagesBox.remove(child);
     }
     if (messages.length === 0) {
       this.queuedMessagesBox.visible = false;
@@ -548,7 +548,7 @@ export class App {
 
     for (const [id, view] of this.blockViews) {
       if (!nextIds.has(id)) {
-        this.transcriptContent.remove(view.container.id);
+        this.transcriptContent.remove(view.container);
         this.blockViews.delete(id);
       }
     }
@@ -587,7 +587,7 @@ export class App {
       if (!view) {
         continue;
       }
-      this.transcriptContent.remove(view.container.id);
+      this.transcriptContent.remove(view.container);
       this.blockViews.delete(id);
     }
 
@@ -606,7 +606,7 @@ export class App {
 
       const previousIndex = previousIndexById.get(block.id);
       if (previousIndex !== undefined && previousIndex !== index) {
-        this.transcriptContent.remove(existing.container.id);
+        this.transcriptContent.remove(existing.container);
         this.transcriptContent.add(existing.container, index);
       }
     }
@@ -616,7 +616,10 @@ export class App {
 
   private syncExperiments(experiments: ExperimentSummary[]): void {
     for (const childId of this.experimentChildIds) {
-      this.experimentRail.remove(childId);
+      const child = this.experimentRail.getChildren().find((candidate) => candidate.id === childId);
+      if (child) {
+        this.experimentRail.remove(child);
+      }
     }
     this.experimentChildIds.clear();
 
@@ -947,7 +950,10 @@ function clearStatusRow(container: BoxRenderable): void {
     'status-row-gap-4',
     'status-row-session'
   ]) {
-    container.remove(id);
+    const child = container.getChildren().find((candidate) => candidate.id === id);
+    if (child) {
+      container.remove(child);
+    }
   }
 }
 

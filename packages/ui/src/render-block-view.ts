@@ -398,8 +398,8 @@ function estimateDiffHeight(diff: string): number {
 }
 
 export function clearChildren(container: BoxRenderable): void {
-  for (const childId of collectChildIds(container.id)) {
-    container.remove(childId);
+  for (const child of container.getChildren()) {
+    container.remove(child);
   }
 }
 
@@ -410,26 +410,4 @@ function clearBlockChildren(view: BlockView): void {
   view.markdown = undefined;
   view.diff = undefined;
   view.kind = undefined;
-}
-
-function collectChildIds(baseId: string): string[] {
-  return [
-    `${baseId}-user`,
-    `${baseId}-user-text`,
-    `${baseId}-assistant`,
-    `${baseId}-thinking`,
-    `${baseId}-diff-wrapper`,
-    `${baseId}-diff-title`,
-    `${baseId}-diff-shell`,
-    `${baseId}-diff`,
-    `${baseId}-tool-header-row`,
-    `${baseId}-tool-header-dot`,
-    `${baseId}-tool-header`,
-    `${baseId}-tool-body-row`,
-    `${baseId}-tool-body-gutter`,
-    `${baseId}-tool-body`,
-    `${baseId}-tool-footer-row`,
-    `${baseId}-tool-footer-gutter`,
-    `${baseId}-tool-footer`
-  ];
 }
