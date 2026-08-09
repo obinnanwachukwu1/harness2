@@ -9,7 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "next": "16.2.12",
+    "next": "16.3.0",
     "react": "19.2.4",
     "react-dom": "19.2.4"
   },
@@ -18,12 +18,13 @@
     "@types/react": "^19",
     "@types/react-dom": "^19",
     "eslint": "^9",
-    "eslint-config-next": "16.2.12",
+    "eslint-config-next": "16.3.0",
     "typescript": "^5"
   },
   "overrides": {
     "baseline-browser-mapping": "2.10.16",
-    "postcss": "8.5.18",
+    "nanoid": "3.3.17",
+    "postcss": "8.5.23",
     "sharp": "0.35.0"
   }
 }
