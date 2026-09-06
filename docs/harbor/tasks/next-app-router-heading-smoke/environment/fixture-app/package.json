@@ -22,6 +22,7 @@
     "typescript": "^5"
   },
   "overrides": {
+    "@humanfs/node": "0.16.8",
     "baseline-browser-mapping": "2.10.16",
     "nanoid": "3.3.18",
     "postcss": "8.5.23",
