@@ -20,8 +20,8 @@
     "typecheck:ui": "tsc -p packages/ui/tsconfig.json --noEmit"
   },
   "dependencies": {
-    "@ai-sdk/openai": "^3.0.51",
-    "ai": "^6.0.149",
+    "@ai-sdk/openai": "^3.0.77",
+    "ai": "^6.0.214",
     "diff": "^8.0.4",
     "execa": "^9.6.0",
     "smol-toml": "^1.8.0",
