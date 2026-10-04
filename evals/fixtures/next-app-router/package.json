@@ -9,7 +9,7 @@
     "lint": "eslint"
   },
   "dependencies": {
-    "next": "16.3.5",
+    "next": "16.3.8",
     "react": "19.2.4",
     "react-dom": "19.2.4"
   },
@@ -24,6 +24,8 @@
   "overrides": {
     "@humanfs/node": "0.16.8",
     "baseline-browser-mapping": "2.11.1",
+    "brace-expansion@<=1.1.20": "1.1.21",
+    "brace-expansion@>=4.0.0 <5.0.12": "5.0.12",
     "js-yaml": "4.3.2",
     "nanoid": "3.3.18",
     "postcss": "8.5.23",
